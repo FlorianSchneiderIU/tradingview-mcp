@@ -41,13 +41,22 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.backtest_turtle_soup import (
+    BFM_CHANNEL_FEATURE_COLUMNS,
+    BFM_LINE_FEATURE_COLUMNS,
     Config,
+    DEFAULT_BFM_ZONE_TF_SETS,
+    DEFAULT_BFM_ZONE_TIMEFRAMES,
     add_atr,
+    bfm_zone_feature_values,
     build_daily_context,
+    build_bfm_feature_projection,
     build_htf_bias_events,
     build_htf_sma_bias_events,
     fetch_klines,
     normalize_binance_spot_symbol,
+    parse_bfm_feature_tf_sets,
+    parse_bfm_feature_timeframes,
+    parse_bfm_feature_groups,
     parse_utc_datetime,
     run_backtest,
     summarize,
@@ -133,6 +142,14 @@ BASE_FEATURE_COLUMNS = [
     "zone_prob_x_ret1h_pullback",
 ]
 
+def trade_bfm_feature_columns_for_groups(raw: str | None) -> list[str]:
+    out: list[str] = []
+    for group in parse_bfm_feature_groups(raw):
+        columns = BFM_LINE_FEATURE_COLUMNS if group == "line" else BFM_CHANNEL_FEATURE_COLUMNS
+        out.extend(f"bfm_sweep_{column[4:]}" for column in columns)
+        out.extend(f"bfm_signal_{column[4:]}" for column in columns)
+    return out
+
 
 def symbol_feature_name(symbol: str) -> str:
     normalized = normalize_binance_spot_symbol(symbol).lower()
@@ -167,7 +184,16 @@ def symbol_job(params: dict[str, Any]) -> tuple[str, pd.DataFrame, list[Any], st
         min_entry_risk_pct=params["min_entry_risk_pct"],
         max_zone_scan=params["max_zone_scan"],
     )
-    feature_frame, trades = trade_feature_rows(symbol, df, cfg)
+    feature_frame, trades = trade_feature_rows(
+        symbol,
+        df,
+        cfg,
+        use_bfm_features=params["use_bfm_features"],
+        bfm_timeframes=params["bfm_timeframes"],
+        bfm_tf_sets=params["bfm_tf_sets"],
+        bfm_invalidation=params["bfm_invalidation"],
+        bfm_max_extension_bars=params["bfm_max_extension_bars"],
+    )
     normalized = normalize_binance_spot_symbol(symbol)
     return normalized, feature_frame, trades, f"{normalized}: {len(feature_frame)} trade rows"
 
@@ -320,8 +346,33 @@ def zone_key(symbol: str, direction: str, time_value: pd.Timestamp, top: float, 
     return f"{symbol}|{direction}|{pd.Timestamp(time_value).isoformat()}|{top:.8f}|{bottom:.8f}"
 
 
-def trade_feature_rows(symbol: str, df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[Any]]:
+def prefixed_bfm_values(prefix: str, values: dict[str, float]) -> dict[str, float]:
+    return {f"{prefix}_{key[4:]}": value for key, value in values.items() if key.startswith("bfm_")}
+
+
+def trade_feature_rows(
+    symbol: str,
+    df: pd.DataFrame,
+    cfg: Config,
+    *,
+    use_bfm_features: bool = False,
+    bfm_timeframes: str = DEFAULT_BFM_ZONE_TIMEFRAMES,
+    bfm_tf_sets: str = DEFAULT_BFM_ZONE_TF_SETS,
+    bfm_invalidation: str = "wick",
+    bfm_max_extension_bars: int = 300,
+) -> tuple[pd.DataFrame, list[Any]]:
     prepared = prepare_feature_df(df)
+    bfm_projection = None
+    if use_bfm_features:
+        parsed_bfm_timeframes = parse_bfm_feature_timeframes(bfm_timeframes)
+        parsed_bfm_tf_sets = parse_bfm_feature_tf_sets(bfm_tf_sets, parsed_bfm_timeframes)
+        bfm_projection = build_bfm_feature_projection(
+            prepared,
+            timeframes=parsed_bfm_timeframes,
+            tf_sets=parsed_bfm_tf_sets,
+            invalidation=bfm_invalidation,
+            max_extension_bars=bfm_max_extension_bars,
+        )
     trades = run_backtest(df, cfg)
     normalized = normalize_binance_spot_symbol(symbol)
 
@@ -386,7 +437,7 @@ def trade_feature_rows(symbol: str, df: pd.DataFrame, cfg: Config) -> tuple[pd.D
             value = prepared.iloc[signal_idx][column]
             return sign * float(value) if pd.notna(value) else math.nan
 
-        rows.append({
+        row = {
             "symbol": normalized,
             "entry_time": trade.entry_time,
             "exit_time": trade.exit_time,
@@ -447,7 +498,43 @@ def trade_feature_rows(symbol: str, df: pd.DataFrame, cfg: Config) -> tuple[pd.D
             "dow_sin": math.sin(2.0 * math.pi * dow / 7.0),
             "dow_cos": math.cos(2.0 * math.pi * dow / 7.0),
             "zone_hold_prob": 0.5,
-        })
+        }
+        if bfm_projection is not None:
+            zone = {
+                "top": trade.zone_top,
+                "bottom": trade.zone_bottom,
+            }
+            row.update(
+                prefixed_bfm_values(
+                    "bfm_sweep",
+                    bfm_zone_feature_values(
+                        projection=bfm_projection,
+                        direction=trade.direction,
+                        zone=zone,
+                        index=sweep_idx,
+                        atr=atr_sweep,
+                        close=closes[sweep_idx],
+                        high=highs[sweep_idx],
+                        low=lows[sweep_idx],
+                    ),
+                )
+            )
+            row.update(
+                prefixed_bfm_values(
+                    "bfm_signal",
+                    bfm_zone_feature_values(
+                        projection=bfm_projection,
+                        direction=trade.direction,
+                        zone=zone,
+                        index=signal_idx,
+                        atr=atr_signal,
+                        close=closes[signal_idx],
+                        high=highs[signal_idx],
+                        low=lows[signal_idx],
+                    ),
+                )
+            )
+        rows.append(row)
 
     return pd.DataFrame(rows), trades
 
@@ -549,6 +636,12 @@ def main() -> None:
     parser.add_argument("--use-tf2", action="store_true")
     parser.add_argument("--dead-zone", action="store_true")
     parser.add_argument("--max-zone-scan", type=int, default=0)
+    parser.add_argument("--use-bfm-features", action="store_true", help="Add BFM trendline confluence at sweep and signal time.")
+    parser.add_argument("--bfm-feature-groups", default="line,channel", help="Comma-separated BFM feature groups: line, channel, or all.")
+    parser.add_argument("--bfm-timeframes", default=DEFAULT_BFM_ZONE_TIMEFRAMES)
+    parser.add_argument("--bfm-tf-sets", default=DEFAULT_BFM_ZONE_TF_SETS)
+    parser.add_argument("--bfm-invalidation", choices=["wick", "close", "none"], default="wick")
+    parser.add_argument("--bfm-max-extension-bars", type=int, default=300)
     parser.add_argument("--no-symbol-dummies", action="store_true", help="Disable per-symbol dummy features.")
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
@@ -575,6 +668,12 @@ def main() -> None:
             "dead_zone": args.dead_zone,
             "min_entry_risk_pct": args.min_entry_risk_pct,
             "max_zone_scan": args.max_zone_scan,
+            "use_bfm_features": args.use_bfm_features,
+            "bfm_feature_groups": args.bfm_feature_groups,
+            "bfm_timeframes": args.bfm_timeframes,
+            "bfm_tf_sets": args.bfm_tf_sets,
+            "bfm_invalidation": args.bfm_invalidation,
+            "bfm_max_extension_bars": args.bfm_max_extension_bars,
         }
         for symbol in args.symbols
     ]
@@ -612,6 +711,8 @@ def main() -> None:
     if args.zone_hold_pre_filter > 0:
         dataset = dataset[dataset["zone_hold_prob"] >= args.zone_hold_pre_filter].copy()
     feature_columns = list(BASE_FEATURE_COLUMNS)
+    if args.use_bfm_features:
+        feature_columns.extend(trade_bfm_feature_columns_for_groups(args.bfm_feature_groups))
     if not args.no_symbol_dummies:
         dataset, symbol_columns = add_symbol_dummy_features(dataset)
         feature_columns.extend(symbol_columns)

@@ -11,6 +11,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.backtest_turtle_soup import (
+    DEFAULT_BFM_ZONE_TF_SETS,
+    DEFAULT_BFM_ZONE_TIMEFRAMES,
+    bfm_feature_columns_for_groups,
+)
 from scripts.ml_zone_hold_filter import FEATURE_COLUMNS, classifier_metrics, fit_sklearn_model
 
 
@@ -20,6 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-out", type=Path, default=Path("scripts/zone_hold_model_majors20_1h_live.joblib"))
     parser.add_argument("--model", choices=["sklearn_rf", "sklearn_hgb"], default="sklearn_rf")
     parser.add_argument("--zone-tf", default="1h")
+    parser.add_argument("--use-bfm-features", action="store_true")
+    parser.add_argument("--bfm-feature-groups", default="line,channel")
+    parser.add_argument("--bfm-timeframes", default=DEFAULT_BFM_ZONE_TIMEFRAMES)
+    parser.add_argument("--bfm-tf-sets", default=DEFAULT_BFM_ZONE_TF_SETS)
+    parser.add_argument("--bfm-invalidation", choices=["wick", "close", "none"], default="wick")
+    parser.add_argument("--bfm-max-extension-bars", type=int, default=300)
     parser.add_argument("--start")
     parser.add_argument("--end")
     return parser.parse_args()
@@ -39,18 +50,19 @@ def main() -> None:
         dataset = dataset[dataset["time"] < pd.Timestamp(args.end, tz="UTC")]
     dataset = dataset.dropna(subset=["hold_label"]).copy()
 
-    missing = [column for column in FEATURE_COLUMNS if column not in dataset.columns]
+    feature_columns = FEATURE_COLUMNS + bfm_feature_columns_for_groups(args.bfm_feature_groups) if args.use_bfm_features else FEATURE_COLUMNS
+    missing = [column for column in feature_columns if column not in dataset.columns]
     if missing:
         raise SystemExit(f"Dataset is missing feature columns: {missing}")
     if dataset["hold_label"].nunique() < 2:
         raise SystemExit("Training set only has one label class.")
 
-    model = fit_sklearn_model(dataset, FEATURE_COLUMNS, args.model)
-    dataset["hold_prob"] = model.predict_proba(dataset[FEATURE_COLUMNS].astype(float))[:, 1]
+    model = fit_sklearn_model(dataset, feature_columns, args.model)
+    dataset["hold_prob"] = model.predict_proba(dataset[feature_columns].astype(float))[:, 1]
 
     payload = {
         "model": model,
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": feature_columns,
         "model_kind": args.model,
         "zone_tf": args.zone_tf,
         "source_dataset": str(args.dataset),
@@ -59,6 +71,14 @@ def main() -> None:
         "rows": int(len(dataset)),
         "symbols": sorted(str(symbol) for symbol in dataset["symbol"].dropna().unique()),
     }
+    if args.use_bfm_features:
+        payload["bfm_feature_config"] = {
+            "timeframes": args.bfm_timeframes,
+            "tf_sets": args.bfm_tf_sets,
+            "feature_groups": args.bfm_feature_groups,
+            "invalidation": args.bfm_invalidation,
+            "max_extension_bars": int(args.bfm_max_extension_bars),
+        }
     args.model_out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(payload, args.model_out)
 

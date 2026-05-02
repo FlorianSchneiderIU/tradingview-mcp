@@ -6,7 +6,7 @@ import json
 import math
 import statistics
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -168,6 +168,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--trades-csv", type=Path, default=None)
     parser.add_argument("--signals-csv", type=Path, default=None)
+    parser.add_argument("--symbol", default=None, help="Optional symbol override for plotting non-config symbols.")
+    parser.add_argument(
+        "--overlay-trades-csv",
+        type=Path,
+        default=None,
+        help="Optional trades CSV to overlay all plotted-symbol trades with entry/SL/TP markers.",
+    )
+    parser.add_argument(
+        "--overlay-max-trades",
+        type=int,
+        default=0,
+        help="Maximum overlay trades after filtering to the plotted symbol/window. 0 means no cap.",
+    )
     parser.add_argument(
         "--trade-number",
         type=int,
@@ -286,6 +299,47 @@ def load_trade_context(args: argparse.Namespace, config: ZoneChannelProductionCo
         family=matched_family,
         side=matched_side,
     )
+
+
+def load_overlay_trades(args: argparse.Namespace, symbol: str) -> pd.DataFrame:
+    if args.overlay_trades_csv is None:
+        return pd.DataFrame()
+    trades = pd.read_csv(args.overlay_trades_csv)
+    if trades.empty:
+        return trades
+    out = trades.copy()
+    if "symbol" in out.columns:
+        out = out[out["symbol"].astype(str).str.upper() == str(symbol).upper()].copy()
+    for column in ["event_time", "entry_time", "exit_time", "label_end_time"]:
+        if column in out.columns:
+            out[column] = pd.to_datetime(out[column], utc=True, errors="coerce")
+    if "entry_time" not in out.columns:
+        raise ValueError(f"{args.overlay_trades_csv} must contain an entry_time column.")
+    out = out.dropna(subset=["entry_time"]).copy()
+    if "exit_time" not in out.columns:
+        out["exit_time"] = pd.NaT
+    if "label_end_time" in out.columns:
+        out["exit_time"] = out["exit_time"].fillna(out["label_end_time"])
+    start = parse_plot_timestamp(args.start)
+    end = parse_plot_timestamp(args.end, is_end=True)
+    exit_for_filter = out["exit_time"].fillna(out["entry_time"])
+    out = out[(out["entry_time"] <= end) & (exit_for_filter >= start)].copy()
+    out = out.sort_values("entry_time").reset_index(drop=True)
+    out["overlay_trade_number"] = range(1, len(out) + 1)
+    if args.overlay_max_trades and args.overlay_max_trades > 0:
+        out = out.head(int(args.overlay_max_trades)).copy()
+    return out
+
+
+def parse_plot_timestamp(value: Any, *, is_end: bool = False) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    if is_end and isinstance(value, str) and len(value.strip()) == 10:
+        timestamp = timestamp + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
+    return timestamp
 
 
 def resolve_timeframe_and_family(
@@ -975,6 +1029,7 @@ def render_html_plot(
     timeframe: str,
     family: str,
     trade_context: TradeContext | None,
+    overlay_trades: pd.DataFrame,
     scale_mode: str,
     plotly_js: str,
     line_mode: str,
@@ -985,6 +1040,7 @@ def render_html_plot(
     bar_indices = pd.to_numeric(bars["bar_index"], errors="coerce").to_list()
     closes = [_json_number(value) for value in pd.to_numeric(bars["close"], errors="coerce").to_list()]
     price_low, price_high = price_scale(bars, segments, bar_indices, scale_mode)
+    price_low, price_high = expand_price_scale_for_trades(price_low, price_high, trade_context, overlay_trades)
 
     upper_x, upper_y, upper_text = _segment_line_arrays(segments, bars, bar_indices, side="upper", line_mode=line_mode)
     lower_x, lower_y, lower_text = _segment_line_arrays(segments, bars, bar_indices, side="lower", line_mode=line_mode)
@@ -1061,6 +1117,8 @@ def render_html_plot(
         },
     ]
     traces.extend(point_traces)
+    overlay_trace_list, overlay_summary = _html_trade_trace_overlays(overlay_trades)
+    traces.extend(overlay_trace_list)
 
     shapes, annotations, trade_summary = _html_trade_overlays(
         trade_context=trade_context,
@@ -1069,6 +1127,7 @@ def render_html_plot(
         price_high=price_high,
         segments=segments,
     )
+    trade_summary = combine_summaries(trade_summary, overlay_summary)
     title = f"{config.symbol} {timeframe} {family} channel history"
     subtitle = (
         f"{times[0].date()} to {times[-1].date()} | {len(bars):,} bars | "
@@ -1159,6 +1218,7 @@ def render_bfm_html_plot(
     config: ZoneChannelProductionConfig,
     timeframe: str,
     trade_context: TradeContext | None,
+    overlay_trades: pd.DataFrame,
     pivot_sets: list[tuple[int, int]],
     invalidation: str,
     max_extension_bars: int,
@@ -1169,6 +1229,7 @@ def render_bfm_html_plot(
     times = [pd.Timestamp(value).tz_convert("UTC") for value in pd.to_datetime(bars["close_time"], utc=True, errors="coerce")]
     x_values = [_iso(value) for value in times]
     price_low, price_high = price_scale(bars, [], pd.to_numeric(bars["bar_index"], errors="coerce").to_list(), scale_mode)
+    price_low, price_high = expand_price_scale_for_trades(price_low, price_high, trade_context, overlay_trades)
 
     traces: list[dict[str, Any]] = [
         {
@@ -1187,6 +1248,8 @@ def render_bfm_html_plot(
     ]
     traces.extend(_bfm_line_traces(lines, bars))
     traces.extend(_bfm_pivot_traces(pivots))
+    overlay_trace_list, overlay_summary = _html_trade_trace_overlays(overlay_trades)
+    traces.extend(overlay_trace_list)
 
     shapes, annotations, trade_summary = _html_trade_overlays(
         trade_context=trade_context,
@@ -1195,6 +1258,7 @@ def render_bfm_html_plot(
         price_high=price_high,
         segments=[],
     )
+    trade_summary = combine_summaries(trade_summary, overlay_summary)
     title = f"{config.symbol} {timeframe} BFM Magic Trendlines"
     set_text = bfm_set_text(pivot_sets)
     subtitle = (
@@ -1267,6 +1331,7 @@ def render_bfm_multitimeframe_html_plot(
     config: ZoneChannelProductionConfig,
     base_timeframe: str,
     trade_context: TradeContext | None,
+    overlay_trades: pd.DataFrame,
     pivot_sets: list[tuple[int, int]],
     invalidation: str,
     max_extension_bars: int,
@@ -1277,6 +1342,7 @@ def render_bfm_multitimeframe_html_plot(
     times = [pd.Timestamp(value).tz_convert("UTC") for value in pd.to_datetime(base_bars["close_time"], utc=True, errors="coerce")]
     x_values = [_iso(value) for value in times]
     price_low, price_high = price_scale(base_bars, [], pd.to_numeric(base_bars["bar_index"], errors="coerce").to_list(), scale_mode)
+    price_low, price_high = expand_price_scale_for_trades(price_low, price_high, trade_context, overlay_trades)
 
     traces: list[dict[str, Any]] = [
         {
@@ -1297,6 +1363,8 @@ def render_bfm_multitimeframe_html_plot(
         traces.extend(_bfm_line_traces(result.lines, result.bars, timeframe=result.timeframe))
     for result in results:
         traces.extend(_bfm_pivot_traces(result.pivots, timeframe=result.timeframe))
+    overlay_trace_list, overlay_summary = _html_trade_trace_overlays(overlay_trades)
+    traces.extend(overlay_trace_list)
 
     shapes, annotations, trade_summary = _html_trade_overlays(
         trade_context=trade_context,
@@ -1305,6 +1373,7 @@ def render_bfm_multitimeframe_html_plot(
         price_high=price_high,
         segments=[],
     )
+    trade_summary = combine_summaries(trade_summary, overlay_summary)
     title = f"{config.symbol} multi-timeframe BFM Magic Trendlines"
     set_text = bfm_result_set_text(results)
     tf_text = ", ".join(
@@ -1786,6 +1855,340 @@ def _html_trade_overlays(
     return shapes, annotations, trade_summary
 
 
+def _html_trade_trace_overlays(trades: pd.DataFrame) -> tuple[list[dict[str, Any]], str]:
+    if trades is None or trades.empty:
+        return [], ""
+    frame = trades.copy()
+    for column in ["event_time", "entry_time", "exit_time", "label_end_time"]:
+        if column in frame.columns:
+            frame[column] = pd.to_datetime(frame[column], utc=True, errors="coerce")
+    frame = frame.dropna(subset=["entry_time"]).sort_values("entry_time").reset_index(drop=True)
+    if frame.empty:
+        return [], ""
+
+    traces: list[dict[str, Any]] = []
+    traces.extend(_trade_box_traces(frame))
+    if len(frame) <= 2_000:
+        liquidity_trace = _trade_liquidity_level_trace(frame)
+        if liquidity_trace is not None:
+            traces.append(liquidity_trace)
+        traces.extend(_trade_level_line_traces(frame))
+    traces.extend(_trade_entry_marker_traces(frame))
+    penetration_trace = _trade_penetration_trace(frame)
+    if penetration_trace is not None:
+        traces.append(penetration_trace)
+
+    net_r = pd.to_numeric(frame.get("r_multiple_net", pd.Series(dtype=float)), errors="coerce")
+    wins = net_r[net_r > 0.0]
+    losses = net_r[net_r <= 0.0]
+    gross_profit = float(wins.sum()) if len(wins) else 0.0
+    gross_loss = abs(float(losses.sum())) if len(losses) else 0.0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf") if gross_profit > 0 else 0.0
+    directions = frame.get("direction", pd.Series(dtype=str)).astype(str).str.lower()
+    long_count = int((directions == "long").sum())
+    short_count = int((directions == "short").sum())
+    win_rate = float((net_r > 0.0).mean()) if len(net_r.dropna()) else 0.0
+    summary = (
+        f"Overlay trades: {len(frame):,} total ({long_count} long / {short_count} short), "
+        f"net {float(net_r.sum()):+.2f}R, win {win_rate:.1%}, PF {profit_factor:.2f}"
+    )
+    return traces, summary
+
+
+def _trade_box_traces(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    reward_x: list[str | None] = []
+    reward_y: list[float | None] = []
+    risk_x: list[str | None] = []
+    risk_y: list[float | None] = []
+    for _, row in frame.iterrows():
+        entry = first_safe_float(row, ["entry_price"])
+        stop = first_safe_float(row, ["stop_price", "sl_price", "stop_loss_price"])
+        target = first_safe_float(row, ["target_price", "take_profit_price", "expected_tp"])
+        if entry is None or stop is None or target is None:
+            continue
+        x0, x1 = trade_span_times(row)
+        reward_lo, reward_hi = sorted([entry, target])
+        risk_lo, risk_hi = sorted([entry, stop])
+        reward_x.extend([x0, x1, x1, x0, x0, None])
+        reward_y.extend([reward_lo, reward_lo, reward_hi, reward_hi, reward_lo, None])
+        risk_x.extend([x0, x1, x1, x0, x0, None])
+        risk_y.extend([risk_lo, risk_lo, risk_hi, risk_hi, risk_lo, None])
+    traces: list[dict[str, Any]] = []
+    if risk_x:
+        traces.append(
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "name": "Risk boxes (entry to SL)",
+                "x": risk_x,
+                "y": risk_y,
+                "fill": "toself",
+                "fillcolor": "rgba(220,38,38,0.16)",
+                "line": {"color": "rgba(220,38,38,0.36)", "width": 0.7},
+                "hoverinfo": "skip",
+                "xaxis": "x",
+                "yaxis": "y",
+            }
+        )
+    if reward_x:
+        traces.append(
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "name": "Reward boxes (entry to TP)",
+                "x": reward_x,
+                "y": reward_y,
+                "fill": "toself",
+                "fillcolor": "rgba(22,163,74,0.13)",
+                "line": {"color": "rgba(22,163,74,0.34)", "width": 0.7},
+                "hoverinfo": "skip",
+                "xaxis": "x",
+                "yaxis": "y",
+            }
+        )
+    return traces
+
+
+def _trade_liquidity_level_trace(frame: pd.DataFrame) -> dict[str, Any] | None:
+    xs: list[str | None] = []
+    ys: list[float | None] = []
+    texts: list[str | None] = []
+    for _, row in frame.iterrows():
+        level = first_safe_float(row, ["horizontal_level", "liquidity_level"])
+        if level is None:
+            continue
+        raw_start = row.get("event_time", row.get("entry_time"))
+        if pd.isna(raw_start):
+            continue
+        x0 = _iso(pd.Timestamp(raw_start).tz_convert("UTC"))
+        _, x1 = trade_span_times(row)
+        side = str(row.get("horizontal_side", "") or row.get("direction", ""))
+        tf = str(row.get("horizontal_tf", "") or row.get("zone_tf", ""))
+        text = trade_hover_text(row) + f"<br>swept {tf} {side} {level:,.6g}"
+        xs.extend([x0, x1, None])
+        ys.extend([level, level, None])
+        texts.extend([text, text, None])
+    if not xs:
+        return None
+    return {
+        "type": "scattergl",
+        "mode": "lines",
+        "name": "Swept horizontal S/R",
+        "x": xs,
+        "y": ys,
+        "text": texts,
+        "line": {"color": "rgba(124,58,237,0.82)", "width": 1.7, "dash": "dash"},
+        "hovertemplate": "%{text}<extra></extra>",
+        "xaxis": "x",
+        "yaxis": "y",
+    }
+
+
+def _trade_level_line_traces(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    traces: list[dict[str, Any]] = []
+    for label, keys, color, dash, width in [
+        ("Trade entry", ["entry_price"], "rgba(17,24,39,0.78)", "solid", 1.3),
+        ("Trade TP", ["target_price", "take_profit_price", "expected_tp"], "rgba(25,135,84,0.78)", "dot", 1.6),
+        ("Trade SL", ["stop_price", "sl_price", "stop_loss_price"], "rgba(171,28,51,0.78)", "dash", 1.6),
+    ]:
+        xs: list[str | None] = []
+        ys: list[float | None] = []
+        texts: list[str | None] = []
+        for _, row in frame.iterrows():
+            price = first_safe_float(row, keys)
+            if price is None:
+                continue
+            x0, x1 = trade_span_times(row)
+            text = trade_hover_text(row)
+            xs.extend([x0, x1, None])
+            ys.extend([price, price, None])
+            texts.extend([f"{text}<br>{label} {price:,.6g}", f"{text}<br>{label} {price:,.6g}", None])
+        if xs:
+            traces.append(
+                {
+                    "type": "scattergl",
+                    "mode": "lines",
+                    "name": label,
+                    "x": xs,
+                    "y": ys,
+                    "text": texts,
+                    "line": {"color": color, "width": width, "dash": dash},
+                    "hovertemplate": "%{text}<extra></extra>",
+                    "xaxis": "x",
+                    "yaxis": "y",
+                }
+            )
+    return traces
+
+
+def _trade_entry_marker_traces(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    traces: list[dict[str, Any]] = []
+    direction_series = (
+        frame["direction"].astype(str).str.lower()
+        if "direction" in frame.columns
+        else pd.Series([""] * len(frame), index=frame.index)
+    )
+    for direction, symbol, color in [
+        ("long", "triangle-up", "rgba(13,148,136,0.95)"),
+        ("short", "triangle-down", "rgba(194,65,12,0.95)"),
+    ]:
+        subset = frame[direction_series == direction].copy()
+        if subset.empty:
+            continue
+        y_values = [first_safe_float(row, ["entry_price"]) for _, row in subset.iterrows()]
+        valid_rows = [(row, y) for (_, row), y in zip(subset.iterrows(), y_values) if y is not None]
+        if not valid_rows:
+            continue
+        traces.append(
+            {
+                "type": "scattergl",
+                "mode": "markers",
+                "name": f"{direction.title()} entries",
+                "x": [_iso(pd.Timestamp(row["entry_time"]).tz_convert("UTC")) for row, _ in valid_rows],
+                "y": [float(y) for _, y in valid_rows],
+                "text": [trade_hover_text(row) for row, _ in valid_rows],
+                "marker": {
+                    "size": 11,
+                    "symbol": symbol,
+                    "color": color,
+                    "line": {"color": "rgba(255,255,255,0.95)", "width": 1},
+                },
+                "hovertemplate": "%{text}<extra></extra>",
+                "xaxis": "x",
+                "yaxis": "y",
+            }
+        )
+    return traces
+
+
+def _trade_penetration_trace(frame: pd.DataFrame) -> dict[str, Any] | None:
+    if "penetration_price" not in frame.columns:
+        return None
+    rows: list[tuple[pd.Series, float, pd.Timestamp]] = []
+    for _, row in frame.iterrows():
+        price = first_safe_float(row, ["penetration_price"])
+        raw_time = row.get("event_time", row.get("entry_time"))
+        if price is None or pd.isna(raw_time):
+            continue
+        rows.append((row, price, pd.Timestamp(raw_time).tz_convert("UTC")))
+    if not rows:
+        return None
+    return {
+        "type": "scattergl",
+        "mode": "markers",
+        "name": "Penetration wick",
+        "x": [_iso(time) for _, _, time in rows],
+        "y": [price for _, price, _ in rows],
+        "text": [trade_hover_text(row) + f"<br>penetration wick {price:,.6g}" for row, price, _ in rows],
+        "marker": {
+            "size": 7,
+            "symbol": "x",
+            "color": "rgba(75,85,99,0.72)",
+        },
+        "hovertemplate": "%{text}<extra></extra>",
+        "xaxis": "x",
+        "yaxis": "y",
+    }
+
+
+def first_safe_float(row: pd.Series, keys: list[str]) -> float | None:
+    for key in keys:
+        if key in row.index:
+            value = safe_float(row.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def trade_span_times(row: pd.Series) -> tuple[str, str]:
+    entry_time = pd.Timestamp(row["entry_time"]).tz_convert("UTC")
+    raw_end = row.get("exit_time")
+    if pd.isna(raw_end):
+        raw_end = row.get("label_end_time")
+    if pd.isna(raw_end):
+        hold_bars = safe_float(row.get("max_hold_bars")) or safe_float(row.get("hold_bars")) or 12.0
+        raw_end = entry_time + pd.Timedelta(minutes=5 * max(1.0, float(hold_bars)))
+    end_time = pd.Timestamp(raw_end).tz_convert("UTC")
+    if end_time <= entry_time:
+        end_time = entry_time + pd.Timedelta(minutes=5)
+    return _iso(entry_time), _iso(end_time)
+
+
+def trade_hover_text(row: pd.Series) -> str:
+    number = int(safe_float(row.get("overlay_trade_number")) or 0)
+    symbol = str(row.get("symbol", ""))
+    direction = str(row.get("direction", "")).upper()
+    entry_time = pd.Timestamp(row.get("entry_time")).tz_convert("UTC")
+    entry = first_safe_float(row, ["entry_price"])
+    stop = first_safe_float(row, ["stop_price", "sl_price", "stop_loss_price"])
+    target = first_safe_float(row, ["target_price", "take_profit_price", "expected_tp"])
+    net_r = safe_float(row.get("r_multiple_net"))
+    prob = safe_float(row.get("ml_prob"))
+    channel = str(row.get("channel_tf", ""))
+    trigger = str(row.get("trigger_family", row.get("entry_strategy", "")))
+    lines = [
+        f"Trade {number:03d} {symbol} {direction}",
+        f"entry {entry_time:%Y-%m-%d %H:%M UTC}",
+    ]
+    if entry is not None:
+        lines.append(f"E {entry:,.6g}")
+    if stop is not None:
+        lines.append(f"SL {stop:,.6g}")
+    if target is not None:
+        lines.append(f"TP {target:,.6g}")
+    if net_r is not None:
+        lines.append(f"net {net_r:+.2f}R")
+    if prob is not None:
+        lines.append(f"ML p {prob:.3f}")
+    if channel:
+        lines.append(f"channel {channel} S{row.get('channel_set', '')}")
+    if trigger:
+        lines.append(f"trigger {trigger}")
+    if "stop_lookback_bars" in row.index:
+        lines.append(f"stop lookback {row.get('stop_lookback_bars')} x 5m")
+    return "<br>".join(lines)
+
+
+def expand_price_scale_for_trades(
+    price_low: float,
+    price_high: float,
+    trade_context: TradeContext | None,
+    overlay_trades: pd.DataFrame,
+) -> tuple[float, float]:
+    values = [price_low, price_high]
+    if trade_context is not None:
+        for key in ["entry_price", "target_price", "stop_price", "penetration_price"]:
+            value = safe_float(trade_context.row.get(key))
+            if value is not None:
+                values.append(value)
+    if overlay_trades is not None and not overlay_trades.empty:
+        for key in [
+            "entry_price",
+            "target_price",
+            "take_profit_price",
+            "expected_tp",
+            "stop_price",
+            "sl_price",
+            "stop_loss_price",
+            "penetration_price",
+        ]:
+            if key in overlay_trades.columns:
+                values.extend(pd.to_numeric(overlay_trades[key], errors="coerce").dropna().astype(float).to_list())
+    finite = [float(value) for value in values if math.isfinite(float(value))]
+    if not finite:
+        return price_low, price_high
+    low = min(finite)
+    high = max(finite)
+    if high <= low:
+        high = low + 1.0
+    pad = (high - low) * 0.055
+    return low - pad, high + pad
+
+
+def combine_summaries(*parts: str) -> str:
+    return " | ".join(part for part in parts if part)
+
+
 def _plotly_html_document(
     *,
     plot_payload: dict[str, Any],
@@ -2185,7 +2588,10 @@ def resolve_output_format(args: argparse.Namespace) -> str:
 def main() -> None:
     args = parse_args()
     config = load_production_config(args.config)
+    if args.symbol:
+        config = replace(config, symbol=str(args.symbol).upper())
     trade_context = load_trade_context(args, config)
+    overlay_trades = load_overlay_trades(args, config.symbol)
     timeframe, family = resolve_timeframe_and_family(args, config, trade_context)
     output_format = resolve_output_format(args)
     output = args.output or (
@@ -2230,6 +2636,7 @@ def main() -> None:
                 config=config,
                 timeframe=result.timeframe,
                 trade_context=trade_context,
+                overlay_trades=overlay_trades,
                 pivot_sets=list(result.pivot_sets),
                 invalidation=args.bfm_invalidation,
                 max_extension_bars=args.bfm_max_extension_bars,
@@ -2238,6 +2645,8 @@ def main() -> None:
             )
             print(f"Saved BFM Magic Trendlines html to {output}")
             print(f"{result.timeframe} BFM: {len(result.bars):,} bars, {len(result.pivots):,} pivots, {len(result.lines):,} trendlines")
+            if not overlay_trades.empty:
+                print(f"Overlay trades: {len(overlay_trades):,} {config.symbol} rows from {args.overlay_trades_csv}")
         else:
             render_bfm_multitimeframe_html_plot(
                 output=output,
@@ -2246,6 +2655,7 @@ def main() -> None:
                 config=config,
                 base_timeframe=timeframe,
                 trade_context=trade_context,
+                overlay_trades=overlay_trades,
                 pivot_sets=pivot_sets,
                 invalidation=args.bfm_invalidation,
                 max_extension_bars=args.bfm_max_extension_bars,
@@ -2255,6 +2665,8 @@ def main() -> None:
             print(f"Saved multi-timeframe BFM Magic Trendlines html to {output}")
             for result in results:
                 print(f"{result.timeframe} BFM: {len(result.bars):,} bars, {len(result.pivots):,} pivots, {len(result.lines):,} trendlines")
+            if not overlay_trades.empty:
+                print(f"Overlay trades: {len(overlay_trades):,} {config.symbol} rows from {args.overlay_trades_csv}")
         return
 
     segments = build_channel_segments(bars, config, timeframe, family)
@@ -2272,6 +2684,7 @@ def main() -> None:
             timeframe=timeframe,
             family=family,
             trade_context=trade_context,
+            overlay_trades=overlay_trades,
             scale_mode=args.scale_mode,
             plotly_js=args.plotly_js,
             line_mode=args.line_mode,
@@ -2291,6 +2704,8 @@ def main() -> None:
         )
 
     print(f"Saved channel history {output_format} to {output}")
+    if not overlay_trades.empty:
+        print(f"Overlay trades: {len(overlay_trades):,} {config.symbol} rows from {args.overlay_trades_csv}")
     if segments_output is not None:
         print(f"Saved channel definition segments to {segments_output}")
     if trade_context is not None:

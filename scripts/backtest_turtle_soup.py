@@ -7,6 +7,7 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -40,6 +41,53 @@ TIMEFRAME_ALIASES = {
     "1D": "1d",
     "1W": "1w",
 }
+
+BFM_LINE_FEATURE_COLUMNS = [
+    "bfm_same_entry_gap_atr",
+    "bfm_same_mid_gap_atr",
+    "bfm_same_wick_gap_atr",
+    "bfm_same_signed_entry_gap_atr",
+    "bfm_same_inside_zone",
+    "bfm_same_near_0_5atr",
+    "bfm_same_near_1_0atr",
+    "bfm_same_tf_minutes",
+    "bfm_same_set",
+    "bfm_opp_entry_dist_atr",
+    "bfm_opp_close_dist_atr",
+    "bfm_opp_tf_minutes",
+    "bfm_opp_set",
+]
+BFM_CHANNEL_FEATURE_TIMEFRAMES = ("1h", "4h", "1d")
+BFM_CHANNEL_FEATURE_NAMES = (
+    "channel_available",
+    "channel_pos",
+    "channel_pos_clipped",
+    "channel_above",
+    "channel_below",
+    "channel_width_atr",
+    "upper_slope_atr",
+    "lower_slope_atr",
+    "width_slope_atr",
+    "trend_slope_atr",
+    "widening",
+    "closing",
+    "parallel",
+    "trend_up",
+    "trend_down",
+    "trend_aligned",
+)
+BFM_CHANNEL_FEATURE_COLUMNS = [
+    f"bfm_{timeframe}_{name}"
+    for timeframe in BFM_CHANNEL_FEATURE_TIMEFRAMES
+    for name in BFM_CHANNEL_FEATURE_NAMES
+]
+BFM_ZONE_FEATURE_COLUMNS = BFM_LINE_FEATURE_COLUMNS + BFM_CHANNEL_FEATURE_COLUMNS
+DEFAULT_BFM_ZONE_TIMEFRAMES = "1h,4h,1d"
+DEFAULT_BFM_ZONE_TF_SETS = (
+    "1h=330:220,264:176,211:141,169:112;"
+    "4h=180:120,144:96,115:77,92:61;"
+    "1d=105:70,84:56,67:45,54:36"
+)
 
 
 def normalize_binance_spot_symbol(symbol: str) -> str:
@@ -174,6 +222,10 @@ class Config:
     zone_hold_label_horizon_bars: int = 288
     zone_hold_mbq_ob_lookback_bars: int = 200
     zone_hold_mbq_confluence_atr: float = 0.50
+    zone_hold_bfm_timeframes: str = DEFAULT_BFM_ZONE_TIMEFRAMES
+    zone_hold_bfm_tf_sets: str = DEFAULT_BFM_ZONE_TF_SETS
+    zone_hold_bfm_invalidation: str = "wick"
+    zone_hold_bfm_max_extension_bars: int = 300
 
 
 _ZONE_HOLD_MODEL_CACHE: dict[str, dict] = {}
@@ -567,6 +619,398 @@ def predict_zone_hold_probability(model_payload: dict, feature_row: dict) -> flo
     return float(prob)
 
 
+@dataclass(frozen=True)
+class BfmLineRecord:
+    side: str
+    timeframe: str
+    tf_minutes: float
+    set_number: int
+    start_exec_index: int
+    end_exec_index: int
+    exec_slope: float
+    exec_intercept: float
+
+    def evaluate(self, index: int) -> float:
+        return float(self.exec_slope * index + self.exec_intercept)
+
+
+@dataclass(frozen=True)
+class BfmFeatureProjection:
+    timeframes: tuple[str, ...]
+    records: tuple[BfmLineRecord, ...]
+
+
+def zone_hold_model_requires_bfm(model_payload: dict | None) -> bool:
+    if model_payload is None:
+        return False
+    columns = set(model_payload.get("feature_columns", []))
+    return any(column in columns for column in BFM_ZONE_FEATURE_COLUMNS)
+
+
+def _parse_bfm_sets(raw: str) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for chunk in str(raw).split(","):
+        text = chunk.strip()
+        if not text:
+            continue
+        if ":" not in text:
+            raise ValueError(f"Invalid BFM pivot set {text!r}; expected left:right.")
+        left_raw, right_raw = text.split(":", 1)
+        left = int(left_raw)
+        right = int(right_raw)
+        if left <= 0 or right <= 0:
+            raise ValueError(f"Invalid BFM pivot set {text!r}; left/right must be positive.")
+        out.append((left, right))
+    if not out:
+        raise ValueError("At least one BFM pivot set is required.")
+    return out
+
+
+def parse_bfm_feature_timeframes(raw: str | None) -> list[str]:
+    if raw is None or not str(raw).strip():
+        raw = DEFAULT_BFM_ZONE_TIMEFRAMES
+    out: list[str] = []
+    for chunk in str(raw).split(","):
+        text = chunk.strip()
+        if not text:
+            continue
+        timeframe = normalize_timeframe(text)
+        if timeframe not in out:
+            out.append(timeframe)
+    return out or [normalize_timeframe("1h")]
+
+
+def parse_bfm_feature_tf_sets(raw: str | None, timeframes: list[str]) -> dict[str, list[tuple[int, int]]]:
+    default_sets = _parse_bfm_sets("300:200,240:160,192:128,154:102")
+    out = {timeframe: list(default_sets) for timeframe in timeframes}
+    text = str(raw or DEFAULT_BFM_ZONE_TF_SETS).strip()
+    if not text:
+        return out
+    if "=" not in text:
+        sets = _parse_bfm_sets(text)
+        return {timeframe: list(sets) for timeframe in timeframes}
+    for chunk in text.split(";"):
+        piece = chunk.strip()
+        if not piece:
+            continue
+        if "=" not in piece:
+            raise ValueError(f"Invalid BFM timeframe set {piece!r}; expected timeframe=left:right,...")
+        timeframe_raw, sets_raw = piece.split("=", 1)
+        timeframe = normalize_timeframe(timeframe_raw.strip())
+        if timeframe in out:
+            out[timeframe] = _parse_bfm_sets(sets_raw)
+    return out
+
+
+def parse_bfm_feature_groups(raw: str | None) -> list[str]:
+    if raw is None or not str(raw).strip():
+        raw = "line,channel"
+    groups: list[str] = []
+    for chunk in str(raw).split(","):
+        group = chunk.strip().lower()
+        if not group:
+            continue
+        if group == "all":
+            group = "line,channel"
+            for item in group.split(","):
+                if item not in groups:
+                    groups.append(item)
+            continue
+        if group not in {"line", "channel"}:
+            raise ValueError("BFM feature groups must be line, channel, or all.")
+        if group not in groups:
+            groups.append(group)
+    return groups or ["line", "channel"]
+
+
+def bfm_feature_columns_for_groups(raw: str | None) -> list[str]:
+    columns: list[str] = []
+    groups = parse_bfm_feature_groups(raw)
+    if "line" in groups:
+        columns.extend(BFM_LINE_FEATURE_COLUMNS)
+    if "channel" in groups:
+        columns.extend(BFM_CHANNEL_FEATURE_COLUMNS)
+    return columns
+
+
+def prepare_bfm_feature_bars(exec_df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    bars = resample_ohlc(exec_df, timeframe)
+    bars = add_atr(bars)
+    bars["body_high"] = bars[["open", "close"]].max(axis=1)
+    bars["body_low"] = bars[["open", "close"]].min(axis=1)
+    bars["bar_index"] = range(len(bars))
+    return bars.reset_index(drop=True)
+
+
+def _timestamp_ns(values: pd.Series) -> np.ndarray:
+    return pd.to_datetime(values, utc=True, errors="coerce").to_numpy(dtype="datetime64[ns]").astype("int64")
+
+
+def build_bfm_feature_projection(
+    exec_df: pd.DataFrame,
+    *,
+    timeframes: list[str],
+    tf_sets: dict[str, list[tuple[int, int]]],
+    invalidation: str,
+    max_extension_bars: int,
+) -> BfmFeatureProjection:
+    from scripts.plot_zone_channel_history import build_bfm_magic_lines
+
+    exec_times_ns = _timestamp_ns(exec_df["close_time"])
+    records: list[BfmLineRecord] = []
+    if len(exec_times_ns) == 0:
+        return BfmFeatureProjection(tuple(timeframes), tuple())
+
+    for timeframe in timeframes:
+        bars = prepare_bfm_feature_bars(exec_df, timeframe)
+        if len(bars) < 2:
+            continue
+        source_times_ns = _timestamp_ns(bars["close_time"])
+        source_indices = np.arange(len(bars), dtype=float)
+        lines, _ = build_bfm_magic_lines(
+            bars,
+            tf_sets.get(timeframe) or tf_sets.get(normalize_timeframe(timeframe)) or _parse_bfm_sets("300:200"),
+            invalidation=invalidation,
+            max_extension_bars=max_extension_bars,
+        )
+        for line in lines:
+            if line.line_end_index < 0 or line.line_end_index >= len(source_times_ns):
+                continue
+            active_start_ns = int(pd.Timestamp(line.end_pivot.confirm_time).tz_convert("UTC").value)
+            active_end_ns = int(source_times_ns[line.line_end_index])
+            if active_end_ns < active_start_ns:
+                continue
+            lo = int(np.searchsorted(exec_times_ns, active_start_ns, side="left"))
+            hi = int(np.searchsorted(exec_times_ns, active_end_ns, side="right"))
+            if lo >= hi:
+                continue
+            start_x = float(np.interp(float(exec_times_ns[lo]), source_times_ns.astype(float), source_indices))
+            start_y = float(line.slope * start_x + line.intercept)
+            end_exec_index = hi - 1
+            if end_exec_index > lo:
+                end_x = float(np.interp(float(exec_times_ns[end_exec_index]), source_times_ns.astype(float), source_indices))
+                end_y = float(line.slope * end_x + line.intercept)
+                exec_slope = (end_y - start_y) / float(end_exec_index - lo)
+            else:
+                exec_slope = 0.0
+            records.append(
+                BfmLineRecord(
+                    side=str(line.side),
+                    timeframe=timeframe,
+                    tf_minutes=INTERVAL_MS[timeframe] / 60_000.0,
+                    set_number=int(line.set_number),
+                    start_exec_index=lo,
+                    end_exec_index=end_exec_index,
+                    exec_slope=float(exec_slope),
+                    exec_intercept=float(start_y - exec_slope * lo),
+                )
+            )
+
+    return BfmFeatureProjection(tuple(timeframes), tuple(records))
+
+
+def _missing_bfm_channel_values() -> dict[str, float]:
+    out: dict[str, float] = {}
+    for timeframe in BFM_CHANNEL_FEATURE_TIMEFRAMES:
+        prefix = f"bfm_{timeframe}_"
+        out.update({
+            f"{prefix}channel_available": 0.0,
+            f"{prefix}channel_pos": math.nan,
+            f"{prefix}channel_pos_clipped": math.nan,
+            f"{prefix}channel_above": 0.0,
+            f"{prefix}channel_below": 0.0,
+            f"{prefix}channel_width_atr": math.nan,
+            f"{prefix}upper_slope_atr": math.nan,
+            f"{prefix}lower_slope_atr": math.nan,
+            f"{prefix}width_slope_atr": math.nan,
+            f"{prefix}trend_slope_atr": math.nan,
+            f"{prefix}widening": 0.0,
+            f"{prefix}closing": 0.0,
+            f"{prefix}parallel": 0.0,
+            f"{prefix}trend_up": 0.0,
+            f"{prefix}trend_down": 0.0,
+            f"{prefix}trend_aligned": 0.0,
+        })
+    return out
+
+
+def _bfm_channel_values(
+    projection: BfmFeatureProjection | None,
+    *,
+    direction: str,
+    index: int,
+    atr: float,
+    close: float,
+) -> dict[str, float]:
+    out = _missing_bfm_channel_values()
+    if projection is None or atr <= 0 or not math.isfinite(atr) or not math.isfinite(close):
+        return out
+
+    sign = 1.0 if direction == "long" else -1.0
+    parallel_threshold = 0.001
+    for timeframe in BFM_CHANNEL_FEATURE_TIMEFRAMES:
+        supports: list[tuple[BfmLineRecord, float]] = []
+        resistances: list[tuple[BfmLineRecord, float]] = []
+        for record in projection.records:
+            if record.timeframe != timeframe or index < record.start_exec_index or index > record.end_exec_index:
+                continue
+            value = record.evaluate(index)
+            if not math.isfinite(value):
+                continue
+            if record.side == "support":
+                supports.append((record, value))
+            elif record.side == "resistance":
+                resistances.append((record, value))
+
+        best: tuple[tuple[float, float], BfmLineRecord, float, BfmLineRecord, float, float] | None = None
+        for lower_record, lower_value in supports:
+            for upper_record, upper_value in resistances:
+                width = upper_value - lower_value
+                if width <= 0 or not math.isfinite(width):
+                    continue
+                position = (close - lower_value) / width
+                if 0.0 <= position <= 1.0:
+                    outside = 0.0
+                else:
+                    outside = min(abs(position), abs(position - 1.0))
+                score = (outside, width)
+                if best is None or score < best[0]:
+                    best = (score, lower_record, lower_value, upper_record, upper_value, position)
+        if best is None:
+            continue
+
+        _, lower_record, lower_value, upper_record, upper_value, position = best
+        upper_slope_atr = upper_record.exec_slope / atr
+        lower_slope_atr = lower_record.exec_slope / atr
+        width_slope_atr = upper_slope_atr - lower_slope_atr
+        trend_slope_atr = (upper_slope_atr + lower_slope_atr) / 2.0
+        trend_dir = 1.0 if trend_slope_atr > parallel_threshold else -1.0 if trend_slope_atr < -parallel_threshold else 0.0
+        prefix = f"bfm_{timeframe}_"
+        out.update({
+            f"{prefix}channel_available": 1.0,
+            f"{prefix}channel_pos": float(position),
+            f"{prefix}channel_pos_clipped": float(min(1.0, max(0.0, position))),
+            f"{prefix}channel_above": 1.0 if position > 1.0 else 0.0,
+            f"{prefix}channel_below": 1.0 if position < 0.0 else 0.0,
+            f"{prefix}channel_width_atr": float((upper_value - lower_value) / atr),
+            f"{prefix}upper_slope_atr": float(upper_slope_atr),
+            f"{prefix}lower_slope_atr": float(lower_slope_atr),
+            f"{prefix}width_slope_atr": float(width_slope_atr),
+            f"{prefix}trend_slope_atr": float(trend_slope_atr),
+            f"{prefix}widening": 1.0 if width_slope_atr > parallel_threshold else 0.0,
+            f"{prefix}closing": 1.0 if width_slope_atr < -parallel_threshold else 0.0,
+            f"{prefix}parallel": 1.0 if abs(width_slope_atr) <= parallel_threshold else 0.0,
+            f"{prefix}trend_up": 1.0 if trend_dir > 0.0 else 0.0,
+            f"{prefix}trend_down": 1.0 if trend_dir < 0.0 else 0.0,
+            f"{prefix}trend_aligned": float(sign * trend_dir),
+        })
+
+    return out
+
+
+def bfm_zone_feature_values(
+    *,
+    projection: BfmFeatureProjection | None,
+    direction: str,
+    zone: dict,
+    index: int,
+    atr: float,
+    close: float,
+    high: float,
+    low: float,
+) -> dict[str, float]:
+    missing = {
+        "bfm_same_entry_gap_atr": 999.0,
+        "bfm_same_mid_gap_atr": 999.0,
+        "bfm_same_wick_gap_atr": 999.0,
+        "bfm_same_signed_entry_gap_atr": 999.0,
+        "bfm_same_inside_zone": 0.0,
+        "bfm_same_near_0_5atr": 0.0,
+        "bfm_same_near_1_0atr": 0.0,
+        "bfm_same_tf_minutes": -1.0,
+        "bfm_same_set": -1.0,
+        "bfm_opp_entry_dist_atr": 999.0,
+        "bfm_opp_close_dist_atr": 999.0,
+        "bfm_opp_tf_minutes": -1.0,
+        "bfm_opp_set": -1.0,
+    }
+    missing.update(_missing_bfm_channel_values())
+    if projection is None or atr <= 0 or not math.isfinite(atr):
+        return missing
+
+    zone_top = float(zone["top"])
+    zone_bottom = float(zone["bottom"])
+    zone_mid_value = (zone_top + zone_bottom) / 2.0
+    if direction == "long":
+        same_side = "support"
+        opp_side = "resistance"
+        entry_price = zone_top
+        wick_price = low
+    else:
+        same_side = "resistance"
+        opp_side = "support"
+        entry_price = zone_bottom
+        wick_price = high
+
+    best_same: tuple[float, BfmLineRecord, float] | None = None
+    best_opp: tuple[float, BfmLineRecord, float] | None = None
+    for record in projection.records:
+        if index < record.start_exec_index or index > record.end_exec_index:
+            continue
+        value = record.evaluate(index)
+        if not math.isfinite(value):
+            continue
+        if record.side == same_side:
+            score = min(abs(value - entry_price), abs(value - zone_mid_value), abs(value - wick_price))
+            if best_same is None or score < best_same[0]:
+                best_same = (score, record, value)
+        elif record.side == opp_side:
+            if direction == "long":
+                distance = value - entry_price
+                close_distance = value - close
+            else:
+                distance = entry_price - value
+                close_distance = close - value
+            if distance > 0 and close_distance > 0 and (best_opp is None or distance < best_opp[0]):
+                best_opp = (distance, record, value)
+
+    out = dict(missing)
+    if best_same is not None:
+        _, record, value = best_same
+        entry_gap_atr = abs(value - entry_price) / atr
+        mid_gap_atr = abs(value - zone_mid_value) / atr
+        wick_gap_atr = abs(value - wick_price) / atr
+        if direction == "long":
+            signed_gap_atr = (entry_price - value) / atr
+        else:
+            signed_gap_atr = (value - entry_price) / atr
+        out.update({
+            "bfm_same_entry_gap_atr": float(entry_gap_atr),
+            "bfm_same_mid_gap_atr": float(mid_gap_atr),
+            "bfm_same_wick_gap_atr": float(wick_gap_atr),
+            "bfm_same_signed_entry_gap_atr": float(signed_gap_atr),
+            "bfm_same_inside_zone": 1.0 if zone_bottom <= value <= zone_top else 0.0,
+            "bfm_same_near_0_5atr": 1.0 if entry_gap_atr <= 0.5 else 0.0,
+            "bfm_same_near_1_0atr": 1.0 if entry_gap_atr <= 1.0 else 0.0,
+            "bfm_same_tf_minutes": float(record.tf_minutes),
+            "bfm_same_set": float(record.set_number),
+        })
+    if best_opp is not None:
+        distance, record, value = best_opp
+        if direction == "long":
+            close_dist = value - close
+        else:
+            close_dist = close - value
+        out.update({
+            "bfm_opp_entry_dist_atr": float(distance / atr),
+            "bfm_opp_close_dist_atr": float(close_dist / atr) if close_dist > 0 else 0.0,
+            "bfm_opp_tf_minutes": float(record.tf_minutes),
+            "bfm_opp_set": float(record.set_number),
+        })
+    out.update(_bfm_channel_values(projection, direction=direction, index=index, atr=atr, close=close))
+    return out
+
+
 def label_zone_hold_outcome(
     df: pd.DataFrame,
     start_idx: int,
@@ -654,6 +1098,7 @@ def zone_hold_feature_row(
     atrs: list[float],
     vol_sma20: list[float],
     times: list[pd.Timestamp],
+    bfm_projection: BfmFeatureProjection | None = None,
 ) -> dict | None:
     width = float(zone["width"])
     if width <= 0 or atrs[index] <= 0 or closes[index] <= 0:
@@ -700,7 +1145,7 @@ def zone_hold_feature_row(
         value = exec_df.iloc[index][column]
         return sign * float(value) if pd.notna(value) else math.nan
 
-    return {
+    row = {
         "direction_long": 1.0 if direction == "long" else 0.0,
         "zone_age_hours": (now - pd.Timestamp(zone["time"])).total_seconds() / 3600.0,
         "zone_width_pct": width / closes[index] * 100.0,
@@ -738,6 +1183,20 @@ def zone_hold_feature_row(
         "htf_sma50_aligned": sign * current_htf_sma50_bias,
         "last20_known_hold_rate": float(sum(last20_known_outcomes) / len(last20_known_outcomes)) if last20_known_outcomes else math.nan,
     }
+    if bfm_projection is not None:
+        row.update(
+            bfm_zone_feature_values(
+                projection=bfm_projection,
+                direction=direction,
+                zone=zone,
+                index=index,
+                atr=atrs[index],
+                close=closes[index],
+                high=highs[index],
+                low=lows[index],
+            )
+        )
+    return row
 
 
 def bias_filters_enabled(cfg: Config) -> bool:
@@ -1059,6 +1518,18 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
     exec_df["range_4h_pct"] = (exec_df["high"].rolling(48).max() - exec_df["low"].rolling(48).min()) / exec_df["close"] * 100.0
     zone_hold_model = load_zone_hold_model(cfg.zone_hold_model_path) if cfg.zone_hold_model_path and cfg.zone_hold_min_prob > 0 else None
     zone_hold_filter_tf = normalize_timeframe(cfg.zone_hold_filter_tf) if cfg.zone_hold_filter_tf else ""
+    bfm_projection: BfmFeatureProjection | None = None
+    if zone_hold_model_requires_bfm(zone_hold_model):
+        bfm_config = dict(zone_hold_model.get("bfm_feature_config") or {}) if zone_hold_model is not None else {}
+        bfm_timeframes = parse_bfm_feature_timeframes(bfm_config.get("timeframes", cfg.zone_hold_bfm_timeframes))
+        bfm_tf_sets = parse_bfm_feature_tf_sets(bfm_config.get("tf_sets", cfg.zone_hold_bfm_tf_sets), bfm_timeframes)
+        bfm_projection = build_bfm_feature_projection(
+            exec_df,
+            timeframes=bfm_timeframes,
+            tf_sets=bfm_tf_sets,
+            invalidation=str(bfm_config.get("invalidation", cfg.zone_hold_bfm_invalidation)),
+            max_extension_bars=int(bfm_config.get("max_extension_bars", cfg.zone_hold_bfm_max_extension_bars)),
+        )
     tf1_high, tf1_low = build_htf_zone_events(
         exec_df,
         tf1,
@@ -1264,6 +1735,7 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
                 atrs,
                 vol_sma20,
                 times,
+                bfm_projection,
             )
             if features is None:
                 accepted = not cfg.zone_hold_reject_unscored

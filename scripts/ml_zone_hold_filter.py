@@ -36,13 +36,20 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.backtest_turtle_soup import (
     Config,
+    DEFAULT_BFM_ZONE_TF_SETS,
+    DEFAULT_BFM_ZONE_TIMEFRAMES,
     add_atr,
+    bfm_feature_columns_for_groups,
+    bfm_zone_feature_values,
     build_daily_context,
+    build_bfm_feature_projection,
     build_htf_bias_events,
     build_htf_zone_events,
     fetch_klines,
     normalize_binance_spot_symbol,
     parse_utc_datetime,
+    parse_bfm_feature_tf_sets,
+    parse_bfm_feature_timeframes,
     resample_ohlc,
     run_backtest,
     summarize,
@@ -118,6 +125,11 @@ def symbol_job(params: dict[str, Any]) -> tuple[str, pd.DataFrame, list[Any], st
         mbq_ob_lookback_bars=params["mbq_ob_lookback_bars"],
         mbq_confluence_atr=params["mbq_confluence_atr"],
         max_zone_scan=params["max_zone_scan"],
+        use_bfm_features=params["use_bfm_features"],
+        bfm_timeframes=params["bfm_timeframes"],
+        bfm_tf_sets=params["bfm_tf_sets"],
+        bfm_invalidation=params["bfm_invalidation"],
+        bfm_max_extension_bars=params["bfm_max_extension_bars"],
     )
     cfg = Config(
         exec_tf=params["interval"],
@@ -135,6 +147,10 @@ def symbol_job(params: dict[str, Any]) -> tuple[str, pd.DataFrame, list[Any], st
         min_entry_risk_pct=params["strategy_min_entry_risk_pct"],
         max_entry_risk_pct=params["strategy_max_entry_risk_pct"],
         max_zone_scan=params["max_zone_scan"],
+        zone_hold_bfm_timeframes=params["bfm_timeframes"],
+        zone_hold_bfm_tf_sets=params["bfm_tf_sets"],
+        zone_hold_bfm_invalidation=params["bfm_invalidation"],
+        zone_hold_bfm_max_extension_bars=params["bfm_max_extension_bars"],
     )
     normalized = normalize_binance_spot_symbol(symbol)
     trades = run_backtest(df, cfg)
@@ -360,8 +376,24 @@ def build_zone_hold_samples(
     mbq_ob_lookback_bars: int,
     mbq_confluence_atr: float,
     max_zone_scan: int,
+    use_bfm_features: bool = False,
+    bfm_timeframes: str = DEFAULT_BFM_ZONE_TIMEFRAMES,
+    bfm_tf_sets: str = DEFAULT_BFM_ZONE_TF_SETS,
+    bfm_invalidation: str = "wick",
+    bfm_max_extension_bars: int = 300,
 ) -> pd.DataFrame:
     exec_df = prepare_exec_df(exec_df)
+    bfm_projection = None
+    if use_bfm_features:
+        parsed_bfm_timeframes = parse_bfm_feature_timeframes(bfm_timeframes)
+        parsed_bfm_tf_sets = parse_bfm_feature_tf_sets(bfm_tf_sets, parsed_bfm_timeframes)
+        bfm_projection = build_bfm_feature_projection(
+            exec_df,
+            timeframes=parsed_bfm_timeframes,
+            tf_sets=parsed_bfm_tf_sets,
+            invalidation=bfm_invalidation,
+            max_extension_bars=bfm_max_extension_bars,
+        )
     supply_events, demand_events = build_htf_zone_events(
         exec_df,
         zone_tf,
@@ -510,6 +542,19 @@ def build_zone_hold_samples(
             "htf_sma50_aligned": sign * current_htf_sma50_bias,
             "last20_known_hold_rate": float(np.mean(last20_known_outcomes)) if last20_known_outcomes else math.nan,
         }
+        if bfm_projection is not None:
+            row.update(
+                bfm_zone_feature_values(
+                    projection=bfm_projection,
+                    direction=direction,
+                    zone=zone,
+                    index=i,
+                    atr=atrs[i],
+                    close=closes[i],
+                    high=highs[i],
+                    low=lows[i],
+                )
+            )
         row.update(outcome)
         return row
 
@@ -814,6 +859,12 @@ def main() -> None:
     parser.add_argument("--mbq-ob-lookback-bars", type=int, default=200)
     parser.add_argument("--mbq-confluence-atr", type=float, default=0.50)
     parser.add_argument("--max-zone-scan", type=int, default=250, help="Limit newest active zones scanned per side per bar; 0 means unlimited.")
+    parser.add_argument("--use-bfm-features", action="store_true", help="Add causal BFM Magic Trendline confluence features to the zone-hold model.")
+    parser.add_argument("--bfm-feature-groups", default="line,channel", help="Comma-separated BFM feature groups: line, channel, or all.")
+    parser.add_argument("--bfm-timeframes", default=DEFAULT_BFM_ZONE_TIMEFRAMES)
+    parser.add_argument("--bfm-tf-sets", default=DEFAULT_BFM_ZONE_TF_SETS)
+    parser.add_argument("--bfm-invalidation", choices=["wick", "close", "none"], default="wick")
+    parser.add_argument("--bfm-max-extension-bars", type=int, default=300)
     parser.add_argument("--strategy-min-entry-risk-pct", type=float, default=0.0)
     parser.add_argument("--strategy-max-entry-risk-pct", type=float, default=math.inf)
     parser.add_argument("--workers", type=int, default=1)
@@ -823,6 +874,7 @@ def main() -> None:
     args = parser.parse_args()
 
     args.symbols = expand_symbol_args(args.symbols, args.symbol_set)
+    feature_columns = FEATURE_COLUMNS + bfm_feature_columns_for_groups(args.bfm_feature_groups) if args.use_bfm_features else FEATURE_COLUMNS
 
     start = parse_utc_datetime(args.start)
     split = parse_utc_datetime(args.split)
@@ -849,6 +901,11 @@ def main() -> None:
             "mbq_ob_lookback_bars": args.mbq_ob_lookback_bars,
             "mbq_confluence_atr": args.mbq_confluence_atr,
             "max_zone_scan": args.max_zone_scan,
+            "use_bfm_features": args.use_bfm_features,
+            "bfm_timeframes": args.bfm_timeframes,
+            "bfm_tf_sets": args.bfm_tf_sets,
+            "bfm_invalidation": args.bfm_invalidation,
+            "bfm_max_extension_bars": args.bfm_max_extension_bars,
             "strategy_min_entry_risk_pct": args.strategy_min_entry_risk_pct,
             "strategy_max_entry_risk_pct": args.strategy_max_entry_risk_pct,
         }
@@ -884,10 +941,10 @@ def main() -> None:
         print("sklearn is not available in this Python, falling back to the built-in logistic model.")
 
     if use_sklearn:
-        model = fit_sklearn_model(train, FEATURE_COLUMNS, args.model)
-        dataset["hold_prob"] = model.predict_proba(dataset[FEATURE_COLUMNS].astype(float))[:, 1]
+        model = fit_sklearn_model(train, feature_columns, args.model)
+        dataset["hold_prob"] = model.predict_proba(dataset[feature_columns].astype(float))[:, 1]
     else:
-        model = fit_logistic_regression(train, FEATURE_COLUMNS, l2=args.l2, learning_rate=args.learning_rate, epochs=args.epochs)
+        model = fit_logistic_regression(train, feature_columns, l2=args.l2, learning_rate=args.learning_rate, epochs=args.epochs)
         dataset["hold_prob"] = predict_proba(model, dataset)
 
     train = dataset[dataset["time"] < pd.Timestamp(split)].copy()
@@ -898,7 +955,21 @@ def main() -> None:
     args.model_out.parent.mkdir(parents=True, exist_ok=True)
     model_path = args.model_out
     if use_sklearn:
-        joblib.dump({"model": model, "feature_columns": FEATURE_COLUMNS, "model_kind": args.model, "zone_tf": args.zone_tf}, model_path)
+        payload = {
+            "model": model,
+            "feature_columns": feature_columns,
+            "model_kind": args.model,
+            "zone_tf": args.zone_tf,
+        }
+        if args.use_bfm_features:
+            payload["bfm_feature_config"] = {
+                "timeframes": args.bfm_timeframes,
+                "tf_sets": args.bfm_tf_sets,
+                "feature_groups": args.bfm_feature_groups,
+                "invalidation": args.bfm_invalidation,
+                "max_extension_bars": int(args.bfm_max_extension_bars),
+            }
+        joblib.dump(payload, model_path)
     else:
         model_path = args.model_out if args.model_out.suffix.lower() == ".json" else args.model_out.with_suffix(".json")
         model_path.write_text(json.dumps(model_to_json(model), indent=2), encoding="utf-8")
@@ -919,11 +990,11 @@ def main() -> None:
 
     print()
     if use_sklearn:
-        rank = sklearn_feature_rank(model, oos if len(oos) >= 20 else train, FEATURE_COLUMNS, args.model)
+        rank = sklearn_feature_rank(model, oos if len(oos) >= 20 else train, feature_columns, args.model)
         print("Largest sklearn feature importances:")
         print(rank.head(12).to_string(index=False))
     else:
-        coef = pd.DataFrame({"feature": FEATURE_COLUMNS, "coef": model.coef})
+        coef = pd.DataFrame({"feature": feature_columns, "coef": model.coef})
         coef["abs_coef"] = coef["coef"].abs()
         print("Largest standardized logistic coefficients:")
         print(coef.sort_values("abs_coef", ascending=False).head(12)[["feature", "coef"]].to_string(index=False))
