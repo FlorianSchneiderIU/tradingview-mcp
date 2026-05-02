@@ -116,6 +116,7 @@ class BfmTimeframeResult:
     bars: pd.DataFrame
     lines: list[BfmTrendline]
     pivots: list[BfmPivot]
+    pivot_sets: tuple[tuple[int, int], ...]
 
 
 def parse_args() -> argparse.Namespace:
@@ -138,6 +139,15 @@ def parse_args() -> argparse.Namespace:
         "--bfm-sets",
         default="300:200,240:160,192:128,154:102",
         help="Comma-separated left:right pivot sets for --logic bfm.",
+    )
+    parser.add_argument(
+        "--bfm-tf-sets",
+        default=None,
+        help=(
+            "Optional per-timeframe BFM sets, e.g. "
+            "'1h=330:220,264:176;4h=180:120,144:96;1d=105:70,84:56'. "
+            "Timeframes not listed use --bfm-sets."
+        ),
     )
     parser.add_argument(
         "--bfm-invalidation",
@@ -333,6 +343,39 @@ def parse_timeframes(raw: str | None, default_timeframe: str) -> list[str]:
         if timeframe not in out:
             out.append(timeframe)
     return out or [default_timeframe]
+
+
+def parse_bfm_sets_by_timeframe(
+    raw: str | None,
+    timeframes: list[str],
+    default_sets: list[tuple[int, int]],
+) -> dict[str, list[tuple[int, int]]]:
+    out = {timeframe: list(default_sets) for timeframe in timeframes}
+    if raw is None or not str(raw).strip():
+        return out
+    for chunk in str(raw).split(";"):
+        text = chunk.strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"Invalid --bfm-tf-sets chunk {text!r}; expected timeframe=left:right,...")
+        timeframe, raw_sets = text.split("=", 1)
+        timeframe = timeframe.strip()
+        if timeframe not in out:
+            raise ValueError(f"--bfm-tf-sets references {timeframe!r}, not in --bfm-timeframes.")
+        out[timeframe] = parse_bfm_sets(raw_sets)
+    return out
+
+
+def bfm_set_text(pivot_sets: list[tuple[int, int]] | tuple[tuple[int, int], ...]) -> str:
+    return ", ".join(f"S{idx}:{left}/{right}" for idx, (left, right) in enumerate(pivot_sets, start=1))
+
+
+def bfm_result_set_text(results: list[BfmTimeframeResult]) -> str:
+    unique_sets = {tuple(result.pivot_sets) for result in results}
+    if len(unique_sets) == 1:
+        return bfm_set_text(results[0].pivot_sets)
+    return "; ".join(f"{result.timeframe} [{bfm_set_text(result.pivot_sets)}]" for result in results)
 
 
 def detect_bfm_pivots(
@@ -1153,7 +1196,7 @@ def render_bfm_html_plot(
         segments=[],
     )
     title = f"{config.symbol} {timeframe} BFM Magic Trendlines"
-    set_text = ", ".join(f"S{idx}:{left}/{right}" for idx, (left, right) in enumerate(pivot_sets, start=1))
+    set_text = bfm_set_text(pivot_sets)
     subtitle = (
         f"{times[0].date()} to {times[-1].date()} | {len(bars):,} bars | "
         f"{len(lines):,} trendlines | pivots {set_text} | invalidation {invalidation} | "
@@ -1263,7 +1306,7 @@ def render_bfm_multitimeframe_html_plot(
         segments=[],
     )
     title = f"{config.symbol} multi-timeframe BFM Magic Trendlines"
-    set_text = ", ".join(f"S{idx}:{left}/{right}" for idx, (left, right) in enumerate(pivot_sets, start=1))
+    set_text = bfm_result_set_text(results)
     tf_text = ", ".join(
         f"{result.timeframe}: {len(result.lines):,} lines / {len(result.pivots):,} pivots"
         for result in results
@@ -2157,12 +2200,14 @@ def main() -> None:
     if args.logic == "bfm":
         pivot_sets = parse_bfm_sets(args.bfm_sets)
         bfm_timeframes = parse_timeframes(args.bfm_timeframes, timeframe)
+        pivot_sets_by_timeframe = parse_bfm_sets_by_timeframe(args.bfm_tf_sets, bfm_timeframes, pivot_sets)
         results: list[BfmTimeframeResult] = []
         for bfm_timeframe in bfm_timeframes:
             bfm_bars = bars if bfm_timeframe == timeframe else prepare_timeframe_bars(base, bfm_timeframe, atr_length=config.atr_length)
+            timeframe_pivot_sets = pivot_sets_by_timeframe[bfm_timeframe]
             lines, pivots = build_bfm_magic_lines(
                 bfm_bars,
-                pivot_sets,
+                timeframe_pivot_sets,
                 invalidation=args.bfm_invalidation,
                 max_extension_bars=args.bfm_max_extension_bars,
             )
@@ -2172,6 +2217,7 @@ def main() -> None:
                     bars=bfm_bars,
                     lines=lines,
                     pivots=pivots,
+                    pivot_sets=tuple(timeframe_pivot_sets),
                 )
             )
         if len(results) == 1:
@@ -2184,7 +2230,7 @@ def main() -> None:
                 config=config,
                 timeframe=result.timeframe,
                 trade_context=trade_context,
-                pivot_sets=pivot_sets,
+                pivot_sets=list(result.pivot_sets),
                 invalidation=args.bfm_invalidation,
                 max_extension_bars=args.bfm_max_extension_bars,
                 scale_mode=args.scale_mode,
