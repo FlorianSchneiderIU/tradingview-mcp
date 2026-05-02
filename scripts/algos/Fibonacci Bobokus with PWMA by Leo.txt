@@ -1,0 +1,351 @@
+
+//@version=5
+indicator("Fibonacci Bobokus with PWMA by Leo", overlay = true, max_labels_count = 500, max_boxes_count = 500, max_lines_count = 500, max_bars_back = 1000)
+
+string GROUP_PLS                     = 'Labels'
+bool showLabelsPriceScaleInput          = input.bool(false, 'Show Labels on Price Scale.', tooltip="", group=GROUP_PLS)
+// options
+labelDisplay = showLabelsPriceScaleInput ? display.all : display.pane // , editable = false, display=labelDisplay) 
+
+// === Inputs ===
+show_lines_and_labels = input.bool(true, title="Show Fibonacci Bobokus Levels", group = "General Options")
+
+// Rango de minutos personalizable
+tipfb2 = "Start 12 am (480 Summer Time NY\n420 Standard Time NY, TF 15M)"
+tipfb3 = "End 03 am (585 Summer Time NY\n525 Standard Time NY, TF 15M)"
+start_minutes = input.int(480, title="Minutes to consider", options=[420,480], tooltip=tipfb2, group="General Options")
+// start_minutes = input.int(480, title="Start Minute of Day", minval=0, maxval=1440, group="General Options")
+// end_minutes   = input.int(600, title="End Minute of Day", minval=0, maxval=1440, group="General Options")
+end_minutes = input.int(585, title="Minutes to consider", options=[525,585], tooltip=tipfb3, group="General Options")
+gextfib_coloret = input.color(color.teal, "Buy Extreme Target Fibonacci Color")
+gextfib_colort2 = input.color(color.green, "Buy Target 2 Fibonacci Color")
+gextfib_colort1 = input.color(color.lime, "Buy Target 1 Fibonacci Color")
+gfib_colorhpl = input.color(color.black, "High Pivot Low Fibonacci Color")
+gbuse_color = input.color(color.blue, "Buy Sell Level Fibonacci Color")
+gresu_color = input.color(color.purple, "Resistance Support Level Fibonacci Color")
+ggoldfib_colort1 = input.color(color.orange, "Sell Target 1 Fibonacci Color")
+ggoldfib_colort2 = input.color(color.red, "Sell Target 2 Fibonacci Color")
+gextfib_color = input.color(color.maroon, "Sell Extreme Target Fibonacci Color")
+gline_width = input.int(2, "General Line Width", minval=1)
+
+gline_style = input.string("Dashed", title="General Line Style", options=["Solid", "Dashed", "Dotted"])
+gselected_style = gline_style == "Solid" ? line.style_solid :
+                 gline_style == "Dashed" ? line.style_dashed :
+                 line.style_dotted  
+
+// === Funciones ===
+// Verifica si el tiempo actual está dentro del rango de cálculo
+is_in_range() =>
+    total_minutes = hour(time) * 60 + minute(time)
+    total_minutes >= start_minutes and total_minutes <= end_minutes
+
+// Verifica si es el momento de reiniciar (cuando llega el start_minutes del día siguiente)
+is_reset_time() =>
+    total_minutes = hour(time) * 60 + minute(time)
+    total_minutes == start_minutes
+
+// === Variables para almacenar high y low ===
+var float range_high = na
+var float range_low = na
+
+// Reiniciar solo cuando llegue el start_minutes del día
+if is_reset_time()
+    range_high := na
+    range_low := na
+
+// Calcular high y low solo en el rango especificado
+if is_in_range()
+    range_high := na(range_high) ? high : math.max(range_high, high)
+    range_low := na(range_low) ? low : math.min(range_low, low)
+
+// Usar los valores calculados mientras no se reinicien
+final_high = na(range_high) ? na : range_high
+final_low = na(range_low) ? na : range_low
+
+// Obtener los valores fibonacci
+fib_mg89 = final_low - (final_low - final_high) * -0.89
+fib_mg822 = final_low - (final_low - final_high) * -0.822      
+fib_mg618 = final_low - (final_low - final_high) * -0.618
+fib_mg55 = final_low - (final_low - final_high) * -0.55      
+fib_mg34 = final_low - (final_low - final_high) * -0.34       
+fib_mg272 = final_low - (final_low - final_high) * -0.272
+fib_g0 = final_low
+fib_g191 = final_low - (final_low - final_high) * 0.191 
+fib_g382 = final_low - (final_low - final_high) * 0.382
+fib_g50 = final_low - (final_low - final_high) * 0.5
+fib_g618 = final_low - (final_low - final_high) * 0.618
+// fib_g667 = final_low - (final_low - final_high) * 0.667   
+// fib_g786 = final_low - (final_low - final_high) * 0.786
+fib_g809 = final_low - (final_low - final_high) * 0.809
+fib_g100 = final_high
+fib_g1272 = final_low - (final_low - final_high) * 1.272
+fib_g134 = final_low - (final_low - final_high) * 1.34
+fib_g155 = final_low - (final_low - final_high) * 1.55
+fib_g1618 = final_low - (final_low - final_high) * 1.618
+fib_g1822 = final_low - (final_low - final_high) * 1.822
+fib_g189 = final_low - (final_low - final_high) * 1.89
+
+// Variables para almacenar las líneas Fibonacci
+var line fib_mg89li = na
+var line fib_mg822li = na
+var line fib_mg618li = na
+var line fib_mg55li = na
+var line fib_mg34li = na
+var line fib_mg272li = na
+var line fib_g0li = na
+var line fib_g191li = na
+var line fib_g382li = na
+var line fib_g50li = na
+var line fib_g618li = na
+// var line fib_g667li = na
+// var line fib_g786li = na
+var line fib_g809li = na
+var line fib_g100li = na
+var line fib_g1272li = na
+var line fib_g134li = na
+var line fib_g155li = na
+var line fib_g1618li = na
+var line fib_g1822li = na
+var line fib_g189li = na
+
+// Etiquetas para mostrar los valores
+var label fib_mg89la = na
+var label fib_mg822la = na
+var label fib_mg618la = na
+var label fib_mg55la = na
+var label fib_mg34la = na
+var label fib_mg272la = na
+var label fib_g0la = na
+var label fib_g191la = na
+var label fib_g382la = na
+var label fib_g50la = na
+var label fib_g618la = na
+// var label fib_g667la = na
+// var label fib_g786la = na
+var label fib_g809la = na
+var label fib_g100la = na
+var label fib_g1272la = na
+var label fib_g134la = na
+var label fib_g155la = na
+var label fib_g1618la = na
+var label fib_g1822la = na
+var label fib_g189la = na
+
+// Dibujar líneas persistentes hasta el start_minutes del siguiente día
+var line high_line = na
+var line low_line = na
+
+// ==========================================
+// TABLES
+// ==========================================
+var string table = "Table Details "
+string  tableYposInput = input.string("bottom", "Panel position", inline = "15", options = ["top", "middle", "bottom"], group = table)
+string  tableXposInput = input.string("right", "", inline = "15", options = ["left", "center", "right"], group = table)
+
+var table panel = table.new(tableYposInput + "_" + tableXposInput, 5,15, border_width = 1)
+
+
+table.cell(panel, 0, 0, "Created by :", text_size=size.normal, text_color = color.gray)
+table.cell(panel, 1, 0, "@llopezf", text_size=size.normal, text_color = color.teal)
+table.cell(panel, 0, 1, "Telegram :", text_size=size.normal, text_color = color.gray)
+table.cell(panel, 1, 1, "https://t.me/llopezf", text_size=size.normal, text_color = color.teal)
+
+
+if barstate.islast and show_lines_and_labels and not na(final_high) and not na(final_low)
+    // line.delete(high_line)
+    // line.delete(low_line)
+    // high_line := line.new(bar_index - 50, final_high, bar_index + 10, final_high, color=fib_color, width=line_width, style=line.style_dashed)
+    // low_line := line.new(bar_index - 50, final_low, bar_index + 10, final_low, color=fib_color, width=line_width, style=line.style_dashed)
+
+
+    line.delete(fib_mg89li)
+    fib_mg89li := line.new(bar_index[50], fib_mg89, bar_index+10, fib_mg89, color=gextfib_color, width=gline_width, style=gselected_style)
+    line.delete(fib_mg822li)
+    fib_mg822li := line.new(bar_index[50], fib_mg822, bar_index+10, fib_mg822, color=gextfib_color, width=gline_width, style=gselected_style)
+    line.delete(fib_mg618li)
+    fib_mg618li := line.new(bar_index[50], fib_mg618, bar_index+10, fib_mg618, color=ggoldfib_colort2, width=gline_width, style=gselected_style)
+    line.delete(fib_mg55li)
+    fib_mg55li := line.new(bar_index[50], fib_mg55, bar_index+10, fib_mg55, color=ggoldfib_colort2, width=gline_width, style=gselected_style)
+    line.delete(fib_mg34li)
+    fib_mg34li := line.new(bar_index[50], fib_mg34, bar_index+10, fib_mg34, color=ggoldfib_colort1, width=gline_width, style=gselected_style)
+    line.delete(fib_mg272li)
+    fib_mg272li := line.new(bar_index[50], fib_mg272, bar_index+10, fib_mg272, color=ggoldfib_colort1, width=gline_width, style=gselected_style)
+    line.delete(fib_g0li)
+    fib_g0li := line.new(bar_index[50], fib_g0, bar_index+10, fib_g0, color=gfib_colorhpl, width=gline_width, style=gselected_style)
+    line.delete(fib_g191li)
+    fib_g191li := line.new(bar_index[50], fib_g191, bar_index+10, fib_g191, color=gresu_color, width=gline_width, style=gselected_style)
+    line.delete(fib_g382li)
+    fib_g382li := line.new(bar_index[50], fib_g382, bar_index+10, fib_g382, color=gbuse_color, width=gline_width, style=gselected_style)
+    line.delete(fib_g50li)
+    fib_g50li := line.new(bar_index[50], fib_g50, bar_index+10, fib_g50, color=gfib_colorhpl, width=gline_width, style=gselected_style)
+    line.delete(fib_g618li)
+    fib_g618li := line.new(bar_index[50], fib_g618, bar_index+10, fib_g618, color=gbuse_color, width=gline_width, style=gselected_style)
+    // line.delete(fib_g667li)
+    // fib_g667li := line.new(bar_index[50], fib_g667, bar_index+10, fib_g667, color=ggoldfib_color, width=line_width, style=gselected_style)
+    // line.delete(fib_g786li)
+    // fib_g786li := line.new(bar_index[50], fib_g786, bar_index+10, fib_g786, color=gfib_color, width=line_width, style=gselected_style)
+    line.delete(fib_g809li)
+    fib_g809li := line.new(bar_index[50], fib_g809, bar_index+10, fib_g809, color=gresu_color, width=gline_width, style=gselected_style)
+    line.delete(fib_g100li)
+    fib_g100li := line.new(bar_index[50], fib_g100, bar_index+10, fib_g100, color=gfib_colorhpl, width=gline_width, style=gselected_style)
+    line.delete(fib_g1272li)
+    fib_g1272li := line.new(bar_index[50], fib_g1272, bar_index+10, fib_g1272, color=gextfib_colort1, width=gline_width, style=gselected_style)        
+    line.delete(fib_g134li)
+    fib_g134li := line.new(bar_index[50], fib_g134, bar_index+10, fib_g134, color=gextfib_colort1, width=gline_width, style=gselected_style)        
+    line.delete(fib_g155li)
+    fib_g155li := line.new(bar_index[50], fib_g155, bar_index+10, fib_g155, color=gextfib_colort2, width=gline_width, style=gselected_style)        
+    line.delete(fib_g1618li)
+    fib_g1618li := line.new(bar_index[50], fib_g1618, bar_index+10, fib_g1618, color=gextfib_colort2, width=gline_width, style=gselected_style)        
+    line.delete(fib_g1822li)
+    fib_g1822li := line.new(bar_index[50], fib_g1822, bar_index+10, fib_g1822, color=gextfib_coloret, width=gline_width, style=gselected_style)       
+    line.delete(fib_g189li)
+    fib_g189li := line.new(bar_index[50], fib_g189, bar_index+10, fib_g189, color=gextfib_coloret, width=gline_width, style=gselected_style)
+
+// Etiquetas para mostrar los valores si show_lines_and_labels es true
+var label high_label = na
+var label low_label = na
+
+if barstate.islast and show_lines_and_labels
+    // label.delete(high_label)
+    // label.delete(low_label)
+    // high_label := label.new(bar_index+10, final_high, text="1" + " (" + str.tostring(final_high,format.mintick) + ")", color=#ffffff00, textcolor=fib_color, style=label.style_label_left, yloc=yloc.price)
+    // low_label := label.new(bar_index+10, final_low, text="0" + " (" + str.tostring(final_low,format.mintick) + ")", color=#ffffff00, textcolor=fib_color, style=label.style_label_left, yloc=yloc.price)
+    label.delete(fib_mg89la)
+    var fibext = "Extreme Target:\nThe price almost always\nreturns to Pivot Point"
+    fib_mg89la := label.new(bar_index+10, fib_mg89, "-0.89" + " (" + str.tostring(fib_mg89,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_color, color=#ffffff00,tooltip = fibext)
+    label.delete(fib_mg822la)
+    fib_mg822la := label.new(bar_index+10, fib_mg822, "-0.822" + " (" + str.tostring(fib_mg822,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_color, color=#ffffff00, tooltip = fibext)
+    label.delete(fib_mg618la)
+    var fibtar = "Target 2:\nIf the price breaks this line,\nthe next is Extreme Target"
+    fib_mg618la := label.new(bar_index+10, fib_mg618, "-0.618" + " (" + str.tostring(fib_mg618,format.mintick) + ")", style=label.style_label_left, textcolor=ggoldfib_colort2, color=#ffffff00, tooltip = fibtar)
+    label.delete(fib_mg55la)
+    fib_mg55la := label.new(bar_index+10, fib_mg55, "-0.55" + " (" + str.tostring(fib_mg55,format.mintick) + ")", style=label.style_label_left, textcolor=ggoldfib_colort2, color=#ffffff00, tooltip = fibtar)
+    label.delete(fib_mg34la)
+    var fibbreak = "Target 1:\nIf the price breaks this line,\nthe next is Target 2"
+    fib_mg34la := label.new(bar_index+10, fib_mg34, "-0.34" + " (" + str.tostring(fib_mg34,format.mintick) + ")", style=label.style_label_left, textcolor=ggoldfib_colort1, color=#ffffff00, tooltip = fibbreak)
+    label.delete(fib_mg272la)
+    fib_mg272la := label.new(bar_index+10, fib_mg272, "-0.272" + " (" + str.tostring(fib_mg272,format.mintick) + ")", style=label.style_label_left, textcolor=ggoldfib_colort1, color=#ffffff00, tooltip = fibbreak)
+    label.delete(fib_g0la)
+    var fibret = "High/Low:\nIf the price breaks this line,\nthe next is Target 1, else return\nto Resistance/Support"
+    fib_g0la := label.new(bar_index+10, fib_g0, "0" + " (" + str.tostring(fib_g0,format.mintick) + ")", style=label.style_label_left, textcolor=gfib_colorhpl, color=#ffffff00, tooltip = fibret)
+    label.delete(fib_g191la)
+    var fibresu = "Resistance/Support"
+    fib_g191la := label.new(bar_index+10, fib_g191, "0.191" + " (" + str.tostring(fib_g191,format.mintick) + ")", style=label.style_label_left, textcolor=gresu_color, color=#ffffff00, tooltip = fibresu)
+    label.delete(fib_g382la)
+    var fibbush = "Buy / Sell Level:\nIf the price breaks this line,\nthe next target is Resistance/Support"
+    fib_g382la := label.new(bar_index+10, fib_g382, "0.382" + " (" + str.tostring(fib_g382,format.mintick) + ")", style=label.style_label_left, textcolor=gbuse_color, color=#ffffff00, tooltip = fibbush)
+    label.delete(fib_g50la)
+    var fibpiv = "Pivot Point"
+    fib_g50la := label.new(bar_index+10, fib_g50, "0.50" + " (" + str.tostring(fib_g50,format.mintick) + ")", style=label.style_label_left, textcolor=gfib_colorhpl, color=#ffffff00,  tooltip = fibpiv)
+    label.delete(fib_g618la)
+    fib_g618la := label.new(bar_index+10, fib_g618, "0.618" + " (" + str.tostring(fib_g618,format.mintick) + ")", style=label.style_label_left, textcolor=gbuse_color, color=#ffffff00, tooltip = fibbush)
+    // label.delete(fib_g667la)
+    // fib_g667la := label.new(bar_index+10, fib_g667, "0.667" + " (" + str.tostring(fib_g667,format.mintick) + ")", style=label.style_label_left, textcolor=ggoldfib_color, color=#ffffff00, tooltip = fibgold)
+    // label.delete(fib_g786la)
+    // fib_g786la := label.new(bar_index+10, fib_g786, "0.786" + " (" + str.tostring(fib_g786,format.mintick) + ")", style=label.style_label_left, textcolor=gfib_color, color=#ffffff00, tooltip = fibbreak)
+    label.delete(fib_g809la)
+    fib_g809la := label.new(bar_index+10, fib_g809, "0.809" + " (" + str.tostring(fib_g809,format.mintick) + ")", style=label.style_label_left, textcolor=gresu_color, color=#ffffff00, tooltip = fibresu)
+    label.delete(fib_g100la)
+    fib_g100la := label.new(bar_index+10, fib_g100, "1" + " (" + str.tostring(fib_g100,format.mintick) + ")", style=label.style_label_left, textcolor=gfib_colorhpl, color=#ffffff00, tooltip = fibret)
+    label.delete(fib_g1272la)
+    fib_g1272la := label.new(bar_index+10, fib_g1272, "1.272" + " (" + str.tostring(fib_g1272,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_colort1, color=#ffffff00, tooltip = fibbreak)
+    label.delete(fib_g134la)
+    fib_g134la := label.new(bar_index+10, fib_g134, "1.34" + " (" + str.tostring(fib_g134,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_colort1, color=#ffffff00, tooltip = fibbreak)
+    label.delete(fib_g155la)
+    fib_g155la := label.new(bar_index+10, fib_g155, "1.55" + " (" + str.tostring(fib_g155,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_colort2, color=#ffffff00, tooltip = fibtar)
+    label.delete(fib_g1618la)
+    fib_g1618la := label.new(bar_index+10, fib_g1618, "1.618" + " (" + str.tostring(fib_g1618,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_colort2, color=#ffffff00, tooltip = fibtar)
+    label.delete(fib_g1822la)
+    fib_g1822la := label.new(bar_index+10, fib_g1822, "1.822" + " (" + str.tostring(fib_g1822,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_coloret, color=#ffffff00, tooltip = fibext)
+    label.delete(fib_g189la)
+    fib_g189la := label.new(bar_index+10, fib_g189, "1.89" + " (" + str.tostring(fib_g189,format.mintick) + ")", style=label.style_label_left, textcolor=gextfib_coloret, color=#ffffff00, tooltip = fibext)
+
+//indicator("Parabolic Weighted Moving Average (PWMA) by Leo", shorttitle = "PWMA by Leo", overlay=false, max_labels_count=500)
+
+// === Inputs ===
+length      = input.int(20, "Período PWMA", minval=1)
+src         = input.source(close, "Fuente de datos")
+colorPwma   = #ff990000
+widthPwma   = input.int(2, "Width PWMA", minval=1, maxval=5)
+fillEnabled = input.bool(true, "Fill PWMA")
+
+// === Función para calcular PWMA ===
+pwma(src, length) =>
+    var float sum_weight = 0.0
+    var float sum_price_weight = 0.0
+    
+    sum_weight := 0.0
+    sum_price_weight := 0.0
+
+    for i = 0 to length - 1
+        weight = math.pow(i + 1, 2) // peso parabólico
+        price  = src[length - 1 - i] // desde el más antiguo hasta el más reciente
+        sum_weight += weight
+        sum_price_weight += price * weight
+
+    sum_price_weight / sum_weight
+
+// === Cálculo ===
+pwmaValue = pwma(src, length)
+diff      = src - pwmaValue
+
+// === Panel 1: Precio y PWMA ===
+pricePlot = plot(src, color=color.blue, title="Precio", transp=90, display=labelDisplay)
+pwmaPlot  = plot(pwmaValue, color=colorPwma, linewidth=widthPwma, title="PWMA", display=labelDisplay)
+
+fill(pricePlot, pwmaPlot, color = fillEnabled ? (src > pwmaValue ? color.new(color.green, 85) : color.new(color.red, 85)) : color.new(color.white, 100))
+
+power = input.int(title='Power', minval=0, defval=2)
+highlightMovements = input(title='Highlight Movements ?', defval=true)
+//src = input(title='Source', defval=close)
+
+sum = 0.0
+weightSum = 0.0
+
+for i = 0 to length - 1 by 1
+    weight = math.pow(length - i, power)
+    sum += nz(src[i]) * weight
+    weightSum += weight
+    weightSum
+
+pwma = sum / weightSum
+
+pwmaColor = highlightMovements ? pwma > pwma[1] ? color.green : color.red : colorPwma
+plot(pwma, title='PWMA', linewidth=widthPwma, color=pwmaColor, transp=0, display=labelDisplay)
+
+//indicator("EMA 50-200 con Tooltip en Cruce", overlay=true, max_labels_count=500)
+
+// EMA 50 y EMA 200
+shortEMA = ta.ema(close, 50)
+longEMA  = ta.ema(close, 200)
+
+color c1 = #ff9900cb
+color c2 = color.rgb(33, 149, 243)
+color c3 = color.new(#2195f3, 30)
+
+// Plot de las EMAs
+plot(shortEMA, title = "50 EMA", color = c1, display=labelDisplay)
+plot(longEMA, title = "200 EMA", color = c2, display=labelDisplay)
+
+// Detectar cruces
+cruceAlcista = ta.crossover(shortEMA, longEMA)
+cruceBajista = ta.crossunder(shortEMA, longEMA)
+
+// Marcar el cruce visual
+plot(ta.cross(shortEMA, longEMA) ? shortEMA : na, style = plot.style_cross, linewidth = 4, color = c3, display=labelDisplay)
+
+// Variables para guardar las últimas señales
+var label ultimaBullish = na
+var label ultimaBearish = na
+
+// Crear tooltip en el cruce y borrar anterior
+if cruceAlcista
+    if not na(ultimaBullish)
+        label.delete(ultimaBullish)
+    ultimaBullish := label.new(        bar_index, shortEMA,        text = "Bullish\n🡹Crossover🡹",        style = label.style_label_up,        color = color.new(color.green, 100),        textcolor = color.green,        tooltip = "Señal potencial de tendencia alcista"    )
+
+if cruceBajista
+    if not na(ultimaBearish)
+        label.delete(ultimaBearish)
+    ultimaBearish := label.new(        bar_index, shortEMA,        text = "Bearish\n🡻Crossover🡻",        style = label.style_label_down,        color = color.new(color.red, 100),        textcolor = color.red,        tooltip = "Señal potencial de tendencia bajista"    )
+

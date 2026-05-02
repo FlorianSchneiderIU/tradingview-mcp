@@ -1,0 +1,762 @@
+//@version=6
+indicator("🏦 Rachid Berkane Ultime", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// 📋 INPUTS & SETTINGS
+// ============================================================================
+
+// === Module Activation ===
+grp_modules = "🔧 Module Activation"
+enable_regime = input.bool(true, "Market Regime Detector", group=grp_modules)
+enable_ai_score = input.bool(true, "AI Score System", group=grp_modules)
+enable_orderflow = input.bool(true, "Synthetic Order Flow", group=grp_modules)
+enable_liquidity = input.bool(true, "Liquidity Maps", group=grp_modules)
+enable_ob = input.bool(true, "Advanced Order Blocks", group=grp_modules)
+enable_squeeze = input.bool(true, "Squeeze Detection", group=grp_modules)
+enable_mtf = input.bool(true, "Multi-Timeframe", group=grp_modules)
+enable_pressure = input.bool(true, "Market Pressure", group=grp_modules)
+
+// === Market Regime Settings ===
+grp_regime = "📊 Market Regime"
+regime_ema_fast = input.int(21, "EMA Fast", group=grp_regime)
+regime_ema_slow = input.int(50, "EMA Slow", group=grp_regime)
+regime_ema_trend = input.int(200, "EMA Trend", group=grp_regime)
+regime_adx_len = input.int(14, "ADX Length", group=grp_regime)
+regime_adx_thresh = input.int(20, "ADX Threshold", group=grp_regime)
+
+// === Squeeze Settings ===
+grp_squeeze = "💥 Squeeze Detection"
+squeeze_bb_len = input.int(20, "Bollinger Length", group=grp_squeeze)
+squeeze_bb_mult = input.float(2.0, "Bollinger Mult", group=grp_squeeze)
+squeeze_kc_len = input.int(20, "Keltner Length", group=grp_squeeze)
+squeeze_kc_mult = input.float(1.5, "Keltner Mult", group=grp_squeeze)
+squeeze_min_bars = input.int(5, "Min Compression Bars", group=grp_squeeze)
+squeeze_atr_thresh = input.float(0.7, "ATR Compression %", group=grp_squeeze)
+
+// === AI Score Settings ===
+grp_ai = "🤖 AI Score System"
+ai_threshold = input.int(75, "Signal Threshold (0-100)", minval=0, maxval=100, group=grp_ai)
+ai_macd_weight = input.float(15.0, "MACD Weight %", group=grp_ai)
+ai_rsi_weight = input.float(10.0, "RSI Weight %", group=grp_ai)
+ai_delta_weight = input.float(20.0, "Delta Volume Weight %", group=grp_ai)
+ai_obv_weight = input.float(10.0, "OBV Weight %", group=grp_ai)
+ai_adx_weight = input.float(10.0, "ADX Weight %", group=grp_ai)
+ai_struct_weight = input.float(15.0, "Structure Weight %", group=grp_ai)
+ai_pressure_weight = input.float(10.0, "Pressure Weight %", group=grp_ai)
+ai_mtf_weight = input.float(10.0, "MTF Weight %", group=grp_ai)
+
+// === Order Flow Settings ===
+grp_flow = "💧 Order Flow"
+flow_vol_len = input.int(20, "Volume MA Length", group=grp_flow)
+flow_climax_mult = input.float(3.0, "Climax Multiplier", group=grp_flow)
+show_fvg = input.bool(true, "Show Fair Value Gaps", group=grp_flow)
+
+// === Liquidity Settings ===
+grp_liq = "🎯 Liquidity Maps"
+liq_swing_len = input.int(10, "Swing Detection", group=grp_liq)
+liq_equal_tolerance = input.float(0.2, "Equal High/Low %", group=grp_liq)
+liq_sfp_wick = input.float(0.4, "SFP Wick %", group=grp_liq)
+show_eq_highs = input.bool(true, "Show Equal Highs", group=grp_liq)
+show_eq_lows = input.bool(true, "Show Equal Lows", group=grp_liq)
+
+// === Order Block Settings ===
+grp_ob = "📦 Order Blocks"
+ob_swing_len = input.int(5, "Swing Length", group=grp_ob)
+ob_min_atr_mult = input.float(0.5, "Min Size (ATR)", group=grp_ob)
+ob_max_atr_mult = input.float(3.0, "Max Size (ATR)", group=grp_ob)
+show_ob_invalidated = input.bool(false, "Show Invalidated", group=grp_ob)
+
+// === Multi-Timeframe Settings ===
+grp_mtf = "⏰ Multi-Timeframe"
+mtf_d1 = input.timeframe("D", "Daily TF", group=grp_mtf)
+mtf_h4 = input.timeframe("240", "H4 TF", group=grp_mtf)
+mtf_h1 = input.timeframe("60", "H1 TF", group=grp_mtf)
+
+// === Kill-Switch Settings ===
+grp_kill = "🛡️ Kill-Switch"
+kill_adx_min = input.int(18, "Min ADX", group=grp_kill)
+kill_vol_min = input.float(50.0, "Min Volume %", group=grp_kill)
+kill_enabled = input.bool(true, "Enable Kill-Switch", group=grp_kill)
+
+// === Risk Management ===
+grp_risk = "🎯 Risk Management"
+sl_atr_mult = input.float(1.6, "SL ATR Multiplier", group=grp_risk)
+tp1_atr_mult = input.float(0.5, "TP1 ATR Mult (H4)", group=grp_risk)
+tp2_atr_mult = input.float(1.0, "TP2 ATR Mult (H4)", group=grp_risk)
+trail_atr_mult = input.float(3.0, "Trailing ATR Mult", group=grp_risk)
+show_risk_levels = input.bool(true, "Show SL/TP", group=grp_risk)
+
+// === Visual Settings ===
+grp_vis = "🎨 Visuals"
+show_dashboard = input.bool(true, "Show Dashboard", group=grp_vis)
+simple_mode = input.bool(true, "Vue Simplifiée (Clean)", group=grp_vis)
+show_regime_bg = input.bool(true, "Regime Background", group=grp_vis)
+col_bull = input.color(color.new(#00ff88, 0), "Bullish", group=grp_vis)
+col_bear = input.color(color.new(#ff4444, 0), "Bearish", group=grp_vis)
+col_neutral = input.color(color.new(#ffaa00, 0), "Neutral", group=grp_vis)
+
+// ============================================================================
+// 🔧 MODULE 1: MARKET REGIME DETECTOR
+// ============================================================================
+
+// Trend EMAs
+ema_fast = ta.ema(close, regime_ema_fast)
+ema_slow = ta.ema(close, regime_ema_slow)
+ema_trend = ta.ema(close, regime_ema_trend)
+
+// ADX Calculation
+[diPlus, diMinus, adx] = ta.dmi(regime_adx_len, regime_adx_len)
+
+// Structure Detection (HH/HL/LH/LL)
+var float last_hh = na
+var float last_ll = na
+var int hh_count = 0
+var int ll_count = 0
+
+pivot_high = ta.pivothigh(high, 3, 3)
+pivot_low = ta.pivotlow(low, 3, 3)
+
+if not na(pivot_high)
+    if na(last_hh) or pivot_high > last_hh
+        hh_count += 1
+        last_hh := pivot_high
+    else
+        hh_count := 0
+
+if not na(pivot_low)
+    if na(last_ll) or pivot_low < last_ll
+        ll_count += 1
+        last_ll := pivot_low
+    else
+        ll_count := 0
+
+// Market Structure Classification
+is_uptrend_structure = hh_count >= 2
+is_downtrend_structure = ll_count >= 2
+
+// Regime Classification
+regime_trend_up = close > ema_trend and ema_fast > ema_slow and adx > regime_adx_thresh
+regime_trend_down = close < ema_trend and ema_fast < ema_slow and adx > regime_adx_thresh
+regime_range = math.abs(ema_fast - ema_slow) / close < 0.005 and adx < regime_adx_thresh
+
+// Squeeze Detection (Bollinger inside Keltner)
+bb_basis = ta.sma(close, squeeze_bb_len)
+bb_dev = ta.stdev(close, squeeze_bb_len)
+bb_upper = bb_basis + (squeeze_bb_mult * bb_dev)
+bb_lower = bb_basis - (squeeze_bb_mult * bb_dev)
+
+kc_basis = ta.sma(close, squeeze_kc_len)
+kc_range = ta.atr(squeeze_kc_len) * squeeze_kc_mult
+kc_upper = kc_basis + kc_range
+kc_lower = kc_basis - kc_range
+
+atr_current = ta.atr(14)
+atr_sma = ta.sma(atr_current, 20)
+vol_sma = ta.sma(volume, 20)
+
+squeeze_on = bb_upper < kc_upper and bb_lower > kc_lower and atr_current < (atr_sma * squeeze_atr_thresh) and volume < vol_sma
+
+// Squeeze Counter
+var int squeeze_bars = 0
+squeeze_bars := squeeze_on ? squeeze_bars + 1 : 0
+
+regime_squeeze = squeeze_bars >= squeeze_min_bars
+
+// Squeeze Explosion Detection
+var bool squeeze_released = false
+squeeze_release_bull = squeeze_bars[1] >= squeeze_min_bars and not squeeze_on and close > kc_upper
+squeeze_release_bear = squeeze_bars[1] >= squeeze_min_bars and not squeeze_on and close < kc_lower
+
+if squeeze_release_bull or squeeze_release_bear
+    squeeze_released := true
+else if squeeze_on
+    squeeze_released := false
+
+// Final Regime
+string regime = regime_squeeze ? "SQUEEZE" : regime_trend_up ? "TREND UP" : regime_trend_down ? "TREND DOWN" : regime_range ? "RANGE" : "NEUTRAL"
+
+// Visual: Regime Background
+bgcolor(enable_regime and show_regime_bg ? (regime == "SQUEEZE" ? color.new(color.orange, 80) : regime == "TREND UP" ? color.new(col_bull, 95) : regime == "TREND DOWN" ? color.new(col_bear, 95) : regime == "RANGE" ? color.new(col_neutral, 95) : na) : na)
+
+// Visual: Squeeze Dots
+// Visual: Squeeze Dots
+// Visual: Squeeze Dots
+plotshape(enable_squeeze and regime_squeeze, "Squeeze On", shape.circle, location.abovebar, color.new(color.red, 0), size=size.small)
+plotshape(enable_squeeze and squeeze_release_bull, "Squeeze Bull", shape.circle, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(enable_squeeze and squeeze_release_bear, "Squeeze Bear", shape.circle, location.abovebar, color.new(color.blue, 0), size=size.small)
+
+// Visual: Color Bars during Squeeze
+barcolor(enable_squeeze and regime_squeeze ? color.new(color.orange, 0) : na)
+
+// ============================================================================
+// 🔧 MODULE 2: SYNTHETIC ORDER FLOW
+// ============================================================================
+
+// Delta Volume Calculation
+var float delta_volume = 0.0
+uptick = close > close[1]
+downtick = close < close[1]
+
+if uptick
+    delta_volume += volume
+else if downtick
+    delta_volume -= volume
+
+delta_normalized = ta.sma(delta_volume, flow_vol_len) / ta.sma(volume, flow_vol_len)
+
+// Fair Value Gaps
+type FVG
+    box id
+    float top
+    float bottom
+    bool is_bullish
+    bool mitigated
+    int bar_idx
+
+var FVG[] fvgs = array.new<FVG>()
+
+if enable_orderflow and show_fvg
+    // Bullish FVG: low > high[2]
+    if low > high[2]
+        gap_top = low
+        gap_bottom = high[2]
+        gap_box = box.new(bar_index[2], gap_bottom, bar_index, gap_top, 
+             border_color=color.new(col_bull, 60), bgcolor=color.new(col_bull, 90))
+        array.push(fvgs, FVG.new(gap_box, gap_top, gap_bottom, true, false, bar_index))
+    
+    // Bearish FVG: high < low[2]
+    if high < low[2]
+        gap_top = low[2]
+        gap_bottom = high
+        gap_box = box.new(bar_index[2], gap_bottom, bar_index, gap_top,
+             border_color=color.new(col_bear, 60), bgcolor=color.new(col_bear, 90))
+        array.push(fvgs, FVG.new(gap_box, gap_top, gap_bottom, false, false, bar_index))
+
+// FVG Management & Mitigation
+if array.size(fvgs) > 0
+    for i = array.size(fvgs) - 1 to 0
+        fvg = array.get(fvgs, i)
+        if not fvg.mitigated
+            box.set_right(fvg.id, bar_index + 5)
+            
+            // Check mitigation
+            if (fvg.is_bullish and low <= fvg.bottom) or (not fvg.is_bullish and high >= fvg.top)
+                fvg.mitigated := true
+                box.set_bgcolor(fvg.id, color.new(color.gray, 95))
+                box.set_border_color(fvg.id, color.new(color.gray, 85))
+
+// Volume Climax Detection
+vol_ma = ta.sma(volume, flow_vol_len)
+is_volume_climax = volume > vol_ma * flow_climax_mult and (high - low) > atr_current * 1.5
+
+// Absorption Zone Detection (high volume + low movement)
+price_movement = math.abs(close - open) / atr_current
+is_absorption = volume > vol_ma * 1.5 and price_movement < 0.3
+
+// ============================================================================
+// 🔧 MODULE 3: LIQUIDITY MAPS
+// ============================================================================
+
+type LiquidityLevel
+    line id
+    float price
+    string type_
+    bool swept
+
+var LiquidityLevel[] liquidity_levels = array.new<LiquidityLevel>()
+
+// Detect Equal Highs/Lows
+var float[] swing_highs = array.new<float>()
+var float[] swing_lows = array.new<float>()
+var int[] swing_high_bars = array.new<int>()
+var int[] swing_low_bars = array.new<int>()
+
+liq_ph = ta.pivothigh(high, liq_swing_len, liq_swing_len)
+liq_pl = ta.pivotlow(low, liq_swing_len, liq_swing_len)
+
+if not na(liq_ph) and enable_liquidity
+    array.push(swing_highs, liq_ph)
+    array.push(swing_high_bars, bar_index[liq_swing_len])
+    
+    // Keep only recent swings
+    if array.size(swing_highs) > 10
+        array.shift(swing_highs)
+        array.shift(swing_high_bars)
+
+if not na(liq_pl) and enable_liquidity
+    array.push(swing_lows, liq_pl)
+    array.push(swing_low_bars, bar_index[liq_swing_len])
+    
+    if array.size(swing_lows) > 10
+        array.shift(swing_lows)
+        array.shift(swing_low_bars)
+
+// Equal Highs Detection
+if array.size(swing_highs) >= 3 and enable_liquidity and show_eq_highs
+    for i = 0 to array.size(swing_highs) - 3
+        price1 = array.get(swing_highs, i)
+        price2 = array.get(swing_highs, i + 1)
+        price3 = array.get(swing_highs, i + 2)
+        
+        tolerance = price1 * (liq_equal_tolerance / 100)
+        
+        if math.abs(price1 - price2) < tolerance and math.abs(price2 - price3) < tolerance
+            avg_price = (price1 + price2 + price3) / 3
+            bar1 = array.get(swing_high_bars, i)
+            bar3 = array.get(swing_high_bars, i + 2)
+            
+            liq_line = line.new(bar1, avg_price, bar_index + 20, avg_price,
+                 color=color.new(color.red, 40), style=line.style_dashed, width=2)
+            array.push(liquidity_levels, LiquidityLevel.new(liq_line, avg_price, "EQ_HIGH", false))
+
+// Equal Lows Detection
+if array.size(swing_lows) >= 3 and enable_liquidity and show_eq_lows
+    for i = 0 to array.size(swing_lows) - 3
+        price1 = array.get(swing_lows, i)
+        price2 = array.get(swing_lows, i + 1)
+        price3 = array.get(swing_lows, i + 2)
+        
+        tolerance = price1 * (liq_equal_tolerance / 100)
+        
+        if math.abs(price1 - price2) < tolerance and math.abs(price2 - price3) < tolerance
+            avg_price = (price1 + price2 + price3) / 3
+            bar1 = array.get(swing_low_bars, i)
+            bar3 = array.get(swing_low_bars, i + 2)
+            
+            liq_line = line.new(bar1, avg_price, bar_index + 20, avg_price,
+                 color=color.new(color.green, 40), style=line.style_dashed, width=2)
+            array.push(liquidity_levels, LiquidityLevel.new(liq_line, avg_price, "EQ_LOW", false))
+
+// Swing Failure Pattern Detection
+var bool sfp_bull = false
+var bool sfp_bear = false
+
+if array.size(swing_lows) >= 2
+    recent_low = array.get(swing_lows, array.size(swing_lows) - 1)
+    prev_low = array.get(swing_lows, array.size(swing_lows) - 2)
+    wick_size = low < prev_low ? math.abs(low - prev_low) / atr_current : 0
+    
+    sfp_bull := low < prev_low and close > prev_low and wick_size > liq_sfp_wick
+
+if array.size(swing_highs) >= 2
+    recent_high = array.get(swing_highs, array.size(swing_highs) - 1)
+    prev_high = array.get(swing_highs, array.size(swing_highs) - 2)
+    wick_size = high > prev_high ? math.abs(high - prev_high) / atr_current : 0
+    
+    sfp_bear := high > prev_high and close < prev_high and wick_size > liq_sfp_wick
+
+// Visual: SFP Icons
+plotshape(enable_liquidity and sfp_bull, "SFP Bull", shape.labelup, location.belowbar, color.new(color.green, 0), text="⚡", textcolor=color.white, size=size.small)
+plotshape(enable_liquidity and sfp_bear, "SFP Bear", shape.labeldown, location.abovebar, color.new(color.red, 0), text="⚡", textcolor=color.white, size=size.small)
+
+// ============================================================================
+// 🔧 MODULE 4: ADVANCED ORDER BLOCKS
+// ============================================================================
+
+type OrderBlock
+    box id
+    line eq_line
+    float top
+    float bottom
+    float equilibrium
+    bool is_bullish
+    bool mitigated
+    bool invalidated
+    int bar_idx
+    string state
+
+var OrderBlock[] order_blocks = array.new<OrderBlock>()
+
+// BOS Detection
+ob_ph = ta.pivothigh(high, ob_swing_len, ob_swing_len)
+ob_pl = ta.pivotlow(low, ob_swing_len, ob_swing_len)
+
+var float last_ob_sh = na
+var int last_ob_sh_bar = na
+var float last_ob_sl = na
+var int last_ob_sl_bar = na
+
+if not na(ob_ph)
+    last_ob_sh := ob_ph
+    last_ob_sh_bar := bar_index[ob_swing_len]
+
+if not na(ob_pl)
+    last_ob_sl := ob_pl
+    last_ob_sl_bar := bar_index[ob_swing_len]
+
+// Bullish BOS: Close above recent swing high (assign to global variables)
+var bool bull_bos = false
+var bool bear_bos = false
+bull_bos := not na(last_ob_sh) and ta.crossover(close, last_ob_sh)
+// Bearish BOS: Close below recent swing low
+bear_bos := not na(last_ob_sl) and ta.crossunder(close, last_ob_sl)
+
+// Create Order Block on BOS
+if enable_ob and bull_bos
+    // Find last bearish candle before BOS
+    lookback = bar_index - last_ob_sl_bar
+    if lookback > 0 and lookback < 50
+        ob_top = high[lookback]
+        ob_bottom = low[lookback]
+        ob_size = ob_top - ob_bottom
+        
+        // Size validation
+        min_size = atr_current * ob_min_atr_mult
+        max_size = atr_current * ob_max_atr_mult
+        
+        if ob_size >= min_size and ob_size <= max_size
+            ob_eq = (ob_top + ob_bottom) / 2
+            
+            ob_box = box.new(last_ob_sl_bar, ob_bottom, bar_index + 10, ob_top,
+                 border_color=col_bull, border_width=2, bgcolor=color.new(col_bull, 85))
+            ob_eq_line = line.new(last_ob_sl_bar, ob_eq, bar_index + 10, ob_eq,
+                 color=color.new(col_bull, 50), style=line.style_dotted, width=1)
+            
+            array.push(order_blocks, OrderBlock.new(ob_box, ob_eq_line, ob_top, ob_bottom, ob_eq, true, false, false, last_ob_sl_bar, "VALID"))
+
+if enable_ob and bear_bos
+    lookback = bar_index - last_ob_sh_bar
+    if lookback > 0 and lookback < 50
+        ob_top = high[lookback]
+        ob_bottom = low[lookback]
+        ob_size = ob_top - ob_bottom
+        
+        min_size = atr_current * ob_min_atr_mult
+        max_size = atr_current * ob_max_atr_mult
+        
+        if ob_size >= min_size and ob_size <= max_size
+            ob_eq = (ob_top + ob_bottom) / 2
+            
+            ob_box = box.new(last_ob_sh_bar, ob_bottom, bar_index + 10, ob_top,
+                 border_color=col_bear, border_width=2, bgcolor=color.new(col_bear, 85))
+            ob_eq_line = line.new(last_ob_sh_bar, ob_eq, bar_index + 10, ob_eq,
+                 color=color.new(col_bear, 50), style=line.style_dotted, width=1)
+            
+            array.push(order_blocks, OrderBlock.new(ob_box, ob_eq_line, ob_top, ob_bottom, ob_eq, false, false, false, last_ob_sh_bar, "VALID"))
+
+// OB Management
+if array.size(order_blocks) > 0
+    for i = array.size(order_blocks) - 1 to 0
+        ob = array.get(order_blocks, i)
+        
+        if not ob.mitigated and not ob.invalidated
+            box.set_right(ob.id, bar_index + 10)
+            line.set_x2(ob.eq_line, bar_index + 10)
+            
+            // Check mitigation (retest)
+            if ob.is_bullish and low <= ob.top and low >= ob.bottom
+                ob.mitigated := true
+                ob.state := "MITIGATED"
+                box.set_bgcolor(ob.id, color.new(col_bull, 70))
+            else if not ob.is_bullish and high >= ob.bottom and high <= ob.top
+                ob.mitigated := true
+                ob.state := "MITIGATED"
+                box.set_bgcolor(ob.id, color.new(col_bear, 70))
+            
+            // Check invalidation (price passed through)
+            if ob.is_bullish and close < ob.bottom
+                ob.invalidated := true
+                ob.state := "INVALIDATED"
+                if not show_ob_invalidated
+                    box.delete(ob.id)
+                    line.delete(ob.eq_line)
+                    array.remove(order_blocks, i)
+                else
+                    box.set_bgcolor(ob.id, color.new(color.gray, 90))
+                    box.set_border_color(ob.id, color.new(color.gray, 70))
+            else if not ob.is_bullish and close > ob.top
+                ob.invalidated := true
+                ob.state := "INVALIDATED"
+                if not show_ob_invalidated
+                    box.delete(ob.id)
+                    line.delete(ob.eq_line)
+                    array.remove(order_blocks, i)
+                else
+                    box.set_bgcolor(ob.id, color.new(color.gray, 90))
+                    box.set_border_color(ob.id, color.new(color.gray, 70))
+
+// ============================================================================
+// 🔧 MODULE 5: MULTI-TIMEFRAME ANALYSIS
+// ============================================================================
+
+// D1 Analysis
+d1_close = request.security(syminfo.tickerid, mtf_d1, close, lookahead=barmerge.lookahead_off)
+d1_ema200 = request.security(syminfo.tickerid, mtf_d1, ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+d1_bullish = d1_close > d1_ema200
+
+// H4 Analysis
+h4_ema50 = request.security(syminfo.tickerid, mtf_h4, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+h4_close = request.security(syminfo.tickerid, mtf_h4, close, lookahead=barmerge.lookahead_off)
+h4_bullish = h4_close > h4_ema50
+
+// H1 Analysis
+[h1_macd_line, h1_signal, h1_hist] = request.security(syminfo.tickerid, mtf_h1, ta.macd(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+h1_rsi = request.security(syminfo.tickerid, mtf_h1, ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+h1_bullish = h1_macd_line > 0 and h1_rsi > 45
+h1_bearish = h1_macd_line < 0 and h1_rsi < 55
+
+// MTF Alignment
+mtf_aligned_bull = enable_mtf ? (d1_bullish and h4_bullish and h1_bullish) : true
+mtf_aligned_bear = enable_mtf ? (not d1_bullish and not h4_bullish and h1_bearish) : true
+
+// ============================================================================
+// 🔧 MODULE 6: AI SCORE SYSTEM (0-100)
+// ============================================================================
+
+// Component 1: MACD Histogram
+[macd_line, signal_line, macd_hist] = ta.macd(close, 12, 26, 9)
+var float macd_score = 0.0
+macd_score := math.abs(macd_hist) > math.abs(macd_hist[1]) ? 10.0 : 5.0
+macd_score := macd_hist > 0 ? macd_score : macd_score * 0.5
+
+// Component 2: RSI
+rsi = ta.rsi(close, 14)
+rsi_score = rsi > 50 and rsi < 70 ? 10 : rsi < 50 and rsi > 30 ? 10 : rsi > 70 or rsi < 30 ? 8 : 5
+
+// Component 3: Delta Volume
+delta_score = delta_normalized > 0.3 ? 10 : delta_normalized > 0.1 ? 7 : delta_normalized < -0.3 ? 10 : delta_normalized < -0.1 ? 7 : 3
+
+// Component 4: OBV Derivative
+obv = ta.obv
+obv_change = ta.change(obv, 5)
+obv_score = math.abs(obv_change) > math.abs(obv_change[5]) ? 10 : 5
+
+// Component 5: ADX Derivative
+adx_change = ta.change(adx, 3)
+adx_score = adx > 25 and adx_change > 0 ? 10 : adx > 20 ? 7 : 4
+
+// Component 6: Market Structure
+struct_score = is_uptrend_structure ? 10 : is_downtrend_structure ? 10 : 3
+
+// Component 7: Buyer/Seller Pressure
+var int bullish_candles = 0
+bullish_candles := 0
+for i = 0 to 9
+    if close[i] > open[i]
+        bullish_candles += 1
+
+pressure_score = bullish_candles > 6 ? 10 : bullish_candles < 4 ? 10 : 5
+
+// Component 8: MTF Alignment
+mtf_score = mtf_aligned_bull or mtf_aligned_bear ? 10 : 3
+
+// Weighted AI Score
+ai_score = (macd_score * ai_macd_weight + rsi_score * ai_rsi_weight + delta_score * ai_delta_weight + obv_score * ai_obv_weight + adx_score * ai_adx_weight + struct_score * ai_struct_weight + pressure_score * ai_pressure_weight + mtf_score * ai_mtf_weight) / (ai_macd_weight + ai_rsi_weight + ai_delta_weight + ai_obv_weight + ai_adx_weight + ai_struct_weight + ai_pressure_weight + ai_mtf_weight)
+
+
+// Normalize to 0-100
+ai_score_final = math.round(ai_score * 10)
+
+// ============================================================================
+// 🔧 MODULE 7: MARKET PRESSURE INDICATOR
+// ============================================================================
+
+// Imbalance Ratio
+total_vol = ta.cum(volume)
+buy_vol = ta.cum(uptick ? volume : 0)
+sell_vol = ta.cum(downtick ? volume : 0)
+imbalance_ratio = total_vol > 0 ? (buy_vol - sell_vol) / total_vol * 100 : 0
+
+// EMA Angle (normalized)
+ema_angle = (ema_fast - ema_fast[5]) / close * 100
+
+// Composite Pressure (0-100)
+pressure_raw = (imbalance_ratio * 0.4) + (ema_angle * 0.3) + ((adx - 20) * 1.5)
+market_pressure = math.min(100, math.max(0, pressure_raw + 50))
+
+pressure_buy = market_pressure > 60
+pressure_sell = market_pressure < 40
+
+// ============================================================================
+// 🔧 MODULE 8: KILL-SWITCH SYSTEM
+// ============================================================================
+
+kill_low_adx = adx < kill_adx_min
+kill_low_vol = volume < (vol_ma * kill_vol_min / 100)
+kill_squeeze_active = regime_squeeze and not squeeze_released
+kill_delta_conflict_bull = delta_normalized < -0.2
+kill_delta_conflict_bear = delta_normalized > 0.2
+kill_struct_fractured = not is_uptrend_structure and not is_downtrend_structure
+
+kill_switch_active = kill_enabled and (kill_low_adx or kill_low_vol or kill_squeeze_active)
+
+// ============================================================================
+// 🔧 MODULE 9: SIGNAL GENERATION
+// ============================================================================
+
+// Signal Conditions
+signal_buy_base = regime_trend_up or squeeze_release_bull
+signal_sell_base = regime_trend_down or squeeze_release_bear
+
+signal_buy_confirmed = signal_buy_base and mtf_aligned_bull and pressure_buy and not kill_delta_conflict_bull
+signal_sell_confirmed = signal_sell_base and mtf_aligned_bear and pressure_sell and not kill_delta_conflict_bear
+
+// Final Signal with AI Filter
+signal_buy = enable_ai_score ? (signal_buy_confirmed and ai_score_final >= ai_threshold and not kill_switch_active) : signal_buy_confirmed
+signal_sell = enable_ai_score ? (signal_sell_confirmed and ai_score_final >= ai_threshold and not kill_switch_active) : signal_sell_confirmed
+
+// Fake Breakout Filter
+signal_buy := signal_buy and volume > vol_ma * 1.2 and close > open
+signal_sell := signal_sell and volume > vol_ma * 1.2 and close < open
+
+// Stop Loss & Take Profit Calculation
+atr_h4 = request.security(syminfo.tickerid, mtf_h4, ta.atr(14), lookahead=barmerge.lookahead_off)
+
+var float entry_price = na
+var float stop_loss = na
+var float take_profit1 = na
+var float take_profit2 = na
+var bool in_position = false
+
+if signal_buy and not in_position
+    entry_price := close
+    stop_loss := close - (atr_current * sl_atr_mult)
+    take_profit1 := close + (atr_h4 * tp1_atr_mult)
+    take_profit2 := close + (atr_h4 * tp2_atr_mult)
+    in_position := true
+    alert("🎯 BUY SIGNAL\nPrice: " + str.tostring(close) + "\nAI Score: " + str.tostring(ai_score_final) + "/100\nSqueeze: " + (squeeze_released ? "Released ✅" : "Active") + "\nMTF: Aligned ✅\nSL: " + str.tostring(stop_loss) + "\nTP1: " + str.tostring(take_profit1) + "\nTP2: " + str.tostring(take_profit2), alert.freq_once_per_bar)
+
+if signal_sell and not in_position
+    entry_price := close
+    stop_loss := close + (atr_current * sl_atr_mult)
+    take_profit1 := close - (atr_h4 * tp1_atr_mult)
+    take_profit2 := close - (atr_h4 * tp2_atr_mult)
+    in_position := true
+    alert("🎯 SELL SIGNAL\nPrice: " + str.tostring(close) + "\nAI Score: " + str.tostring(ai_score_final) + "/100\nSqueeze: " + (squeeze_released ? "Released ✅" : "Active") + "\nMTF: Aligned ✅\nSL: " + str.tostring(stop_loss) + "\nTP1: " + str.tostring(take_profit1) + "\nTP2: " + str.tostring(take_profit2), alert.freq_once_per_bar)
+
+// Exit conditions
+if in_position and ((signal_buy[1] and close <= stop_loss) or (signal_sell[1] and close >= stop_loss))
+    in_position := false
+    alert("🛡️ Stop Loss Hit", alert.freq_once_per_bar)
+
+// ============================================================================
+// 🎨 VISUALS & PLOTS
+// ============================================================================
+
+// Plot EMAs
+plot(enable_regime ? ema_fast : na, "EMA Fast", color.new(color.blue, 50), 1)
+plot(enable_regime ? ema_slow : na, "EMA Slow", color.new(color.orange, 50), 1)
+plot(enable_regime ? ema_trend : na, "EMA Trend", color.new(color.white, 30), 2)
+
+// Plot Signals
+plotshape(signal_buy, "BUY", shape.labelup, location.belowbar, color.new(col_bull, 0), text="BUY", textcolor=color.white, size=size.normal)
+plotshape(signal_sell, "SELL", shape.labeldown, location.abovebar, color.new(col_bear, 0), text="SELL", textcolor=color.white, size=size.normal)
+
+// Plot Risk Levels
+plot(show_risk_levels and in_position ? stop_loss : na, "Stop Loss", color.red, 2, plot.style_cross)
+plot(show_risk_levels and in_position ? take_profit1 : na, "TP1", color.green, 1, plot.style_circles)
+plot(show_risk_levels and in_position ? take_profit2 : na, "TP2", color.green, 2, plot.style_circles)
+
+// ============================================================================
+// 📊 DASHBOARD
+// ============================================================================
+
+var table dashboard = table.new(position.top_right, 2, 10, border_width=2, border_color=color.gray, bgcolor=color.new(color.black, 10))
+
+if show_dashboard and barstate.islast
+    if simple_mode
+        // --- COMPACT DASHBOARD (SIMPLE MODE) ---
+        table.clear(dashboard, 0, 0, 1, 9) // Clear any previous cells
+        
+        // Header
+        table.cell(dashboard, 0, 0, "🏦 RACHID ULTIME", text_color=color.white, bgcolor=color.new(color.blue, 70), text_size=size.normal)
+        table.merge_cells(dashboard, 0, 0, 1, 0)
+        
+        // 1. AI Score
+        ai_color = ai_score_final >= 75 ? color.green : ai_score_final >= 50 ? color.orange : color.red
+        table.cell(dashboard, 0, 1, "AI Score", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 1, str.tostring(ai_score_final), text_color=ai_color, text_size=size.normal)
+        
+        // 2. Tendance (Global)
+        trend_txt = mtf_aligned_bull ? "HAUSSIER 🚀" : mtf_aligned_bear ? "BAISSIER 📉" : "NEUTRE ⚖️"
+        trend_col = mtf_aligned_bull ? color.green : mtf_aligned_bear ? color.red : color.gray
+        table.cell(dashboard, 0, 2, "Tendance", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 2, trend_txt, text_color=trend_col, text_size=size.small)
+
+        // 3. Pression (Anticipation)
+        pressure_txt = str.tostring(math.round(market_pressure)) + "%"
+        pressure_col = pressure_buy ? color.green : pressure_sell ? color.red : color.gray
+        table.cell(dashboard, 0, 3, "Pression", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 3, pressure_txt, text_color=pressure_col, text_size=size.small)
+        
+        // 4. Sécurité (Kill-Switch)
+        safe_txt = kill_switch_active ? "STOP 🛡️" : "GO ✅"
+        safe_col = kill_switch_active ? color.red : color.green
+        table.cell(dashboard, 0, 4, "Sécurité", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 4, safe_txt, text_color=safe_col, text_size=size.small)
+        
+    else
+        // --- FULL DASHBOARD (DETAILED MODE) ---
+        // Header
+        table.cell(dashboard, 0, 0, "🏦 RACHID BERKANE ULTIME", text_color=color.white, bgcolor=color.new(color.blue, 70), text_size=size.normal)
+        table.merge_cells(dashboard, 0, 0, 1, 0)
+        
+        // AI Score
+        ai_color = ai_score_final >= 75 ? color.green : ai_score_final >= 50 ? color.orange : color.red
+        table.cell(dashboard, 0, 1, "AI Score", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 1, str.tostring(ai_score_final) + "/100", text_color=ai_color, text_size=size.normal)
+        
+        // Regime
+        regime_color = regime == "TREND UP" ? col_bull : regime == "TREND DOWN" ? col_bear : regime == "SQUEEZE" ? color.orange : col_neutral
+        table.cell(dashboard, 0, 2, "Regime", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 2, regime, text_color=regime_color, text_size=size.small)
+        
+        // MTF Alignment
+        mtf_status = mtf_aligned_bull ? "BULL ✅" : mtf_aligned_bear ? "BEAR ✅" : "MIXED ⚠️"
+        mtf_color = mtf_aligned_bull or mtf_aligned_bear ? color.green : color.yellow
+        table.cell(dashboard, 0, 3, "MTF Align", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 3, mtf_status, text_color=mtf_color, text_size=size.small)
+        
+        // Market Pressure
+        pressure_txt = str.tostring(math.round(market_pressure)) + "%"
+        pressure_col = pressure_buy ? color.green : pressure_sell ? color.red : color.gray
+        table.cell(dashboard, 0, 4, "Pressure", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 4, pressure_txt, text_color=pressure_col, text_size=size.small)
+        
+        // ADX
+        adx_txt = str.tostring(math.round(adx))
+        adx_col = adx > 25 ? color.green : adx > 20 ? color.yellow : color.red
+        table.cell(dashboard, 0, 5, "ADX", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 5, adx_txt, text_color=adx_col, text_size=size.small)
+        
+        // Volume
+        vol_status = volume > vol_ma * 1.5 ? "HIGH 🔥" : volume > vol_ma ? "NORMAL" : "LOW ⚠️"
+        vol_col = volume > vol_ma * 1.5 ? color.yellow : volume > vol_ma ? color.gray : color.red
+        table.cell(dashboard, 0, 6, "Volume", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 6, vol_status, text_color=vol_col, text_size=size.small)
+        
+        // Kill-Switch
+        kill_status = kill_switch_active ? "ACTIVE 🛡️" : "OFF"
+        kill_col = kill_switch_active ? color.red : color.green
+        table.cell(dashboard, 0, 7, "Kill-Switch", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 7, kill_status, text_color=kill_col, text_size=size.small)
+        
+        // Active OBs
+        active_obs = 0
+        if array.size(order_blocks) > 0
+            for i = 0 to array.size(order_blocks) - 1
+                ob = array.get(order_blocks, i)
+                if not ob.invalidated
+                    active_obs += 1
+        
+        table.cell(dashboard, 0, 8, "Active OBs", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 8, str.tostring(active_obs), text_color=color.white, text_size=size.small)
+        
+        // FVGs
+        active_fvgs = 0
+        if array.size(fvgs) > 0
+            for i = 0 to array.size(fvgs) - 1
+                fvg = array.get(fvgs, i)
+                if not fvg.mitigated
+                    active_fvgs += 1
+        
+        table.cell(dashboard, 0, 9, "Active FVGs", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 9, str.tostring(active_fvgs), text_color=color.white, text_size=size.small)
+
+// ============================================================================
+// 📈 MARKET PRESSURE PANEL (Separate Indicator Panel)
+// ============================================================================
+
+// Plot pressure as histogram in separate panel
+// Note: This would ideally be in a separate indicator window
+// For overlay indicator, we show in dashboard instead

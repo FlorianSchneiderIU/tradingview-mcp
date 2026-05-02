@@ -1,0 +1,583 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SplashAlgo
+
+//@version=6
+indicator("Kapoor - Syed", overlay = false, max_labels_count = 500, max_lines_count = 500)
+import SplashAlgo/findHighestHighLibrary/6 as bc
+
+
+
+
+
+
+// =============== =============== =============== =============== =============== =============== =============== ===============
+// STOCHASTIC RSI
+// =============== =============== =============== =============== =============== =============== =============== ===============
+periodK = input.int(14, title="%K Length", minval=1)
+smoothK = input.int(1, title="%K Smoothing", minval=1)
+periodD = input.int(3, title="%D Smoothing", minval=1)
+k = ta.sma(ta.stoch(close, high, low, periodK), smoothK)
+d = ta.sma(k, periodD)
+plot(k, title="%K", color=#2962FF)
+plot(d, title="%D", color=#FF6D00)
+h0 = hline(80, "Upper Band", color=#787B86)
+hline(50, "Middle Band", color=color.new(#787B86, 50))
+h1 = hline(20, "Lower Band", color=#787B86)
+fill(h0, h1, color=color.rgb(33, 150, 243, 90), title="Background")
+
+
+
+
+// ==========================================================================================================
+// FUNCTION:-INDEX WITH LOWEST VALUE
+// ==========================================================================================================
+func_indexWithIndicatorLowestValue(int lookback, float currentBarLow, int breakoutIdx, int forLoopSP) =>
+    fg = ta.sma(ta.stoch(close, high, low, 14), 1)
+    
+    int lowestLowIdx = 0
+    float lowestLowVal = currentBarLow
+    for i = forLoopSP to lookback
+        currentIdx = i
+
+        currentLow = fg[i]
+        // prevLow = low[i +1]
+
+        lowestLowVal := math.min(currentLow, lowestLowVal)
+        
+
+        if lowestLowVal == currentLow
+            lowestLowIdx := breakoutIdx - i
+            lowestLowVal := currentLow
+ 
+
+    [lowestLowIdx, lowestLowVal]
+
+
+// =============== =============== =============== =============== =============== =============== =============== ===============
+// PROBABLE STL
+// =============== =============== =============== =============== =============== =============== =============== ===============
+var string probSwingPointTxt_Var = na
+var float highFromProbSTL_Var = na
+
+var int lowestLowFromProbSTHidx = na
+var float lowestLowFromProbSTHval = na
+
+var int STHidx_Var = na
+var float STHhigh_Var = na
+
+var int STLidx_Var = na
+var float STLlow_Var = na
+
+var float intLowVal_Var = na
+var int intLowidx_Var = na
+var float intLowStochK_Var = na
+
+var  string intLow_Var = na
+string intLtxt = na
+
+
+var STLidxArray = array.new_int()
+var STLlowArray = array.new_float()
+var STLstochKarray = array.new_float()
+
+var string STLandBO_Var = na
+if (high > high[1]) and (probSwingPointTxt_Var[1] != "probSTL")
+    probSwingPointTxt_Var := "probSTL"
+    highFromProbSTL_Var := high
+
+    STLidx_Var := lowestLowFromProbSTHidx
+    STLlow_Var := lowestLowFromProbSTHval
+
+    intLowVal_Var := STLlow_Var
+    intLowidx_Var := STLidx_Var
+    intLowStochK_Var := k[bar_index - STLidx_Var]
+
+    intLow_Var := "intL"
+    intLtxt := "intL"
+    STLandBO_Var := "STL"
+    
+    array.push(STLidxArray,intLowidx_Var )
+    array.push(STLlowArray, intLowVal_Var)
+    array.push(STLstochKarray, intLowStochK_Var)
+
+
+    // line.new(STLidx_Var, STLlow_Var, STHidx_Var, STHhigh_Var, force_overlay = true)
+    // label.new(STLidx_Var, STLlow_Var, "STL", color = color.teal, style = label.style_label_up, textcolor = color.white)
+
+highFromProbSTL_Var := math.max(highFromProbSTL_Var, high)
+var int highestHighIdx = na
+if high == highFromProbSTL_Var
+    highestHighIdx := bar_index
+
+
+
+
+
+// =============== =============== =============== =============== =============== =============== =============== ===============
+// PROBABLE STH
+// =============== =============== =============== =============== =============== =============== =============== ===============
+var string intHigh_Var = na
+string intHigh = na
+
+
+var float intHighVal_Var = na
+var int intHighidx_Var = na
+var float intHighStochK_Var = na
+
+
+var STHidxArray = array.new_int()
+var STHhighArray = array.new_float()
+var STHstochKarray = array.new_float()
+
+var string STHandBO_Var = na
+if (low < low[1]) and (probSwingPointTxt_Var[1] != "probSTH")
+    STHidx_Var := highestHighIdx
+    STHhigh_Var := highFromProbSTL_Var
+
+    intHigh_Var := "intH"
+    intHigh := "intH"
+    STHandBO_Var := "STH"
+
+
+    intHighVal_Var := STHhigh_Var
+    intHighidx_Var := STHidx_Var
+    intHighStochK_Var := k[bar_index - intHighidx_Var]
+
+    array.push(STHidxArray,intHighidx_Var )
+    array.push(STHhighArray, intHighVal_Var)
+    array.push(STHstochKarray, intHighStochK_Var)
+
+    lowestLowFromProbSTHval := low
+
+    highFromProbSTL_Var := high
+    probSwingPointTxt_Var := "probSTH"
+
+    // line.new(STHidx_Var, STHhigh_Var, STLidx_Var, STLlow_Var, force_overlay = true)
+    // label.new(bar_index, high, "LL", color = color.teal, style = label.style_label_down, textcolor = color.white)
+    // label.new(STHidx_Var, STHhigh_Var, "STH", color = color.teal, style = label.style_label_down, textcolor = color.white)
+
+
+
+lowestLowFromProbSTHval := math.min(lowestLowFromProbSTHval, low)
+if low == lowestLowFromProbSTHval
+    lowestLowFromProbSTHidx := bar_index
+
+
+
+
+
+
+
+
+
+
+// =============== =============== =============== =============== =============== =============== =============== =============== ===============
+// HIDDEN DIVERGENCE
+// =============== =============== =============== =============== =============== =============== =============== =============== ===============
+
+
+// --------------------------------------------------------------------------------------------------------------------------------------------
+// 1. Bullish Hidden Divergence
+// --------------------------------------------------------------------------------------------------------------------------------------------
+var STL1withHiddenDIvergenceIdxArray = array.new_int()
+var STL2withHiddenDIvergenceIdxArray = array.new_int()
+
+
+
+
+int probBuHidDivgSTL1idx = 0
+float probBuHidDivgSTL1low = na
+float probBuHidDivgSTL2stochK = na
+float probBuHidDivgSTL1stochK = na
+
+int probBuHidDivgSTL2idx = na
+float probBuHidDivgSTL2low = na
+bool higherLow = false
+if intLtxt == "intL"
+    // label.new(bar_index, low, "STL2", color = color.teal, style = label.style_label_up, textcolor = color.white)
+    intLarraySize = array.size(STLidxArray)
+    noOfLoop = 0
+    for i = (intLarraySize - 1) to 0
+        pastSTLidx = array.get(STLidxArray, i)
+        pastSTLlow = array.get(STLlowArray, i)
+        pastSTLstochK = array.get(STLstochKarray, i)
+        gapBetwnTwoSTL = bar_index - pastSTLidx
+        noOfLoop += 1
+
+        noSmaeSTL1idx = array.includes(STL1withHiddenDIvergenceIdxArray, pastSTLidx) == false
+        noSmaeSTL2idx = array.includes(STL2withHiddenDIvergenceIdxArray, intLowidx_Var) == false
+
+        if (pastSTLlow < STLlow_Var) and noSmaeSTL1idx and noSmaeSTL2idx and (gapBetwnTwoSTL >= 20) 
+            
+            [lowestLowIdx, lowestLowVal] = bc.func_indexWithLowestValue(gapBetwnTwoSTL, low[0], bar_index, 0)
+            
+            if (lowestLowVal >= pastSTLlow) 
+                higherLow := true
+                // lowestKIdx = bar_index + lowestStochKoffset
+                probBuHidDivgSTL1idx := pastSTLidx
+                probBuHidDivgSTL1low := pastSTLlow
+
+                probBuHidDivgSTL2idx := intLowidx_Var
+                probBuHidDivgSTL2low := intLowVal_Var
+                probBuHidDivgSTL2stochK := k[bar_index - intLowidx_Var]
+                probBuHidDivgSTL1stochK := pastSTLstochK
+
+                // // [lowestKIdx, lowestKVal] = func_indexWithIndicatorLowestValue(gapBetwnTwoSTL, k, bar_index, 0)
+                // // func_indexWithIndicatorLowestValue(int lookback, float currentBarLow, int breakoutIdx, int forLoopSP, base)
+                // // secondStochKshouldBeTheLowerOne = pastSTLstochK > lowestKVal
+                // secondStochKshouldBeTheLowerOne = true
+
+                // if secondStochKshouldBeTheLowerOne
+                array.push(STL1withHiddenDIvergenceIdxArray, pastSTLidx)
+                array.push(STL2withHiddenDIvergenceIdxArray, intLowidx_Var)
+
+                
+
+                // label.new(lowestKIdx, lowestStochK, str.tostring(lowestStochKoffset), color = color.teal, style = label.style_label_up, textcolor = color.white)
+                // label.new(probBuHidDivgSTL2idx, probBuHidDivgSTL2low, str.tostring(pastSTLidx), color = color.olive, style = label.style_label_up, textcolor = color.white, force_overlay = true)
+
+              
+
+
+        if noOfLoop >= 10
+            break
+
+
+
+
+
+
+gapBetwnCBandPorbBuSTL1idx = higherLow ?  (bar_index - probBuHidDivgSTL1idx) : 1
+lowestStochK = ta.lowest(k, gapBetwnCBandPorbBuSTL1idx)
+lowestStochKoffset = ta.lowestbars(k, gapBetwnCBandPorbBuSTL1idx)
+
+
+string bullishDivergence = na
+var int buHiddenDivergIdx_Var = na
+var string divergAndCO = na
+if higherLow and (lowestStochK == probBuHidDivgSTL2stochK) and (probBuHidDivgSTL1stochK > probBuHidDivgSTL2stochK)
+    bullishDivergence := "bu"
+    divergAndCO := "diverg"
+    buHiddenDivergIdx_Var := bar_index
+
+    line.new(probBuHidDivgSTL1idx, probBuHidDivgSTL1stochK, bar_index + lowestStochKoffset, lowestStochK, force_overlay = false, color = color.teal, width = 2)
+    line.new(probBuHidDivgSTL1idx, probBuHidDivgSTL1low, probBuHidDivgSTL2idx, probBuHidDivgSTL2low, force_overlay = true, color = color.teal, width = 2)
+    // buDIvergLabel = label.new(probBuHidDivgSTL2idx, k[lowestStochKoffset * (-1)], "Bull", style = label.style_label_up, color= color.teal, textcolor = color.white, size = size.small)
+    
+
+
+
+
+// --------------------- 1A. K crossover After Bullish Divergence --------------------------------------------------------------------------------------------------------------
+bool kCOafterDiverg = false
+if ta.crossover(k, d) and ((bar_index - buHiddenDivergIdx_Var) <= 10) and (divergAndCO == "diverg")
+    kCOafterDiverg := true
+    divergAndCO := "co"
+    // label.new(bar_index, k, "B", style = label.style_label_up, color= color.teal, textcolor = color.white, size = size.small)
+    
+
+
+
+
+
+
+
+
+// --------------------------------------------------------------------------------------------------------------------------------------------
+// 2. Bearish Hidden Divergence
+// --------------------------------------------------------------------------------------------------------------------------------------------
+var STH1withHiddenDIvergenceIdxArray = array.new_int()
+var STH2withHiddenDIvergenceIdxArray = array.new_int()
+
+
+
+int probBeHidDivgSTH1idx = 0
+float probBeHidDivgSTH1high = na
+float probBeHidDivgSTH2stochK = na
+float probBeHidDivgSTH1stochK = na
+
+int probBeHidDivgSTH2idx = na
+float probBeHidDivgSTH2high = na
+bool lowerHigh = false
+
+
+// STHidxArray
+// STHhighArray
+if intHigh == "intH"
+    // label.new(bar_index, low, "STL2", color = color.teal, style = label.style_label_up, textcolor = color.white)
+    intHarraySize = array.size(STHidxArray)
+    noOfLoop = 0
+    for i = (intHarraySize - 1) to 0
+        pastSTHidx = array.get(STHidxArray, i)
+        pastSTHhigh = array.get(STHhighArray, i)
+        pastSTHstochK = array.get(STHstochKarray, i)
+   
+        gapBetwnTwoSTL = bar_index - pastSTHidx
+        noOfLoop += 1
+
+        noSmaeSTH1idx = array.includes(STH1withHiddenDIvergenceIdxArray, pastSTHidx) == false
+        noSmaeSTH2idx = array.includes(STH2withHiddenDIvergenceIdxArray, intHighidx_Var) == false
+
+        if (pastSTHhigh > intHighVal_Var) and noSmaeSTH1idx and noSmaeSTH2idx and (gapBetwnTwoSTL >= 20) 
+            
+            [highestHigh1Idx, highestHigh1Val] = bc.func_indexWithHighestValue(gapBetwnTwoSTL, high[0], bar_index, 0)
+            
+            if (highestHigh1Val <= pastSTHhigh) 
+                lowerHigh := true
+                    // lowestKIdx = bar_index + lowestStochKoffset
+                probBeHidDivgSTH1idx := pastSTHidx
+                probBeHidDivgSTH1high := pastSTHhigh
+
+                probBeHidDivgSTH2idx := intHighidx_Var
+                probBeHidDivgSTH2high := intHighVal_Var
+
+                probBeHidDivgSTH2stochK := k[bar_index - intHighidx_Var]
+                probBeHidDivgSTH1stochK := pastSTHstochK
+
+                // // [lowestKIdx, lowestKVal] = func_indexWithIndicatorLowestValue(gapBetwnTwoSTL, k, bar_index, 0)
+                // // func_indexWithIndicatorLowestValue(int lookback, float currentBarLow, int breakoutIdx, int forLoopSP, base)
+                // // secondStochKshouldBeTheLowerOne = pastSTLstochK > lowestKVal
+                // secondStochKshouldBeTheLowerOne = true
+
+                // if secondStochKshouldBeTheLowerOne
+                array.push(STH1withHiddenDIvergenceIdxArray, pastSTHidx)
+                array.push(STH2withHiddenDIvergenceIdxArray, intHighidx_Var)
+
+                
+
+                // label.new(lowestKIdx, lowestStochK, str.tostring(lowestStochKoffset), color = color.teal, style = label.style_label_up, textcolor = color.white)
+                // label.new(probBuHidDivgSTL2idx, probBuHidDivgSTL2low, str.tostring(pastSTLidx), color = color.olive, style = label.style_label_up, textcolor = color.white, force_overlay = true)
+
+                // line.new(pastSTLidx, pastSTLstochK, lowestKIdx, lowestStochK, force_overlay = false)
+
+            // line.new(probBuHidDivgSTL1idx, probBuHidDivgSTL1stochK, bar_index + lowestStochKoffset, lowestStochK, force_overlay = false, color = color.red, width = 2)
+            // line.new(probBeHidDivgSTH1idx, probBeHidDivgSTH1high, probBeHidDivgSTH2idx, probBeHidDivgSTH2high, force_overlay = true, color = color.red)
+
+
+
+
+        if noOfLoop >= 10
+            break
+
+
+
+
+
+
+gapBetwnCBandPorbBuSTH1idx = lowerHigh ?  (bar_index - probBeHidDivgSTH1idx) : 1
+highestStochK = ta.highest(k, gapBetwnCBandPorbBuSTH1idx)
+highestStochKoffset = ta.highestbars(k, gapBetwnCBandPorbBuSTH1idx)
+
+
+var stochKidxWithDIvergence = array.new_int()
+
+var line beLowerHighLine = na
+var line beDivergLine = na
+// var label beDIvergLabel = na
+
+var int lowerHighWithBeDiverg_Var = na
+string bearishDivergence = na
+
+var int beDivergIdx_Var = na
+var string beDivergAndCD = na
+if lowerHigh and (highestStochK > probBeHidDivgSTH1stochK) and (probBeHidDivgSTH2stochK > probBeHidDivgSTH1stochK)
+    
+    noSameStochKidxForBeDiverg = array.includes(stochKidxWithDIvergence,  bar_index + highestStochKoffset) == false
+
+    if noSameStochKidxForBeDiverg
+        beDivergStochK2idx = bar_index + highestStochKoffset
+        array.push(stochKidxWithDIvergence, beDivergStochK2idx)
+
+        beLowerHighLine := line.new(probBeHidDivgSTH1idx, probBeHidDivgSTH1stochK, bar_index + highestStochKoffset, highestStochK, force_overlay = false, color = color.red, width = 2)
+        beDivergLine := line.new(probBeHidDivgSTH1idx, probBeHidDivgSTH1high, probBeHidDivgSTH2idx, probBeHidDivgSTH2high, force_overlay = true, color = color.red, width = 2)
+        
+        // beDIvergLabel := label.new(beDivergStochK2idx, k[highestStochKoffset * (-1)], "Bear", style = label.style_label_down, color= #c83939, textcolor = color.white, size = size.small)
+    
+        lowerHighWithBeDiverg_Var := probBeHidDivgSTH2idx
+
+        bearishDivergence := "be"
+        beDivergAndCD := "diverg"
+        beDivergIdx_Var := bar_index
+
+        // if (bar_index - lowerHighWithBeDiverg_Var[1]) <= 5
+        //     bearishDivergence := "be"
+        //     beDivergAndCO := "diverg"
+        //     beDivergIdx_Var := bar_index
+            // line.delete(beLowerHighLine)
+            // line.delete(beDivergLine)
+            // label.delete(beDIvergLabel)
+            
+
+
+
+
+// --------------------- 2A. K crossover After Bearish Divergence --------------------------------------------------------------------------------------------------------------
+bool kCDafterBeDiverg = false
+if ta.crossunder(k, d) and ((bar_index - beDivergIdx_Var) <= 10) and (beDivergAndCD == "diverg")
+    kCDafterBeDiverg := true
+    divergAndCO := "co"
+    beDivergAndCD := "cd"
+    // label.new(bar_index, k, "S", style = label.style_label_down, color= #972a2a, textcolor = color.white, size = size.small)
+    
+
+
+
+
+
+
+
+
+
+// ==========================================================================================================================================
+// DAILY EMA CONDITION
+// ==========================================================================================================================================
+ema50 = ta.ema(close, 50)
+closeAboveEMA = close > ema50
+closeBelowEMA = close < ema50
+
+dailyCloseAboveEMA = request.security(syminfo.tickerid, "1D", closeAboveEMA)
+dailyCloseBelowEMA = request.security(syminfo.tickerid, "1D", closeBelowEMA)
+
+
+// plotshape(dailyCloseAboveEMA and (dailyCloseAboveEMA[1] == false),  force_overlay=true,style = shape.labelup, location = location.belowbar, text = "dBu", color = color.teal, textcolor = color.white)
+// if dailyCloseAboveEMA
+
+
+
+
+
+
+// ==========================================================================================================================================
+// 4 HOUR CONDITION
+// ==========================================================================================================================================
+fourHourBuDivergence = request.security(syminfo.tickerid, "240", kCOafterDiverg)
+fourHourBeDivergence = request.security(syminfo.tickerid, "240", kCDafterBeDiverg)
+
+// if fourHourBuDivergence and dailyCloseAboveEMA
+//     label.new(bar_index, low, "BuDi", color = color.teal, textcolor = color.white, force_overlay = true, style = label.style_label_up)
+
+// if fourHourBeDivergence and dailyCloseBelowEMA
+//     label.new(bar_index, high, "BeDi", color = #b33232, textcolor = color.white, force_overlay = true)
+
+
+
+
+
+
+// ==========================================================================================================================================
+// 1 HOUR CONDITION
+// ==========================================================================================================================================
+kBelow20 = k <= 20
+kabove80 = k >=80
+oneHourBuStochKcond = request.security(syminfo.tickerid, "60", kBelow20)
+oneHourBeStochKcond = request.security(syminfo.tickerid, "60", kabove80)
+
+
+var string oneHourBuCondTxt_Var = na
+bool buCond = false
+if fourHourBuDivergence and dailyCloseAboveEMA and oneHourBuStochKcond and (oneHourBuStochKcond[1] == false)
+    buCond := true
+    oneHourBuCondTxt_Var := "H1"
+    // label.new(bar_index, low, "BuDi", color = color.teal, textcolor = color.white, force_overlay = true, style = label.style_label_up)
+
+
+bool beCond = false
+var string oneHourBeCondTxt_Var = na
+if fourHourBeDivergence and dailyCloseBelowEMA and oneHourBeStochKcond and (oneHourBeStochKcond[1] == false)
+    beCond := true
+    oneHourBeCondTxt_Var := "H1"
+    // label.new(bar_index, high, "BeDi", color = #b33232, textcolor = color.white, force_overlay = true)
+
+
+plotshape(buCond,  force_overlay=true,style = shape.labelup, location = location.belowbar, text = "dBu", color = color.teal, textcolor = color.white)
+plotshape(beCond,  force_overlay=true,style = shape.labeldown, location = location.abovebar, text = "dBe", color = color.red, textcolor = color.white)
+
+
+
+
+
+
+
+
+
+
+
+// ============== ================== ================== ================== ================= ================= ================= ===================
+// 5 MINUTE CONDITION
+// ============== ================== ================== ================== ================= ================= ================= ===================
+
+// // --------------------------------------------------------------------------------------------------------------------------------------------
+// // 1. BULLISH BREAKOUT
+// // --------------------------------------------------------------------------------------------------------------------------------------------
+// var string m5STHbuBo = na
+// if (close > intHighVal_Var) and (STHandBO_Var == "STH") and (timeframe.period == "5") and (oneHourBuCondTxt_Var == "H1")
+//     oneHourBuCondTxt_Var := "M5"
+//     m5STHbuBo := "BO"
+//     label.new(bar_index, high, "BO", color = color.teal, textcolor = color.white, force_overlay = true)
+
+
+
+// // --------------------------------------------------------------------------------------------------------------------------------------------
+// // 2. BULLISH FVG
+// // --------------------------------------------------------------------------------------------------------------------------------------------
+// var float buFVGur_Var = na
+// if (high[2] < low) and (open[1] < high[2]) and (close[1] > low) and (m5STHbuBo == "BO")
+//     m5STHbuBo := "FVG"
+//     buFVGur_Var := low
+//     label.new(bar_index, high, "FVG", color = #973030, textcolor = color.white, force_overlay = true, size = size.small)
+
+
+
+// // --------------------------------------------------------------------------------------------------------------------------------------------
+// // 3. BULLISH MITIGATION
+// // --------------------------------------------------------------------------------------------------------------------------------------------
+// if (m5STHbuBo[1] == "FVG") and (low <= buFVGur_Var)
+//     m5STHbuBo := "mitigation"
+//     label.new(bar_index, high, "M", color = #bb3737, textcolor = color.white, force_overlay = true, size = size.small)
+
+
+
+
+
+
+
+
+// --------------------------------------------------------------------------------------------------------------------------------------------
+// 1. BEARISH BREAKOUT
+// --------------------------------------------------------------------------------------------------------------------------------------------
+var string m5STLbeBo = na
+if (close < intLowVal_Var) and (STLandBO_Var == "STL") and (timeframe.period == "5") and (oneHourBeCondTxt_Var == "H1")
+    oneHourBeCondTxt_Var := "M5"
+    m5STLbeBo := "BO"
+    label.new(bar_index, high, "BO", color = color.teal, textcolor = color.white, force_overlay = true)
+
+
+
+// --------------------------------------------------------------------------------------------------------------------------------------------
+// 2. BEARISH FVG
+// --------------------------------------------------------------------------------------------------------------------------------------------
+var float beFVGlr_Var = na
+if (high < low[2]) and (open[1] > low[2]) and (close[1] < high) and (m5STLbeBo == "BO")
+    m5STLbeBo := "FVG"
+    beFVGlr_Var := high
+    label.new(bar_index, high, "FVG", color = #973030, textcolor = color.white, force_overlay = true, size = size.small)
+
+
+
+// --------------------------------------------------------------------------------------------------------------------------------------------
+// 3. BEARISH MITIGATION
+// --------------------------------------------------------------------------------------------------------------------------------------------
+if (m5STLbeBo[1] == "FVG") and (high >= beFVGlr_Var)
+    m5STLbeBo := "mitigation"
+    label.new(bar_index, high, "M", color = #bb3737, textcolor = color.white, force_overlay = true, size = size.small)
+
+
+
+
+
+
+
+
+
+// STLandBO_Var := "STL"
+// STHandBO_Var := "STH"

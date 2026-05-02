@@ -1,0 +1,116 @@
+//@version=6
+strategy(
+    title             = "BTC Trend Pullback Breakout RR+",
+    overlay           = true,
+    default_qty_type  = strategy.percent_of_equity,
+    default_qty_value = 2,
+    commission_type   = strategy.commission.percent,
+    commission_value  = 0.04,
+    slippage          = 2,
+    initial_capital   = 10000,
+    currency          = currency.USD,
+    max_bars_back     = 500
+)
+
+// Tuned for BTC intraday execution (recommended chart: 15m)
+
+// Session / Frequency Controls
+grp_session = "Session & Frequency"
+i_active_session = input.session("0700-2200", "Active Session (UTC)", group=grp_session)
+i_cooldown_bars = input.int(3, "Cooldown Bars", minval=1, maxval=200, group=grp_session)
+i_max_trades_day = input.int(8, "Max Trades Per Day", minval=1, maxval=10, group=grp_session)
+
+// Trend
+grp_trend = "Trend"
+i_ema_fast = input.int(50, "EMA Fast", minval=10, maxval=200, group=grp_trend)
+i_ema_slow = input.int(200, "EMA Slow", minval=50, maxval=400, group=grp_trend)
+i_ema_pull = input.int(21, "EMA Pullback", minval=5, maxval=100, group=grp_trend)
+i_adx_len = input.int(14, "ADX Length", minval=5, maxval=50, group=grp_trend)
+i_adx_min = input.float(12.0, "Min ADX", minval=5.0, step=1.0, group=grp_trend)
+
+// Momentum
+grp_momo = "Momentum"
+i_rsi_len = input.int(14, "RSI Length", minval=2, maxval=50, group=grp_momo)
+i_rsi_long_trigger = input.float(50.0, "RSI Long Trigger (cross above)", minval=35.0, maxval=70.0, step=0.5, group=grp_momo)
+i_rsi_short_trigger = input.float(50.0, "RSI Short Trigger (cross below)", minval=30.0, maxval=65.0, step=0.5, group=grp_momo)
+
+// Volatility
+grp_vol = "Volatility"
+i_atr_len = input.int(14, "ATR Length", minval=5, maxval=50, group=grp_vol)
+i_min_atr_pct = input.float(0.20, "Min ATR % of Price", minval=0.05, step=0.05, group=grp_vol)
+
+// Risk / Exits
+grp_risk = "Risk"
+i_rr = input.float(2.0, "Risk:Reward", minval=1.2, step=0.1, group=grp_risk)
+i_sl_atr_mult = input.float(0.75, "SL ATR Multiplier", minval=0.2, step=0.1, group=grp_risk)
+i_swing_lookback = input.int(5, "Swing Lookback Bars", minval=2, maxval=50, group=grp_risk)
+
+// State
+in_session = not na(time(timeframe.period, i_active_session, "UTC"))
+atr = ta.atr(i_atr_len)
+atr_pct = close > 0 ? (atr / close) * 100.0 : 0.0
+vol_ok = atr_pct >= i_min_atr_pct
+
+ema_fast = ta.ema(close, i_ema_fast)
+ema_slow = ta.ema(close, i_ema_slow)
+ema_pull = ta.ema(close, i_ema_pull)
+[_di_plus, _di_minus, adx] = ta.dmi(i_adx_len, i_adx_len)
+
+rsi = ta.rsi(close, i_rsi_len)
+recent_low = ta.lowest(low, i_swing_lookback)
+recent_high = ta.highest(high, i_swing_lookback)
+
+trend_long = ema_fast > ema_slow and close > ema_fast
+trend_short = ema_fast < ema_slow and close < ema_fast
+trend_ok = adx >= i_adx_min
+
+pullback_long = low <= ema_pull and close > ema_pull
+pullback_short = high >= ema_pull and close < ema_pull
+
+momentum_long = ta.crossover(rsi, i_rsi_long_trigger)
+momentum_short = ta.crossunder(rsi, i_rsi_short_trigger)
+
+break_long = close > high[1]
+break_short = close < low[1]
+
+// Trade frequency controls
+var int last_trade_bar = na
+var int trades_today = 0
+
+new_day = ta.change(time("D")) != 0
+if new_day
+    trades_today := 0
+
+cooldown_ok = na(last_trade_bar) or (bar_index - last_trade_bar) >= i_cooldown_bars
+day_limit_ok = trades_today < i_max_trades_day
+
+long_sig = barstate.isconfirmed and in_session and vol_ok and trend_ok and trend_long and pullback_long and momentum_long and break_long and strategy.position_size == 0 and cooldown_ok and day_limit_ok
+short_sig = barstate.isconfirmed and in_session and vol_ok and trend_ok and trend_short and pullback_short and momentum_short and break_short and strategy.position_size == 0 and cooldown_ok and day_limit_ok
+
+if long_sig
+    float sl_long = math.min(recent_low - atr * i_sl_atr_mult, close - syminfo.mintick)
+    float tp_long = close + (close - sl_long) * i_rr
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long-X", "Long", stop=sl_long, limit=tp_long)
+    last_trade_bar := bar_index
+    trades_today += 1
+
+if short_sig
+    float sl_short = math.max(recent_high + atr * i_sl_atr_mult, close + syminfo.mintick)
+    float tp_short = close - (sl_short - close) * i_rr
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short-X", "Short", stop=sl_short, limit=tp_short)
+    last_trade_bar := bar_index
+    trades_today += 1
+
+// Visuals
+bgcolor(in_session ? color.new(color.blue, 92) : na, title="Active Session")
+bgcolor(long_sig ? color.new(color.lime, 70) : na, title="Long Signal")
+bgcolor(short_sig ? color.new(color.red, 70) : na, title="Short Signal")
+
+plot(ema_fast, "EMA Fast", color=color.new(color.orange, 0), linewidth=2)
+plot(ema_slow, "EMA Slow", color=color.new(color.red, 10), linewidth=2)
+plot(ema_pull, "EMA Pullback", color=color.new(color.teal, 0), linewidth=1)
+
+plot(adx, "ADX", color=color.new(color.fuchsia, 0), display=display.none)
+plot(rsi, "RSI", color=color.new(color.purple, 0), display=display.none)

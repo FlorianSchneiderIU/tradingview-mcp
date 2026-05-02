@@ -1,0 +1,862 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © fluxchart
+
+//@version=5
+const bool DEBUG = false
+const bool fixSRs = true
+indicator("Support & Resistance (MTF) Flux Charts", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500, dynamic_requests = true)
+
+const int maxSRInfoListSize = 10
+const int maxBarInfoListSize = 3000
+const int maxDistanceToLastBar = 500
+const int retestLabelCooldown = 3
+const float retestATR = 1.0 / 8.0
+const float zoneSizeATR = 0.075
+const int labelOffsetBars = 20
+
+const int atrLen = 20
+atr = ta.atr(atrLen)
+avgVolume = ta.sma(volume, atrLen)
+
+var int curTFMS = timeframe.in_seconds(timeframe.period) * 1000
+var map<string, bool> alerts = map.new<string, bool>()
+alerts.put("Retest", false)
+alerts.put("Break", false)
+
+srPivotLength = input.int(15, "Pivot Length", minval = 3, maxval = 50, group = "General Configuration", display = display.none)
+srStrength = input.int(1, "Strength", [1, 2, 3], group = "General Configuration", display = display.none)
+srInvalidation = input.string("Wick", "Invalidation", ["Wick", "Close"], group = "General Configuration", display = display.none)
+expandZones = input.string("Only Valid", "Expand Lines & Zones", options = ["All", "Only Valid", "None"], group = "General Configuration", display = display.none)
+showInvalidated = input.bool(true, "Show Invalidated", group = "General Configuration", display = display.none)
+
+timeframe1Enabled = input.bool(true, title = "", group = "Timeframes", inline = "timeframe1", display = display.none)
+timeframe1 = input.timeframe("", title = "", group = "Timeframes", inline = "timeframe1", display = display.none)
+timeframe2Enabled = input.bool(false, title = "", group = "Timeframes", inline = "timeframe2", display = display.none)
+timeframe2 = input.timeframe("D", title = "", group = "Timeframes", inline = "timeframe2", display = display.none)
+timeframe3Enabled = input.bool(false, title = "", group = "Timeframes", inline = "timeframe3", display = display.none)
+timeframe3 = input.timeframe("W", title = "", group = "Timeframes", inline = "timeframe3", display = display.none)
+
+showBreaks = input.bool(true, "Show Breaks", group = "Breaks & Retests", inline = "ShowBR", display = display.none)
+showRetests = input.bool(true, "Show Retests", group = "Breaks & Retests", inline = "ShowBR", display = display.none)
+avoidFalseBreaks = input.bool(false, "Avoid False Breaks", group = "Breaks & Retests", display = display.none)
+breakVolumeThreshold = input.float(0.3, "Break Volume Threshold", minval = 0.1, maxval = 2.0, step = 0.1, group = "Breaks & Retests", tooltip = "Only taken into account if Avoid False Breakouts is enabled.\nHigher values mean it's less likely to be a break.", display = display.none)
+inverseBrokenLineColor = input.bool(false, "Inverse Color After Broken", group = "Breaks & Retests", display = display.none)
+
+styleMode = input.string("Lines", "Style", ["Lines", "Zones"], group = "Style", display = display.none)
+lineStyle = input.string("____", "Line Style", ["____", "----", "...."], group = "Style", display = display.none)
+lineWidth = input.int(2, "Line Width", minval = 1, group = "Style", display = display.none)
+supportColor = input.color(#08998180, "Support Color", group = "Style", inline = "RScolors", display = display.none)
+resistanceColor = input.color(#f2364580, "Resistance Color", group = "Style", inline = "RScolors", display = display.none)
+breakColor = input.color(color.blue, "Break Color", group = "Style", inline = "RScolors2", display = display.none)
+textColor = input.color(#ffffff80, "Text Color", group = "Style", inline = "RScolors2", display = display.none)
+
+enableRetestAlerts = input.bool(true, "Enable Retest Alerts", tooltip = "Needs Show Retests option enabled.", group = "Alerts", display = display.none)
+enableBreakAlerts = input.bool(true, "Enable Break Alerts", tooltip = "Needs Show Breaks option enabled.", group = "Alerts", display = display.none)
+
+insideBounds = (bar_index > last_bar_index - maxDistanceToLastBar)
+
+type srInfo
+    int startTime
+    float price
+    string srType
+    int strength
+    string timeframeStr
+    bool ephemeral = false
+
+    int breakTime
+    array<int> retestTimes
+
+type srObj
+    srInfo info
+
+    bool startFixed
+    bool breakFixed
+
+    line srLine
+    box srBox
+    label srLabel
+    label breakLabel
+    array<label> retestLabels
+
+type barInfo
+    int t
+    int tc
+    float h
+    float l
+
+//#region Find Val RTN Time
+findValRtnTime (barInfo[] biList, valToFind, toSearch, searchMode, minTime, maxTime, int defVal = na) =>
+    int rtnTime = defVal
+    float minDiff = na
+    if biList.size() > 0
+        for i = biList.size() - 1 to 0
+            curBI = biList.get(i)
+            if curBI.t >= minTime and curBI.t < maxTime
+                toLook = (toSearch == "Low" ? curBI.l : curBI.h)
+                if searchMode == "Nearest"
+                    curDiff = math.abs(valToFind - toLook)
+                    if na(minDiff)
+                        rtnTime := curBI.t
+                        minDiff := curDiff
+                    else
+                        if curDiff <= minDiff
+                            minDiff := curDiff
+                            rtnTime := curBI.t
+                if searchMode == "Higher"
+                    if toLook >= valToFind
+                        rtnTime := curBI.t
+                        break
+                if searchMode == "Lower"
+                    if toLook <= valToFind
+                        rtnTime := curBI.t
+                        break
+    rtnTime
+//#endregion
+
+formatTimeframeString (formatTimeframe) =>
+    timeframeF = formatTimeframe == "" ? timeframe.period : formatTimeframe
+    
+    if str.contains(timeframeF, "D") or str.contains(timeframeF, "W") or str.contains(timeframeF, "S") or str.contains(timeframeF, "M")
+        timeframeF
+    else
+        seconds = timeframe.in_seconds(timeframeF)
+        if seconds >= 3600
+            hourCount = int(seconds / 3600)
+            str.tostring(hourCount) + " Hour" + (hourCount > 1 ? "s" : "")
+        else
+            timeframeF + " Min"
+
+renderSRObj (srObj sr) =>
+    if na(sr.info.breakTime) or showInvalidated
+        endTime = nz(sr.info.breakTime, time + curTFMS * labelOffsetBars)
+        extendType = extend.none
+        if na(sr.info.breakTime)
+            extendType := extend.right
+        if expandZones == "Only Valid" and na(sr.info.breakTime)
+            extendType := extend.both
+        else if expandZones == "All"
+            extendType := extend.both
+            endTime := time + curTFMS * labelOffsetBars
+        
+        labelTitle = formatTimeframeString(sr.info.timeframeStr) + " | " + str.tostring(sr.info.price, format.mintick)
+        if styleMode == "Lines"
+            // Line
+            sr.srLine := line.new(sr.info.startTime, sr.info.price, endTime, sr.info.price, xloc = xloc.bar_time, color = sr.info.srType == "Resistance" ? resistanceColor : supportColor, width = lineWidth, style = lineStyle == "----" ? line.style_dashed : lineStyle == "...." ? line.style_dotted : line.style_solid, extend = extendType)
+            // Label
+            sr.srLabel := label.new(extendType == extend.none ? ((sr.info.startTime + endTime) / 2) : endTime, sr.info.price, xloc = xloc.bar_time, text = labelTitle, textcolor = textColor, style = label.style_none)
+        else
+            // Zone
+            sr.srBox := box.new(sr.info.startTime, sr.info.price + atr * zoneSizeATR, endTime, sr.info.price - atr * zoneSizeATR, xloc = xloc.bar_time, bgcolor = sr.info.srType == "Resistance" ? resistanceColor : supportColor, border_color = na, text = labelTitle, text_color = textColor, extend = extendType, text_size = size.normal, text_halign = (extendType != extend.none) ? text.align_right : text.align_center)
+
+        // Break Label
+        if showBreaks
+            if not na(sr.info.breakTime)
+                sr.breakLabel := label.new(sr.info.breakTime, sr.info.price, "B", yloc = sr.info.srType ==  "Resistance" ? yloc.belowbar : yloc.abovebar, style = sr.info.srType == "Resistance" ? label.style_label_up : label.style_label_down, color = breakColor, textcolor = color.new(textColor, 0), xloc = xloc.bar_time, size = size.small)
+                if (time - curTFMS <= sr.info.breakTime) and (time + curTFMS >= sr.info.breakTime)
+                    alerts.put("Break", true)
+
+        // Retest Labels
+        if showRetests
+            if sr.info.retestTimes.size() > 0
+                for i = sr.info.retestTimes.size() - 1 to 0
+                    curRetestTime = sr.info.retestTimes.get(i)
+                    cooldownOK = true
+                    if sr.retestLabels.size() > 0
+                        lastLabel = sr.retestLabels.get(0)
+                        if math.abs(lastLabel.get_x() - curRetestTime) < curTFMS * retestLabelCooldown
+                            cooldownOK := false
+
+                    if cooldownOK
+                        if time - curTFMS <= curRetestTime and time >= curRetestTime
+                            alerts.put("Retest", true)
+                        sr.retestLabels.unshift(label.new(curRetestTime, sr.info.price, "R", yloc = sr.info.srType ==  "Resistance" ? yloc.abovebar : yloc.belowbar, style = sr.info.srType == "Resistance" ? label.style_label_down : label.style_label_up, color = sr.info.srType == "Resistance" ? resistanceColor : supportColor, textcolor = color.new(textColor, 0), xloc = xloc.bar_time, size = size.small))
+
+safeDeleteSRObj (srObj sr) =>
+    line.delete(sr.srLine)
+    box.delete(sr.srBox)
+    label.delete(sr.srLabel)
+    label.delete(sr.breakLabel)
+    if sr.retestLabels.size() > 0
+        for i = 0 to sr.retestLabels.size() - 1
+            curRetestLabel = sr.retestLabels.get(i)
+            label.delete(curRetestLabel)
+
+var allSRInfoList = array.new<srInfo>()
+var barInfoList = array.new<barInfo>()
+
+pivotHigh = ta.pivothigh(srPivotLength, srPivotLength)
+pivotLow = ta.pivotlow(srPivotLength, srPivotLength)
+
+barInfoList.unshift(barInfo.new(time, time_close, high, low))
+if barInfoList.size() > maxBarInfoListSize
+    barInfoList.pop()
+
+if insideBounds and barstate.isconfirmed
+    // Find Supports
+    if not na(pivotLow)
+        validSR = true
+        if allSRInfoList.size() > 0
+            for i = 0 to allSRInfoList.size() - 1
+                curRSInfo = allSRInfoList.get(i)
+                if (math.abs(curRSInfo.price - pivotLow) < atr * retestATR) and na(curRSInfo.breakTime)
+                    validSR := false
+                    break
+        
+        if validSR
+            newSRInfo = srInfo.new(barInfoList.get(srPivotLength).t, pivotLow, "Support", 0, timeframe.period)
+            newSRInfo.retestTimes := array.new<int>()
+
+            for i = 1 to srPivotLength
+                curBI = barInfoList.get(i)
+                if (curBI.l <= newSRInfo.price or math.abs(curBI.l - newSRInfo.price) <= atr * retestATR)
+                    newSRInfo.strength += 1
+                    if curBI.t != newSRInfo.startTime
+                        newSRInfo.retestTimes.unshift(curBI.t)
+            
+            allSRInfoList.unshift(newSRInfo)
+            while allSRInfoList.size() > maxSRInfoListSize
+                allSRInfoList.pop()
+    
+    // Find Resistances
+    if not na(pivotHigh)
+        validSR = true
+        if allSRInfoList.size() > 0
+            for i = 0 to allSRInfoList.size() - 1
+                curRSInfo = allSRInfoList.get(i)
+                if (math.abs(curRSInfo.price - pivotLow) < atr * retestATR) and na(curRSInfo.breakTime)
+                    validSR := false
+                    break
+        if validSR
+            newSRInfo = srInfo.new(barInfoList.get(srPivotLength).t, pivotHigh, "Resistance", 0, timeframe.period)
+            newSRInfo.retestTimes := array.new<int>()
+
+            for i = 1 to srPivotLength
+                curBI = barInfoList.get(i)
+                if (curBI.h >= newSRInfo.price or math.abs(curBI.h - newSRInfo.price) <= atr * retestATR)
+                    newSRInfo.strength += 1
+                    if curBI.t != newSRInfo.startTime
+                        newSRInfo.retestTimes.unshift(curBI.t)
+
+            allSRInfoList.unshift(newSRInfo)
+            if allSRInfoList.size() > maxSRInfoListSize
+                allSRInfoList.pop()
+
+// Handle SR Infos
+if insideBounds and (srInvalidation == "Wick" or barstate.isconfirmed)
+    if allSRInfoList.size() > 0
+        for i = 0 to allSRInfoList.size() - 1
+            srInfo curSRInfo = allSRInfoList.get(i)
+            
+            // Breaks
+            invHigh = (srInvalidation == "Close" ? close : high)
+            invLow = (srInvalidation == "Close" ? close : low)
+            closeTime = time_close
+            if na(curSRInfo.breakTime)
+                if (not curSRInfo.ephemeral) or (closeTime > curSRInfo.startTime + curTFMS * srPivotLength)
+                    if curSRInfo.srType == "Resistance" and invHigh > curSRInfo.price
+                        if (not avoidFalseBreaks) or (volume > avgVolume * breakVolumeThreshold)
+                            curSRInfo.breakTime := closeTime
+                            if inverseBrokenLineColor and not curSRInfo.ephemeral
+                                ephSR = srInfo.new(closeTime, curSRInfo.price, "Support", curSRInfo.strength, curSRInfo.timeframeStr, true)
+                                ephSR.retestTimes := array.new<int>()
+                                allSRInfoList.unshift(ephSR)
+                    else if curSRInfo.srType == "Support" and invLow < curSRInfo.price
+                        if (not avoidFalseBreaks) or (volume > avgVolume * breakVolumeThreshold)
+                            curSRInfo.breakTime := closeTime
+                            if inverseBrokenLineColor and not curSRInfo.ephemeral
+                                ephSR = srInfo.new(closeTime, curSRInfo.price, "Resistance", curSRInfo.strength, curSRInfo.timeframeStr, true)
+                                ephSR.retestTimes := array.new<int>()
+                                allSRInfoList.unshift(ephSR)
+                
+            // Strength
+            if na(curSRInfo.breakTime)
+                if curSRInfo.srType == "Resistance" and (high >= curSRInfo.price or math.abs(high - curSRInfo.price) <= atr * retestATR)
+                    int lastRetestTime = 0
+                    if curSRInfo.retestTimes.size() > 0
+                        lastRetestTime := curSRInfo.retestTimes.get(0)
+                    
+                    if lastRetestTime != time
+                        curSRInfo.strength += 1
+                        curSRInfo.retestTimes.unshift(time)
+                
+                else if curSRInfo.srType == "Support" and (low <= curSRInfo.price or math.abs(low - curSRInfo.price) <= atr * retestATR)
+                    int lastRetestTime = 0
+                    if curSRInfo.retestTimes.size() > 0
+                        lastRetestTime := curSRInfo.retestTimes.get(0)
+                    
+                    if lastRetestTime != time
+                        curSRInfo.strength += 1
+                        curSRInfo.retestTimes.unshift(time)
+
+fixSRToTimeframe (srObj sr) =>
+    srMS = math.max(timeframe.in_seconds(sr.info.timeframeStr), timeframe.in_seconds()) * 1000
+    if (not sr.startFixed)
+        if sr.info.srType == "Resistance"
+            sr.info.startTime := findValRtnTime(barInfoList, sr.info.price, "High", "Nearest", sr.info.startTime - srMS, sr.info.startTime + srMS, sr.info.startTime)
+        else
+            sr.info.startTime := findValRtnTime(barInfoList, sr.info.price, "Low", "Nearest", sr.info.startTime - srMS, sr.info.startTime + srMS, sr.info.startTime)
+        sr.startFixed := true
+
+    if not na(sr.info.breakTime)
+        if (not sr.breakFixed)
+            if sr.info.srType == "Resistance"
+                sr.info.breakTime := findValRtnTime(barInfoList, sr.info.price, "High", "Higher", sr.info.breakTime - srMS, sr.info.breakTime + srMS, sr.info.breakTime)
+            else
+                sr.info.breakTime := findValRtnTime(barInfoList, sr.info.price, "Low", "Lower", sr.info.breakTime - srMS, sr.info.breakTime + srMS, sr.info.breakTime)
+            sr.breakFixed := true
+    
+    if sr.info.retestTimes.size() > 0
+        for i = 0 to sr.info.retestTimes.size() - 1
+            curRetestTime = sr.info.retestTimes.get(i)
+
+            retestStartTime = curRetestTime - srMS
+            retestStartTime := math.max(retestStartTime, sr.info.startTime + 1)
+            
+            retestEndTime = curRetestTime + srMS
+            if not na(sr.info.breakTime)
+                retestEndTime := math.min(retestEndTime, sr.info.breakTime - 1)
+            
+            if sr.info.srType == "Resistance"
+                sr.info.retestTimes.set(i, findValRtnTime(barInfoList, sr.info.price, "High", "Nearest", retestStartTime, retestEndTime, sr.info.retestTimes.get(i)))
+            else
+                sr.info.retestTimes.set(i, findValRtnTime(barInfoList, sr.info.price, "Low", "Nearest", retestStartTime, retestEndTime, sr.info.retestTimes.get(i)))
+
+getSR (srObj[] list, srPrice, eph, srType) =>
+    srObj rtnSR = na
+    if list.size() > 0
+        for i = 0 to list.size() - 1
+            curSR = list.get(i)
+            if curSR.info.price == srPrice and curSR.info.ephemeral == eph and curSR.info.srType == srType
+                rtnSR := curSR
+                break
+    rtnSR
+
+// Handle SR
+var allSRList = array.new<srObj>()
+handleTF (tfStr, tfEnabled) =>
+    if tfEnabled
+        tfSRInfoList = request.security(syminfo.tickerid, tfStr, allSRInfoList)
+        if tfSRInfoList.size() > 0
+            for i = 0 to tfSRInfoList.size() - 1
+                srInfo curSRInfo = tfSRInfoList.get(i)
+                if fixSRs
+                    currentSameSR = getSR(allSRList, curSRInfo.price, curSRInfo.ephemeral, curSRInfo.srType)
+                    if not na(currentSameSR)
+                        if currentSameSR.startFixed
+                            curSRInfo.startTime := currentSameSR.info.startTime
+                        if currentSameSR.breakFixed
+                            curSRInfo.breakTime := currentSameSR.info.breakTime
+                            curSRInfo.retestTimes := currentSameSR.info.retestTimes
+                        currentSameSR.info := curSRInfo
+                        if not currentSameSR.breakFixed
+                            fixSRToTimeframe(currentSameSR)
+                    else
+                        srObj newSRObj = srObj.new(curSRInfo)
+                        newSRObj.retestLabels := array.new<label>()
+                        fixSRToTimeframe(newSRObj)
+                        allSRList.unshift(newSRObj)
+                else
+                    srObj newSRObj = srObj.new(curSRInfo)
+                    newSRObj.retestLabels := array.new<label>()
+                    allSRList.unshift(newSRObj)
+    true
+
+if insideBounds and barstate.islast
+    if not fixSRs
+        if allSRList.size() > 0
+            for i = 0 to allSRList.size() - 1
+                srObj curSRObj = allSRList.get(i)
+                safeDeleteSRObj(curSRObj)
+        allSRList.clear()
+        
+    handleTF(timeframe1, timeframe1Enabled)
+    handleTF(timeframe2, timeframe2Enabled)
+    handleTF(timeframe3, timeframe3Enabled)
+    
+    if allSRList.size() > 0
+        for i = 0 to allSRList.size() - 1
+            srObj curSRObj = allSRList.get(i)
+            if curSRObj.info.strength >= srStrength
+                safeDeleteSRObj(curSRObj)
+                renderSRObj(curSRObj)
+
+//plotchar(alerts.get("Break") ? high : na, "", "✅", size = size.normal)
+//plotchar(alerts.get("Retest") ? high : na, "", "❤️", size = size.normal, location = location.belowbar)
+
+alertcondition(alerts.get("Retest"), "New Retest", "")
+alertcondition(alerts.get("Break"), "New Break", "")
+
+if enableRetestAlerts and alerts.get("Retest")
+    alert("New Retests Occured.")
+
+if enableBreakAlerts and alerts.get("Break")
+    alert("New Breaks Occured.")
+
+
+//rsi
+mrsi = ta.rsi(close,14)
+colorRsi = mrsi>55?color.green: mrsi<45?color.red:color.gray
+
+//ADX
+len = input.int(14, minval=1, title="DI Length")
+lensig = input.int(14, title="ADX Smoothing", minval=1, maxval=50)
+[diplus, diminus, adx] = ta.dmi(len, lensig)
+colorADX = adx>25?color.rgb(33, 208, 243):color.gray
+
+//creating the table
+var testTable = table.new(position = position.top_right, columns = 4, rows = 2, border_width = 1, border_color = color.black, frame_width = 1, frame_color = color.black)
+
+//column Headings
+table.cell(table_id = testTable, column = 0, row = 0, text = " RSI ", bgcolor=color.aqua, text_color = color.white)
+table.cell(table_id = testTable, column = 1, row = 0, text = " DI+ ", bgcolor=color.green, text_color = color.white)
+table.cell(table_id = testTable, column = 2, row = 0, text = " DI- ", bgcolor=color.red, text_color = color.white)
+table.cell(table_id = testTable, column = 3, row = 0, text = " ADX ", bgcolor=color.aqua, text_color = color.white)
+
+//column values
+table.cell(table_id = testTable, column = 0, row = 1, text = str.tostring(math.round(mrsi,0)) ,  bgcolor= color.aqua, text_color = color.white)
+table.cell(table_id = testTable, column = 1, row = 1, text = str.tostring(math.round(diplus,0)) ,  bgcolor= color.green, text_color = color.white)// "RSI")//, bgcolor=color.red)
+table.cell(table_id = testTable, column = 2, row = 1, text = str.tostring(math.round(diminus,0)) ,  bgcolor= color.red, text_color = color.white)// "DI+")//, bgcolor=color.red)
+table.cell(table_id = testTable, column = 3, row = 1, text = str.tostring(math.round(adx,0)) ,  bgcolor= color.aqua, text_color = color.white)//"DI-")//, bgcolor=color.red)
+
+// ### 3 Line Strike
+
+bearS = input.bool(title='Show Bearish 3 Line Strike', defval=true, group='3 Line Strike')
+bullS = input.bool(title='Show Bullish 3 Line Strike', defval=true, group='3 Line Strike')
+
+bearSig = close[3] > open[3] and close[2] > open[2] and close[1] > open[1] and close < open[1]
+bullSig = close[3] < open[3] and close[2] < open[2] and close[1] < open[1] and close > open[1]
+
+plotshape(bullS ? bullSig : na, style=shape.triangleup, color=color.new(color.green, 0), location=location.belowbar, size=size.small, text='3s-Bull', title='3 Line Strike Up')
+plotshape(bearS ? bearSig : na, style=shape.triangledown, color=color.new(color.red, 0), location=location.abovebar, size=size.small, text='3s-Bear', title='3 Line Strike Down')
+
+// End ###
+
+//### Engulfing Candles
+
+bearE = input.bool(title='Show Bearish Big A$$ Candles', defval=true, group='Big A$$ Candles')
+bullE = input.bool(title='Show Bullish Big A$$ Candles', defval=true, group='Big A$$ Candles')
+
+openBarPrevious = open[1]
+closeBarPrevious = close[1]
+openBarCurrent = open
+closeBarCurrent = close
+
+//If current bar open is less than equal to the previous bar close AND current bar open is less than previous bar open AND current bar close is greater than previous bar open THEN True
+bullishEngulfing = openBarCurrent <= closeBarPrevious and openBarCurrent < openBarPrevious and closeBarCurrent > openBarPrevious
+//If current bar open is greater than equal to previous bar close AND current bar open is greater than previous bar open AND current bar close is less than previous bar open THEN True
+bearishEngulfing = openBarCurrent >= closeBarPrevious and openBarCurrent > openBarPrevious and closeBarCurrent < openBarPrevious
+
+//bullishEngulfing/bearishEngulfing return a value of 1 or 0; if 1 then plot on chart, if 0 then don't plot
+plotshape(bullE ? bullishEngulfing : na, style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.tiny, title='Big Ass Candle Up')
+plotshape(bearE ? bearishEngulfing : na, style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, title='Big Ass Candle Down')
+
+alertcondition(bullishEngulfing, title='Bullish Engulfing', message='[CurrencyPair] [TimeFrame], Bullish candle engulfing previous candle')
+alertcondition(bearishEngulfing, title='Bearish Engulfing', message='[CurrencyPair] [TimeFrame], Bearish candle engulfing previous candle')
+
+// End ###
+
+//
+//  Author:   JustUncleL
+//  Revision: R1.2
+//  Date:     6-Jan-2018
+//
+//  Description:
+//  ============
+//  This indicator is a Super Guppy version of standard Guppy GMMA as used in
+//  "CM_GUPPY_EMA Revised R2 by JustUncleL". Guppy is designed to capture the 
+//  inferred behaviour of traders and investors by using two groups of averages.
+//  In this version of Super Guppy Traders Group of EMAs are: 
+//    EMA3 to EMA23 step 2 (Aqua=Uptrend, Blue=downtrend)
+//  and Investors Group EMAs are: 
+//    EMA25 to EMA70 step 3 (Lime=Uptrend, Red=downtrend)
+//  (Gray=Trend not established or in a Pull Back).
+//
+//  The idea of Guppy EMAs is to use fractal repetitions to identify points of 
+//  agreement and disagreement which precede significant trend changes.
+//  For further info on how Guppy/Super Guppy can be used in trading please refer to
+//  http://www.guppytraders.com/gup329.shtml
+//  and many other articles available on the subject.
+//
+//  This indicator provides the following :
+//  - Swing Arrow Alerts (Red for Sell and Green for Buy) to indicate PullBack entries
+//    after new trend has been established. Also have option to wait for both fast and
+//    slow to completely seperate (Confluence). Another option is to show alerts
+//    when show arrows when Candle colour changes, this is handy when using Heikin Ashi
+//    or Renko Charts.
+//  - Trend Break Arrow Alerts (Blue for Sell and Aqua for Buy) to indicate entries
+//    for agressive trend swing point and is calculated by cross over of the
+//    average Traders EMA with the average Investors EMA. This was suggested option
+//    by Guppy himself.
+//  - Anchor time frame (0=current). This is the time frame that the Guppy MAs are
+//    calculated for. This way 60 Guppy can be viewed on a 15 min chart to establish
+//    tighter Stop Loss conditions. 
+//  - Alert conditions are also created for the TradingView Alarm subsystem. Only
+//    alerts for the selected alert options are generated.
+//
+//  References:
+//  ===========
+//  - Based on Daryl Guppy GMMA and
+//    CM GMMA Original - https://www.tradingview.com/v/3rxOtFe0/
+//  - http://www.guppytraders.com/gup329.shtml 
+//
+//
+//  Revisions:
+//  ==========
+//  R1   - Original Version
+//
+//  R1.1 - Some changes to limit the number of Alerts that occur close together.
+//
+//  13-Jan-2018 
+//       - Fix bug in Anchor calculations when chart Time frame not intraday.
+//       - Fix bug in Break Arrow calculation, stop signal when Investor MAs
+//         not change direction yet.
+//       - Change Traders group to start colouring before Investors Group,
+//         rather than together.
+//
+//  R1.2 14-Feb-2018 
+//       - Fix bug in 1st pullback arrow calculation.
+//       - Added option to display candle colours relative to Guppy Trend
+//         indication.
+//       06-Apr-2018
+//       - Change Anchor to be based purely on Minutes, so 1 month=30240mins 
+//         (21 trading days), 1 week=7200mins (5 trading days), 1 Day=1440mins.
+//         This makes it more consistent across intraday and extraday chart Timeframes.
+//
+//
+// -----------------------------------------------------------------------------
+// Copyright 2014 Chris Moody
+// Copyright 2018 JustUncleL
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// The GNU General Public License can be found here
+// <http://www.gnu.org/licenses/>.
+//
+// -----------------------------------------------------------------------------
+//
+
+// EMA Crossover Script
+
+y = ta.ema(close, 55)
+// z = sma(close, 200)
+
+plot(y, title='55', color=color.new(color.yellow, 0), linewidth=3)
+// plot(z, title="200", color=white, linewidth=3)
+
+// -----------------------------------------------------------------------------
+//
+//
+// Use Alternate Anchor TF for MAs 
+anchor = input.int(0, minval=0, maxval=1440, title='Use Alternate Anchor TimeFrame (0=none, max=1440 (mins,D,W)')
+//
+src = input(close, title='EMA Source')
+ShowBreak = input(true, title='Show Trend Break Arrow Alerts')
+ShowSwing = input(true, title='Show Swing Arrow Alerts')
+ShowCon = input(false, title='Give Only Fast+Slow Confluence Alerts')
+uOCCswing = input(false, title='Add Bar Colour Changes to Swing Alerts')
+Lookback = input(6, title='Alert Lookback Length')
+ShowAvgs = input(false, title='Show Average Fast and Slow Guppy Curves')
+show200 = input(false, title='Show 200 EMA Curve')
+emaFilter = input(false, title='Filter Alerts with 200ema')
+clrBars = input(false, title='Colour Candles to Guppy Trend state')
+
+//
+//Fast EMAs
+lenF1 = input.int(3, minval=1, title='Fast EMA 1')
+lenF2 = input.int(5, minval=1, title='Fast EMA 2')
+lenF3 = input.int(7, minval=1, title='Fast EMA 3')
+lenF4 = input.int(9, minval=1, title='Fast EMA 4')
+lenF5 = input.int(11, minval=1, title='Fast EMA 5')
+lenF6 = input.int(13, minval=1, title='Fast EMA 6')
+lenF7 = input.int(15, minval=1, title='Fast EMA 7')
+lenF8 = input.int(17, minval=1, title='Fast EMA 8')
+lenF9 = input.int(19, minval=1, title='Fast EMA 9')
+lenF10 = input.int(21, minval=1, title='Fast EMA 10')
+lenF11 = input.int(23, minval=1, title='Fast EMA 11')
+
+//Slow EMAs
+lenS1 = input.int(25, minval=1, title='Slow EMA 1')
+lenS2 = input.int(28, minval=1, title='Slow EMA 2')
+lenS3 = input.int(31, minval=1, title='Slow EMA 3')
+lenS4 = input.int(34, minval=1, title='Slow EMA 4')
+lenS5 = input.int(37, minval=1, title='Slow EMA 5')
+lenS6 = input.int(40, minval=1, title='Slow EMA 6')
+lenS7 = input.int(43, minval=1, title='Slow EMA 7')
+lenS8 = input.int(46, minval=1, title='Slow EMA 8')
+lenS9 = input.int(49, minval=1, title='Slow EMA 9')
+lenS10 = input.int(52, minval=1, title='Slow EMA 10')
+lenS11 = input.int(55, minval=1, title='Slow EMA 11')
+lenS12 = input.int(58, minval=1, title='Slow EMA 12')
+lenS13 = input.int(61, minval=1, title='Slow EMA 13')
+lenS14 = input.int(64, minval=1, title='Slow EMA 14')
+lenS15 = input.int(67, minval=1, title='Slow EMA 15')
+lenS16 = input.int(70, minval=1, title='Slow EMA 16')
+
+//len = input.int(200, minval=1, title='EMA 200 Length')
+
+gold = #FFD700
+AQUA = #00FFFFFF
+BLUE = #0000FFFF
+GRAY = #808080FF
+
+// If have anchor specified, calculate the base multiplier.
+mult = timeframe.isintraday ? anchor == 0 or timeframe.multiplier <= 0 or timeframe.multiplier >= anchor ? 1 : math.round(anchor / timeframe.multiplier) : 1
+mult := timeframe.isdwm ? timeframe.isdaily ? anchor == 0 or timeframe.multiplier <= 0 or timeframe.multiplier >= anchor or anchor <= 1440 ? 1 : math.round(anchor / 1440) : timeframe.isweekly ? anchor == 0 or timeframe.multiplier <= 0 or timeframe.multiplier >= anchor or anchor <= 7200 ? 1 : math.round(anchor / 7200) : timeframe.ismonthly ? anchor == 0 or timeframe.multiplier <= 0 or timeframe.multiplier >= anchor or anchor <= 30240 ? 1 : math.round(anchor / 30240) : 1 : mult
+
+//adjust MA lengths with Anchor Multiplier
+
+//Fast EMA
+emaF1 = ta.ema(src, lenF1 * mult)
+emaF2 = ta.ema(src, lenF2 * mult)
+emaF3 = ta.ema(src, lenF3 * mult)
+emaF4 = ta.ema(src, lenF4 * mult)
+emaF5 = ta.ema(src, lenF5 * mult)
+emaF6 = ta.ema(src, lenF6 * mult)
+emaF7 = ta.ema(src, lenF7 * mult)
+emaF8 = ta.ema(src, lenF8 * mult)
+emaF9 = ta.ema(src, lenF9 * mult)
+emaF10 = ta.ema(src, lenF10 * mult)
+emaF11 = ta.ema(src, lenF11 * mult)
+//average
+emafast = (emaF1 + emaF2 + emaF3 + emaF4 + emaF5 + emaF6 + emaF7 + emaF8 + emaF9 + emaF10 + emaF11) / 11
+//
+//Slow EMA
+emaS1 = ta.ema(src, lenS1 * mult)
+emaS2 = ta.ema(src, lenS2 * mult)
+emaS3 = ta.ema(src, lenS3 * mult)
+emaS4 = ta.ema(src, lenS4 * mult)
+emaS5 = ta.ema(src, lenS5 * mult)
+emaS6 = ta.ema(src, lenS6 * mult)
+emaS7 = ta.ema(src, lenS7 * mult)
+emaS8 = ta.ema(src, lenS8 * mult)
+emaS9 = ta.ema(src, lenS9 * mult)
+emaS10 = ta.ema(src, lenS10 * mult)
+emaS11 = ta.ema(src, lenS11 * mult)
+emaS12 = ta.ema(src, lenS12 * mult)
+emaS13 = ta.ema(src, lenS13 * mult)
+emaS14 = ta.ema(src, lenS14 * mult)
+emaS15 = ta.ema(src, lenS15 * mult)
+emaS16 = ta.ema(src, lenS16 * mult)
+
+
+// average
+emaslow = (emaS1 + emaS2 + emaS3 + emaS4 + emaS5 + emaS6 + emaS7 + emaS8 + emaS9 + emaS10 + emaS11 + emaS12 + emaS13 + emaS14 + emaS15 + emaS16) / 16
+//
+//EMA 200
+ema200 = ta.ema(src, len * mult)
+
+//Fast EMA Color Rules
+colfastL = emaF1 > emaF2 and emaF2 > emaF3 and emaF3 > emaF4 and emaF4 > emaF5 and emaF5 > emaF6 and emaF6 > emaF7 and emaF7 > emaF8 and emaF8 > emaF9 and emaF9 > emaF10 and emaF10 > emaF11
+colfastS = emaF1 < emaF2 and emaF2 < emaF3 and emaF3 < emaF4 and emaF4 < emaF5 and emaF5 < emaF6 and emaF6 < emaF7 and emaF7 < emaF8 and emaF8 < emaF9 and emaF9 < emaF10 and emaF10 < emaF11
+//Slow EMA Color Rules
+colslowL = emaS1 > emaS2 and emaS2 > emaS3 and emaS3 > emaS4 and emaS4 > emaS5 and emaS5 > emaS6 and emaS6 > emaS7 and emaS7 > emaS8 and emaS8 > emaS9 and emaS9 > emaS10 and emaS10 > emaS11 and emaS11 > emaS12 and emaS12 > emaS13 and emaS13 > emaS14 and emaS14 > emaS15 and emaS15 > emaS16
+colslowS = emaS1 < emaS2 and emaS2 < emaS3 and emaS3 < emaS4 and emaS4 < emaS5 and emaS5 < emaS6 and emaS6 < emaS7 and emaS7 < emaS8 and emaS8 < emaS9 and emaS9 < emaS10 and emaS10 < emaS11 and emaS11 < emaS12 and emaS12 < emaS13 and emaS13 < emaS14 and emaS14 < emaS15 and emaS15 < emaS16
+
+//Fast EMA Final Color Rules
+colFinal = colfastL and emaS1 > emaS16 ? color.aqua : colfastS and emaS1 < emaS16 ? color.blue : color.gray
+//Slow EMA Final Color Rules
+colFinal2 = colslowL ? color.lime : colslowS ? color.red : color.gray
+
+//Fast EMA Plots
+p1 = plot(emaF1, title='Fast EMA 1', style=plot.style_line, linewidth=2, color=colFinal, transp=10)
+//plot(emaF2, title='Fast EMA 2', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF3, title='Fast EMA 3', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF4, title='Fast EMA 4', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF5, title='Fast EMA 5', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF6, title='Fast EMA 6', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF7, title='Fast EMA 7', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF8, title='Fast EMA 8', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF9, title='Fast EMA 9', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+//plot(emaF10, title='Fast EMA 10', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+p2 = plot(emaF11, title='Fast EMA 11', style=plot.style_line, linewidth=1, color=colFinal, transp=10)
+plot(ShowAvgs ? emafast : na, title='Fast Avg', style=plot.style_circles, join=true, linewidth=2, color=color.new(gold, 10))
+
+//
+fill(p1, p2, color=color.new(color.silver, 95))
+
+//Slow EMA Plots
+p33 = plot(emaS1, title='Slow EMA 1', style=plot.style_line, linewidth=2, color=colFinal2, transp=10)
+//plot(emaS2, title='Slow EMA 2', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS3, title='Slow EMA 3', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS4, title='Slow EMA 4', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS5, title='Slow EMA 5', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS6, title='Slow EMA 6', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS7, title='Slow EMA 7', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS8, title='Slow EMA 8', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS9, title='Slow EMA 9', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS10, title='Slow EMA 10', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS11, title='Slow EMA 11', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS12, title='Slow EMA 12', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS13, title='Slow EMA 13', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS14, title='Slow EMA 14', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+//plot(emaS15, title='Slow EMA 15', style=plot.style_line, linewidth=1, color=colFinal2, transp=10)
+p43 = plot(emaS16, title='Slow EMA 16', style=plot.style_line, linewidth=2, color=colFinal2, transp=10)
+//plot(ShowAvgs ? emaslow : na, title='Slow Avg', style=plot.style_circles, join=true, linewidth=2, color=color.new(color.fuchsia, 10))
+
+
+//
+fill(p33, p43, color=color.new(color.silver, 95))
+
+plot(show200 ? ema200 : na, title='EMA 200', style=plot.style_circles, join=true, linewidth=2, color=color.new(color.black, 10))
+
+//Fast EMA Final Color Rules
+c = colfastL and emaS1 > emaS16 ? AQUA : colfastS and emaS1 < emaS16 ? BLUE : GRAY
+//barcolor(clrBars ? c : na, title='Guppy Bar Colors')
+
+// Generate Alert Arrows
+buy0 = 0
+sell0 = 0
+buybreak = 0
+sellbreak = 0
+//
+buy0 := emafast > emaslow and emaS1 > emaS16 and not colslowS and colfastL and (not ShowCon or colslowL) and (not emaFilter or emafast > ema200) ? nz(buy0[1]) > 0 ? buy0[1] + 1 : 1 : 0
+sell0 := emafast < emaslow and emaS1 < emaS16 and not colslowL and colfastS and (not ShowCon or colslowS) and (not emaFilter or emafast < ema200) ? nz(sell0[1]) > 0 ? sell0[1] + 1 : 1 : 0
+buy0 := buy0 > 1 and colfastL and uOCCswing and close[1] < open[1] and close > open ? 1 : buy0
+sell0 := sell0 > 1 and colfastS and uOCCswing and close[1] > open[1] and close < open ? 1 : sell0
+//
+buybreak := emafast > emaslow and not colslowS and (not emaFilter or emafast > ema200) ? nz(buybreak[1]) > 0 ? buybreak[1] + 1 : 1 : 0
+sellbreak := emafast < emaslow and not colslowL and (not emaFilter or emafast < ema200) ? nz(sellbreak[1]) > 0 ? sellbreak[1] + 1 : 1 : 0
+//
+plotarrow(ShowSwing and buy0 == 1 and ta.barssince(nz(buy0[1], 1) == 1) > Lookback ? 1 : na, title='BUY Swing Arrow', colorup=color.new(color.lime, 20), maxheight=60, minheight=50)
+plotarrow(ShowSwing and sell0 == 1 and ta.barssince(nz(sell0[1], 1) == 1) > Lookback ? -1 : na, title='SELL Swing Arrow', colordown=color.new(color.red, 20), maxheight=60, minheight=50)
+
+plotarrow(ShowBreak and buybreak == 1 and ta.barssince(nz(sellbreak[1], 1) == 1) > Lookback and ta.barssince(nz(buybreak[1], 1) == 1) > Lookback ? 1 : na, title='BUY Break Arrow', colorup=color.new(color.aqua, 20), maxheight=60, minheight=50)
+plotarrow(ShowBreak and sellbreak == 1 and ta.barssince(nz(buybreak[1], 1) == 1) > Lookback and ta.barssince(nz(sellbreak[1], 1) == 1) > Lookback ? -1 : na, title='SELL Break Arrow', colordown=color.new(color.blue, 20), maxheight=60, minheight=50)
+
+// Generate only Alarms that are selected.
+gAlert = ShowSwing and (buy0 == 1 and ta.barssince(nz(buy0[1], 1) == 1) > Lookback or sell0 == 1 and ta.barssince(nz(sell0[1], 1) == 1) > Lookback) or ShowBreak and (buybreak == 1 or sellbreak == 1) and ta.barssince(nz(buybreak[1], 1) == 1) > Lookback and ta.barssince(nz(sellbreak[1], 1) == 1) > Lookback
+//alertcondition(gAlert, title='Guppy Alert Arrow', message='Guppy Alert')
+//alertcondition(ShowSwing and buy == 1 and ta.barssince(nz(buy[1], 1) == 1) > Lookback or ShowBreak and buybreak == 1 and ta.barssince(nz(buybreak[1], 1) == 1) > Lookback and ta.barssince(nz(sellbreak[1], 1) == 1) > Lookback, title='Buy Arrow', message='BUY')
+//alertcondition(ShowSwing and sell == 1 and ta.barssince(nz(sell[1], 1) == 1) > Lookback or ShowBreak and sellbreak == 1 and ta.barssince(nz(buybreak[1], 1) == 1) > Lookback and ta.barssince(nz(sellbreak[1], 1) == 1) > Lookback, title='Sell Arrow', message='SELL')
+
+//
+//eof
+
+//indicator("VDUB Rejection Spike V3 with VWAP", overlay=true)
+
+// EMA 1
+ema1 = ta.ema(src, len)
+plot(ema1, title="EMA 1", color=color.white, style=plot.style_line, linewidth=1)
+
+// Candle Body Channel
+last8h = ta.highest(close, 13)
+lastl8 = ta.lowest(close, 13)
+channel2 = input.bool(false, title="Candle Body Channel On/Off")
+plot(channel2 ? last8h : na, color=color.black, linewidth=1, style=plot.style_linebr, title="Candle Body Resistance Level Top")
+plot(channel2 ? lastl8 : na, color=color.black, linewidth=1, style=plot.style_linebr, title="Candle Body Support Level Bottom")
+
+// Resistance Channel 2
+channel = input.bool(true, title="Resistance Channel 2 On/Off")
+var float up = na
+var float down = na
+if (close < nz(up[1]) and close > nz(down[1]))
+    up := nz(up[1])
+    down := nz(down[1])
+else
+    up := high
+    down := low
+plot(channel ? up : na, color=color.red, linewidth=1, style=plot.style_linebr, title="Resistance Level Top")
+plot(channel ? down : na, color=color.green, linewidth=1, style=plot.style_linebr, title="Resistance Level Bottom")
+
+// Support and Resistance V0
+RST = input.int(title='Support / Resistance length:', defval=21)
+RSTT = ta.valuewhen(high >= ta.highest(high, RST), high, 0)
+RSTB = ta.valuewhen(low <= ta.lowest(low, RST), low, 0)
+plot(RSTT, color=color.red, linewidth=1, title="Resistance Level V0")
+plot(RSTB, color=color.green, linewidth=1, title="Support Level V0")
+
+// Fractals
+length = input.int(55, title="Fractal Length")
+filterFractals = input.bool(true, title="Signal Filter On/Off")
+ftop = high[2] > high[3] and high[2] > high[4] and high[2] > high[1] and high[2] > high[0]
+fbot = low[2] < low[3] and low[2] < low[4] and low[2] < low[1] and low[1] < low[0]
+topf = ftop and high[2] >= ta.highest(high, length)
+botf = fbot and low[2] <= ta.lowest(low, length)
+filteredtopf = filterFractals ? topf : ftop
+filteredbotf = filterFractals ? botf : fbot
+plotshape(filteredtopf, style=shape.triangledown, location=location.abovebar, color=color.maroon, text="SELL", offset=-1)
+plotshape(filteredbotf, style=shape.triangleup, location=location.belowbar, color=color.green, text="BUY", offset=-1)
+
+// EMA 2 with Two Colors
+len0 = input.int(13, minval=1, title="EMA 2 Length")
+ema2 = ta.ema(close, len0)
+plot_color = ema2 >= ema2[2] ? color.lime : color.red
+plot(ema2, title="EMA 2", style=plot.style_line, linewidth=1, color=plot_color)
+
+// VWAP
+vwap = ta.vwap(close)
+plot(vwap, title="VWAP", color=color.purple, linewidth=2)
+////////////////////////////////////////////////////////////////////////////////////////
+//@version=5
+//indicator('Signals & Overlay Similar', overlay=true, max_labels_count =500)
+atrMulti = input.float(3.5, 'Signal Sensitivity', minval=0.1, step=0.2,group='Sensitivity')
+
+//sensitivity
+atrPeriod = input.int (100, 'Smoothing', minval=1, group='Deep Sensitivity')
+maPeriod = input.int (6, 'Reactivity', minval=1, group='Deep Sensitivity')
+strongest = input(200, title = 'Strong Signal Strength', group='DeepSensitivity')
+trendType = input.string('Trailing', 'Trend Calculation Type',options=['Flexible', 'Trailing'], group='Deep Sensitivity')
+maType = input.string('SMA', 'Signals Calculation Type', options=['SMA','EMA', 'SMMA', 'LWMA', 'DEMA', 'TEMA', 'HMA', 'LSMA', 'RMA', 'T3'], group='DeepSensitivity')
+
+sigs = input(true, 'Signal', group='Overlay Future')
+lines = input(false, 'Signal Line', group='Overlay Future')
+extend = input(false, 'Reverse Signal Count', group='Overlay Future')
+
+confalert = input.string("Off", "Alert Connect", ["Active", "Off"],group="Alert")
+alert2 = input.string("Buy Signal", "Signals Alert", ["Buy Signal", "Sell Signal"],group = "Alert")
+
+// Multi Time Frame Input
+mtfResolution = input.timeframe('240', title='Multi-Timeframe Resolution',group='MTF Settings')
+
+// Main Sensitivity
+atrMultiq = input.float(3.5, 'MTF Signal Sensitivity', minval=0.1, step=0.2,group='MTF Sensitivity')
+
+// Sensitivity
+atrPeriodq = input.int (100, 'MTF Smoothing', minval=1, group='MTF DeepSensitivity')
+maPeriodq = input.int (6, 'MTF Reactivity', minval=1, group='MTF DeepSensitivity')
+trendTypeq = input.string('Trailing', 'MTF Trend Calculation Type',options=['Flexible', 'Trailing'], group='MTF Deep Sensitivity')
+maTypeq = input.string('SMA', 'Signals Calculation Type', options=['SMA','EMA', 'SMMA', 'LWMA', 'DEMA', 'TEMA', 'HMA', 'LSMA', 'RMA', 'T3'], group='MTF DeepSensitivity')
+
+// Overlay
+sigsq = input(true, 'Multi-Timeframe Signal', group='MTF Overlay Future')
+linesq = input(false, 'Multi-Timeframe Signal Line', group='MTF OverlayFuture')
+
+
+// Helper Functions
+ma2(t, sourceq, lengthq) =>maTypeq == 'HMA' ? ta.hma(sourceq, lengthq) :maTypeq =='EMA' ? ta.ema(sourceq, lengthq) :maTypeq == 'RMA' ? ta.rma(sourceq,lengthq) :maTypeq == 'SMA' ? ta.sma(sourceq, lengthq) :na
+// Moving Averages and ATR Calculations
+[maHighq, maLowq] = request.security(syminfo.tickerid, mtfResolution, [ma2(maTypeq,high, maPeriodq), ma2(maTypeq, low, maPeriodq)])
+
+atrq = request.security(syminfo.tickerid, mtfResolution, ta.atr(atrPeriodq)) *atrMultiq
+
+// Trend Calculations
+minLowq = maLowq - atrq
+var float upTrendq = na
+upTrendq := trendTypeq == 'Flexible' ? minLowq : close[1] > nz(upTrendq[1],minLowq) ? math.max(minLowq, nz(upTrendq[1], minLowq)) : minLowq
+plusHighq = maHighq + atrq
+var float downTrendq = na
+downTrendq := trendTypeq == 'Flexible' ? plusHighq : close[1] < nz(downTrendq[1],plusHighq) ? math.min(plusHighq, nz(downTrendq[1], plusHighq)) : plusHighq
+
+var upq = 1
+upq := upq != 1 and close > (downTrendq) ? 1 : upq == 1 and close < upTrendq ? -1 :upq
+var downq = 1
+downq := downq != 1 and close < (upTrendq) ? 1 : downq == 1 and close >downTrendq ? -1 : downq
+
+plotSource = plot(close, editable=false, display=display.none)
+
+// Signal Detection
+startUpq = upq != upq[1] and upq == 1
+plotUpq = plot(upq == 1 and linesq ? upTrendq : na, 'Up', #00ff2a, 1,plot.style_linebr)
+
+startDownq = downq != downq[1] and downq == 1
+plotDownq = plot(downq == 1 and linesq ? downTrendq : na, 'Down', #ff0303, 1,plot.style_linebr)
+plotshape(startDownq and sigsq ? downTrendq : na, text='Strong',style=shape.labeldown, location=location.abovebar, color=color.red,textcolor=color.white, size=size.normal)
+plotshape(startUpq and sigsq ? upTrendq : na, text='Strong', style=shape.labelup,location=location.belowbar, color=color.green, textcolor=color.white,size=size.normal)

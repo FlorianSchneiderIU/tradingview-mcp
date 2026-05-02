@@ -1,0 +1,1092 @@
+// © robert_ghitulescu01
+//@version=5
+
+library("Robert07_Indicators")
+
+
+
+/// OSCILLATORS /// - {
+
+
+// Normal Kama Oscillator - {
+
+export normal_kama(int fast_period=3, int slow_period=19, int er_period=25, int norm_period=39) =>
+    // Calculate the efficiency ratio
+    change = math.abs(close - close[er_period])
+    volatility = math.sum(math.abs(close - close[1]), er_period)
+    er = change / volatility
+
+    // Calculate the smoothing constant
+    sc = er * (2 / (fast_period + 1) - 2 / (slow_period + 1)) + 2 / (slow_period + 1)
+
+    // Calculate the KAMA
+    kama = ta.ema(close, fast_period) + sc * (close - ta.ema(close, fast_period))
+
+    // Normalize the oscillator
+    lowest = ta.lowest(kama, norm_period)
+    highest = ta.highest(kama, norm_period)
+    normalized = (kama - lowest) / (highest - lowest) - 0.5
+
+    // Convert to signal
+    normalized > 0 ? 1 : normalized < 0 ? -1 : 0
+
+// Normal Kama Oscillator - }
+
+
+
+// STC - {
+
+AAAA(BBB, BBBB, BBBBB) =>
+    fastMA = ta.ema(BBB, BBBB)
+    slowMA = ta.ema(BBB, BBBBB)
+    fastMA - slowMA
+
+export stc(simple int EEEEEE=37, simple int BBBB=53, simple int BBBBB=730) =>
+    AAA = 0.19
+    var CCCCC = 0.0
+    var DDD = 0.0
+    var DDDDDD = 0.0
+    var EEEEE = 0.0
+
+    BBBBBB = AAAA(close, BBBB, BBBBB)
+    CCC = ta.lowest(BBBBBB, EEEEEE)
+    CCCC = ta.highest(BBBBBB, EEEEEE) - CCC
+    CCCCC := CCCC > 0 ? (BBBBBB - CCC) / CCCC * 100 : nz(CCCCC[1])
+    DDD := na(DDD[1]) ? CCCCC : DDD[1] + AAA * (CCCCC - DDD[1])
+    DDDD = ta.lowest(DDD, EEEEEE)
+    DDDDD = ta.highest(DDD, EEEEEE) - DDDD
+    DDDDDD := DDDDD > 0 ? (DDD - DDDD) / DDDDD * 100 : nz(DDDDDD[1])
+    EEEEE := na(EEEEE[1]) ? DDDDDD : EEEEE[1] + AAA * (DDDDDD - EEEEE[1])
+
+    mAAAAA = EEEEE
+
+    stc_low = mAAAAA < 50
+    stc_high = mAAAAA > 50
+    stc_up = mAAAAA > mAAAAA[1]
+    stc_down = mAAAAA < mAAAAA[1]
+
+    stc_pos  = stc_up and stc_low
+    stc_neg = stc_down and stc_high
+
+    recent_signal_up = ta.barssince(stc_pos) <= 1  // Last 'up' signal within 2 bars
+    recent_signal_down = ta.barssince(stc_neg) <= 1 // Last 'down' signal within 2 bars
+
+    // Final signal logic with reversion capability
+    stc_long  = stc_pos or (stc_up and recent_signal_down and (mAAAAA > 95))  // Buy if new 'up' or recent 'down' within 2 bars
+    stc_short = stc_neg or (stc_down and recent_signal_up and (mAAAAA < 5))  // Sell if new 'down' or recent 'up' within 2 bars
+    
+    // Generate continuous signal
+    var signal = 0
+
+    if stc_long
+        signal := 1
+    if stc_short
+        signal :=-1
+
+    signal
+
+// STC - }
+
+
+
+
+// Weighted Bulls-Bears Variety Smoothed [Loxx] - {
+
+weight(fng, dist) =>
+    (fng + fng / dist)
+
+export wbb() =>
+    float CalcPrice  = hlcc4
+    int CalcPeriod   = 38
+    int CalcMaPeriod = 2
+
+    // Directly use LWMA
+    float prices = ta.wma(CalcPrice, CalcMaPeriod)
+    int hbar = ta.highestbars(prices, CalcPeriod)
+    float hval = nz(CalcPrice[math.abs(hbar)])
+    int lbar = ta.lowestbars(prices, CalcPeriod)
+    float lval = nz(CalcPrice[math.abs(lbar)])
+
+    float bear = -weight(hval - prices, hbar + 1)
+    float bull = +weight(prices - lval, lbar + 1)
+
+    float temp = bull * 2 + bear * 2
+    float buffer5 = temp ? temp : nz(temp[1])
+
+    float middle = 0.0
+
+    // Perpetual signals
+    bool goLong = buffer5 > middle
+    bool goShort = buffer5 < middle
+
+    // Generate continuous signal
+    goLong ? 1 : goShort ? -1 : 0
+
+// Weighted Bulls-Bears Variety Smoothed [Loxx] - }
+
+
+
+// Kama Divergence [DW] - {
+
+kama(ksrc, L, fast, slow) =>
+    dist = math.abs(ksrc - ksrc[1])
+    signal = math.abs(ksrc - ksrc[L])
+    noise = math.sum(dist, L)
+    effr = noise != 0 ? signal / noise : 1
+    sc = math.pow(effr * (fast - slow) + slow, 2)
+    var float kama = na
+    kama := na(kama[1]) ? ksrc : kama[1] + sc * (ksrc - kama[1])
+    kama
+
+export kama_div() =>
+    int per = 6
+    int sper = 8
+    float fast = 0.65
+    float slow = 0.082
+    float thr = 0.2
+    
+    ksrc = close
+    
+    // Source KAMA
+    k = kama(ksrc, per, fast, slow)
+    
+    // Divergence
+    kd = 100 * (ksrc - k) / ksrc[1]
+    
+    // Signal
+    sig = kama(kd, sper, fast, slow)
+    
+    // Center
+    cent = 0
+    
+    // Thresholds
+    uth = cent + thr
+    dth = cent - thr
+
+    // Generate continuous signal
+    sig > 0 ? 1 : sig < 0 ? -1 : 0
+
+// Kama Divergence [DW] - }
+
+
+
+
+// RSI Momentum Trend - {
+
+
+calculateVelocity(float _src, int _length) =>
+    float velAccSum = 0
+    for int i = 1 to _length
+        velAccSum += (_src - nz(_src[i])) / i
+    float velAccAvg = velAccSum / _length
+
+export rsi_mom() =>
+    // Main calculation
+    var bool positive = false
+    var bool negative = false
+
+    RSI_group = "RSI Settings"
+    Len2 = 12
+    pmom = 55
+    nmom = 52
+    rsi = ta.rsi(close, Len2)
+
+    p_mom = rsi[1] < pmom and rsi > pmom and rsi > nmom and ta.change(ta.ema(close, 5)) > 0
+    n_mom = rsi < nmom and ta.change(ta.ema(close, 5)) < 0
+
+    if p_mom
+        positive := true
+        negative := false
+
+    if n_mom
+        positive := false
+        negative := true
+
+    rsimom_long = p_mom
+    rsimom_short = n_mom
+
+    var score = 0
+    if rsimom_long 
+        score := 1
+    if rsimom_short 
+        score := -1
+    score
+	
+// RSI Momentum Trend - }
+
+
+
+// Z-Score Heikin Ashi Transformed - {
+
+type bar
+    float o = open
+    float h = high
+    float l = low
+    float c = close
+
+type alerts
+    bool  s = na
+    bool  b = na
+    bool  u = na
+    bool  d = na
+    
+f_z(float src, int len) =>
+    (src - ta.sma(src, len)) / ta.stdev(src, len)
+
+method z(bar b, int len) =>
+    bar x = bar.new(f_z(b.o, len), f_z(b.h, len), f_z(b.l, len), f_z(b.c, len))
+    x
+
+method src(bar b, string src) =>
+    float x = switch src
+        'oc2'   => math.avg(b.o, b.c)
+        'hl2'   => math.avg(b.h, b.l)
+        'hlc3'  => math.avg(b.h, b.l, b.c)
+        'ohlc4' => math.avg(b.o, b.h, b.l, b.c)
+        'hlcc4' => math.avg(b.h, b.l, b.c, b.c)
+    x
+
+method ha(bar b) =>
+    var bar x = bar.new()
+    x.c := b.src('ohlc4')
+    x := bar.new(na(x.o[1]) ? b.src('oc2') : nz(x.src('oc2')[1]), math.max(b.h, math.max(x.o, x.c)), math.min(b.l, math.min(x.o, x.c)), x.c)
+    x
+
+export zscore_ha() =>
+    int len = 24
+    bar score = bar.new().ha().z(len)
+
+    alerts a = alerts.new(score.c < score.o and (score.h > 2), score.c > score.o and (score.l < -2), score.c > 0, score.c < 0)
+
+    // Generate continuous signal
+    a.u ? 1 : a.d ? -1 : 0
+
+// Z-Score Heikin Ashi Transformed - }
+
+
+
+// Trend Volume Indicator - {
+
+TVI(source) =>
+    Volume_Direction = ta.rsi(source, 6) > 50 ? volume : -volume // RSI is used as a momentum indicator.
+    VZO_volume = ta.vwap(Volume_Direction) // Volume-Weighted Average Price (VWAP) is used instead of EMA.
+    Total_volume = ta.vwap(volume)
+    100 * VZO_volume / Total_volume
+
+export tvi() =>
+    float source = hlc3
+    int TVI_noise = 2
+    int tvi_zone = 0
+
+    tvi_value = TVI(source)
+    tvi_value := ta.ema(tvi_value, TVI_noise)
+
+    // Generate continuous signal
+    tvi_value > tvi_zone ? 1 : tvi_value < tvi_zone ? -1 : 0
+
+// Trend Volume Indicator - }
+
+
+
+// VPT - {
+
+// Define functions
+calculateVPT(float _volume, float _close, float _prevVPT) =>
+    na(_prevVPT) ? _volume * _close : _prevVPT + _volume * ta.change(_close)
+
+// Export the total function
+export vpt() =>
+    // Input for lookback period
+    lookback = 12
+
+    // Input for smoothing
+    smoothPeriod = 12
+    smoothOn = false
+
+    // Declare and initialize vpt variable
+    var float vpt = na
+
+    // Calculation
+    vpt := calculateVPT(volume, close, vpt[1])
+
+    // Find min and max of vpt over lookback period
+    vpt_min = ta.lowest(vpt, lookback)
+    vpt_max = ta.highest(vpt, lookback)
+
+    // Rescale vpt to 0-100 scale
+    vpt_rescaled = (vpt - vpt_min) / (vpt_max - vpt_min) * 100
+
+    // Apply smoothing if turned on
+    vpt_smoothed = smoothOn ? ta.sma(vpt_rescaled, smoothPeriod) : vpt_rescaled
+
+    levelup = 50
+    leveldown = 53
+
+    long = ta.crossover(vpt_rescaled, levelup)
+    short = ta.crossunder(vpt_rescaled, leveldown)
+
+    var score = 0
+    if long
+        score := 1
+    if short
+        score := -1
+    score
+
+// VPT - }
+
+
+
+
+// RSI - {
+
+// Export the RSI Trend function
+export RSITrend() =>
+    // Define inputs with default values
+    src = close
+    rsiLength = 21
+    ysell = 51
+    ybuy = 55
+    
+    rsi = ta.rsi(src, rsiLength)
+    
+    longRSI = rsi > ybuy 
+    shortRSI = rsi < ysell 
+
+    var signal = 0
+    if longRSI
+        signal := 1
+    if shortRSI
+        signal := -1
+    signal
+
+// RSI - }
+
+
+
+
+/// OSCILLATORS /// - }
+
+
+
+
+
+
+
+
+/// PERPETUALS /// - {
+
+
+
+
+// APSAR - {
+
+calcBaseUnit() =>
+    bool  isForexSymbol = syminfo.type == "forex"
+    bool  isYenPair     = syminfo.currency == "JPY"
+    float result = isForexSymbol ? isYenPair ? 0.01 : 0.0001 : syminfo.mintick
+
+_afact(mode, input, per, smooth) =>
+    eff = 0., seff = 0.
+    len = 0, sum = 0., max = 0., min = 1000000000.
+    len := mode == "Kaufman" ? math.ceil(per) : math.ceil(math.max(20, 5 * per))
+    for i = 0 to len 
+        if (mode == "Kaufman") 
+            sum += math.abs(input[i] - input[i + 1])
+        else
+            max := input[i] > max ? input[i] : max
+            min := input[i] < min ? input[i] : min
+    if (mode == "Kaufman" and sum != 0) 
+        eff := math.abs(input - input[len]) / sum
+    else
+        if (mode == "Ehlers" and (max - min) > 0) 
+            eff := (input - min) / (max - min)
+    seff := ta.ema(eff, smooth)
+    seff
+
+export apsar() =>
+    src = close
+    startAFactor = 0.04
+    minStep = 0.0
+    maxStep = 0.1
+    maxAFactor = 0.02
+    hiloMode = "Off"
+    adaptMode = "Off"
+    adaptSmth = 5
+    filt = 0.0
+    minChng = 0.0
+    SignalMode = "Only Stops"
+
+    hVal2 = nz(high[2]), hVal1 = nz(high[1]), hVal0 = high
+    lowVal2 = nz(low[2]), lowVal1 = nz(low[1]), lowVal0 = low
+    hiprice2 = nz(high[2]), hiprice1 = nz(high[1]), hiprice0 = high
+    loprice2 = nz(low[2]), loprice1 = nz(low[1]), loprice0 = low
+
+    upSig = 0., dnSig = 0.
+    aFactor = 0., step = 0., trend = 0.
+    upTrndSAR = 0., dnTrndSAR = 0.
+    length = (2 / maxAFactor - 1)
+
+    if (hiloMode == "On") 
+        hiprice0 := high
+        loprice0 := low
+    else
+        hiprice0 := src
+        loprice0 := hiprice0
+
+    if bar_index == 1
+        trend := 1
+        hVal1 := hiprice1
+        hVal0 := math.max(hiprice0, hVal1)
+        lowVal1 := loprice1
+        lowVal0 := math.min(loprice0, lowVal1)
+        aFactor := startAFactor
+        upTrndSAR := lowVal0
+        dnTrndSAR := 0.
+    else
+        hVal0 := hVal1
+        lowVal0 := lowVal1
+        trend := nz(trend[1])
+        aFactor := nz(aFactor[1])
+        inputs = 0.
+        inprice = src
+        if (adaptMode != "Off")
+            if (hiloMode == "On") 
+                inprice := src
+            else 
+                inprice := hiprice0
+            if (adaptMode == "Kaufman") 
+                inputs := inprice
+            else
+                if (adaptMode == "Ehlers") 
+                    if (nz(upTrndSAR[1]) != 0.)
+                        inputs := math.abs(inprice - nz(upTrndSAR[1]))
+                    else
+                        if (nz(dnTrndSAR[1]) != 0.) 
+                            inputs := math.abs(inprice - nz(dnTrndSAR[1]))
+            step := minStep + _afact(adaptMode, inputs, length, adaptSmth) * (maxStep - minStep)
+        else 
+            step := maxStep
+
+        upTrndSAR := 0., dnTrndSAR := 0., upSig := 0., dnSig := 0.
+
+        if (nz(trend[1]) > 0) 
+            if (nz(trend[1]) == nz(trend[2]))
+                aFactor := hVal1 > hVal2 ? nz(aFactor[1]) + step : aFactor
+                aFactor := aFactor > maxAFactor ? maxAFactor : aFactor
+                aFactor := hVal1 < hVal2 ? startAFactor : aFactor
+            else 
+                aFactor := nz(aFactor[1])
+
+            upTrndSAR := nz(upTrndSAR[1]) + aFactor * (hVal1 - nz(upTrndSAR[1]))
+            upTrndSAR := upTrndSAR > loprice1 ? loprice1 : upTrndSAR
+            upTrndSAR := upTrndSAR > loprice2 ? loprice2 : upTrndSAR
+        else
+            if (nz(trend[1]) == nz(trend[2])) 
+                aFactor := lowVal1 < lowVal2 ? nz(aFactor[1]) + step : aFactor
+                aFactor := aFactor > maxAFactor ? maxAFactor : aFactor
+                aFactor := lowVal1 > lowVal2 ? startAFactor : aFactor
+            else
+                aFactor := nz(aFactor[1])
+
+            dnTrndSAR := nz(dnTrndSAR[1]) + aFactor * (lowVal1 - nz(dnTrndSAR[1]))
+            dnTrndSAR := dnTrndSAR < hiprice1 ? hiprice1 : dnTrndSAR
+            dnTrndSAR := dnTrndSAR < hiprice2 ? hiprice2 : dnTrndSAR
+
+        hVal0 := hiprice0 > hVal0 ? hiprice0 : hVal0
+        lowVal0 := loprice0 < lowVal0 ? loprice0 : lowVal0
+
+        if (minChng > 0) 
+            if (upTrndSAR - nz(upTrndSAR[1]) < minChng * calcBaseUnit() and upTrndSAR != 0. and nz(upTrndSAR[1]) != 0.)
+                upTrndSAR := nz(upTrndSAR[1])
+            if (nz(dnTrndSAR[1]) - dnTrndSAR < minChng * calcBaseUnit() and dnTrndSAR != 0. and nz(dnTrndSAR[1]) != 0.)
+                dnTrndSAR := nz(dnTrndSAR[1])
+
+        dnTrndSAR := trend < 0 and dnTrndSAR > nz(dnTrndSAR[1]) ? nz(dnTrndSAR[1]) : dnTrndSAR
+        upTrndSAR := trend > 0 and upTrndSAR < nz(upTrndSAR[1]) ? nz(upTrndSAR[1]) : upTrndSAR
+
+        if (trend < 0 and hiprice0 >= dnTrndSAR + filt * calcBaseUnit())
+            trend := 1
+            upTrndSAR := lowVal0
+            upSig := SignalMode == "Signals & Stops" ? lowVal0 : upSig
+            dnTrndSAR := 0.
+            aFactor := startAFactor
+            lowVal0 := loprice0
+            hVal0 := hiprice0
+        else if (trend > 0 and loprice0 <= upTrndSAR - filt * calcBaseUnit())
+            trend := -1
+            dnTrndSAR := hVal0
+            dnSig := SignalMode == "Signals & Stops" ? hVal0 : dnSig
+            upTrndSAR := 0.
+            aFactor := startAFactor
+            lowVal0 := loprice0
+            hVal0 := hiprice0
+
+    // Generate continuous signal
+    trend == 1 ? 1 : trend == -1 ? -1 : 0
+
+// APSAR - }
+
+
+
+
+// Web3Quant - {
+
+export web3quant() =>
+    length = 93
+    src = close
+
+    hullma = ta.wma(2 * ta.wma(src, length / 2) - ta.wma(src, length), math.floor(math.sqrt(length)))
+
+    // Generate continuous signal
+    hullma > hullma[1] ? 1 : hullma < hullma[1] ? -1 : 0
+
+// Web3Quant - }
+
+ 
+
+
+// Volatility WMA - {
+
+vwma(_src, _period) =>
+    _vol_sum = 0.0
+    _tr_sum = 0.0
+    for i = 0 to _period by 1
+        _vol_sum := _src[i] * math.abs(ta.tr(true)[i]) * (_period + 1 - i) + _vol_sum
+        _tr_sum := math.abs(ta.tr(true)[i]) * (_period + 1 - i) + _tr_sum
+    _volwma = _vol_sum / _tr_sum
+    _volwma
+
+import TradingView/ta/5 as ta
+
+export vol_wma() =>
+    len = 55
+    src = hlc3
+    smooth = true
+    smoothlen = 17
+    
+    ma = vwma(src, len)
+    if smooth == true
+        ma := ta.tema(ma, smoothlen)
+
+    // Generate continuous signal
+    ma > ma[1] ? 1 : ma < ma[1] ? -1 : 0
+
+// Volatility WMA - }
+
+
+
+
+// Keltner Trend V3 - {
+
+ma(source, length, type) =>
+    type == "SMA" ? ta.sma(source, length) :
+     type == "EMA" ? ta.ema(source, length) :
+     type == "SMMA (RMA)" ? ta.rma(source, length) :
+     type == "WMA" ? ta.wma(source, length) :
+     type == "VWMA" ? ta.vwma(source, length) :
+     type == "HMA" ? ta.hma(source, length) :
+     na
+
+calcPerc(x, y) =>
+    u = math.max(x, y)
+    d = math.min(x, y)
+    perc = math.round(100 / (y / (u - d)), 2)
+    perc
+
+export keltner_v3() =>
+    // Keltner Trend V3 - {
+
+    len = 22 
+    mult = 1.0 
+    useTrueRange = true 
+    src = high 
+    bsrc = high 
+    lsrc = hl2 
+    ltpsrc = open 
+    stpsrc = open 
+
+    maType = "EMA"
+
+    price = ma(src, len, maType)
+    range_1 = useTrueRange ? ta.tr : high - low
+    movement = ma(range_1, len, maType) * mult
+    upper = price + movement
+    lower = price - movement
+    bullish = bsrc > upper[1]
+    bearish = lsrc < lower[1]
+
+    lTP = ltpsrc < upper[1] and ltpsrc > lower[1] and bullish[1] == true
+    sTP = stpsrc < upper[1] and stpsrc > lower[1] and bearish[1] == true
+
+    c = ta.barssince(bullish and not bearish) <= ta.barssince(bearish and not bullish) ? color.lime : color.red
+
+    long = bullish[1] == false and bullish == true ? true : false
+    short = bearish[1] == false and bearish == true ? true : false
+
+    bh = ta.valuewhen(lTP, high, 0)
+    BIML = ta.valuewhen(lTP, bar_index, 0)
+
+    bl = ta.valuewhen(sTP, low, 0)
+    BIMS = ta.valuewhen(sTP, bar_index, 0)
+
+    // profit
+    entryL = ta.valuewhen(lTP, ta.valuewhen(long, bsrc == open ? open : upper[1], 0), 0)
+    entryS = ta.valuewhen(sTP, ta.valuewhen(short, lsrc == open ? open : lower[1], 0), 0)
+
+    dtpL = ta.valuewhen(lTP, ltpsrc == open ? open : upper, 0)
+    dtpS = ta.valuewhen(sTP, stpsrc == open ? open : lower, 0)
+
+    mDL = entryL < dtpL ? "+" : entryL > dtpL ? "-" : "#"
+    mDS = entryS > dtpS ? "+" : entryS < dtpS ? "-" : "#"
+
+    profitPercL = calcPerc(dtpL, entryL)
+    profitPercS = calcPerc(dtpS, entryS)
+
+    // Detect buy & sell signals
+    keltner_long = long
+    keltner_short = short
+
+    var score = 0
+    if long
+        score := 1
+    if short
+        score := -1
+    score
+
+// Keltner Trend V3 - }
+
+
+
+
+// AlphaTrend Screener - {
+
+export alpha_trend() =>
+    src = close
+    AP = 32
+    coeff = 0.4
+    novolumedata = false
+
+    ATR = ta.sma(ta.tr, AP)
+    upT = low - ATR * coeff
+    downT = high + ATR * coeff
+    AlphaTrend = 0.0
+    AlphaTrend := (novolumedata ? ta.rsi(src, AP) >= 50 : ta.mfi(hlc3, AP) >= 50) ? upT < nz(AlphaTrend[1]) ? nz(AlphaTrend[1]) : upT : downT > nz(AlphaTrend[1]) ? nz(AlphaTrend[1]) : downT
+    color1 = AlphaTrend > AlphaTrend[2] ? #00E60F : AlphaTrend < AlphaTrend[2] ? #80000B : AlphaTrend[1] > AlphaTrend[3] ? #00E60F : #80000B
+    buySignalk = AlphaTrend > AlphaTrend[2]
+    sellSignalk = AlphaTrend < AlphaTrend[2]
+    K1 = ta.barssince(buySignalk)
+    K2 = ta.barssince(sellSignalk)
+    O1 = ta.barssince(buySignalk[1])
+    O2 = ta.barssince(sellSignalk[1])
+    direction = 0
+    direction := buySignalk and O1 > K2 ? 1 : sellSignalk and O2 > K1 ? -1 : direction[1]
+
+
+    // Generate continuous signal
+    direction == 1 ? 1 : direction == -1 ? -1 : 0
+
+// AlphaTrend Screener - }
+
+
+
+
+// Highest-Lowest Trend - {
+
+export hlt() =>
+    length = 23
+    offset = 6
+    src = close
+    Use_High_and_Low = true
+
+    upper = ta.highest(Use_High_and_Low ? high : src, length)[offset]
+    lower = ta.lowest(Use_High_and_Low ? high : src, length)[offset]
+
+    var float hlt = 0.0
+    hlt := src > upper ? lower : src < lower ? upper : nz(hlt)
+
+    // Generate continuous signal
+    hlt < close ? 1 : hlt > close ? -1 : 0
+
+// Highest-Lowest Trend - }
+
+
+
+
+// Z distance from VWAP Momentum Trend - {
+
+calc_zvwap(pds) =>
+    mean = math.sum(volume * close, pds) / math.sum(volume, pds)
+    vwapsd = math.sqrt(ta.sma(math.pow(close - mean, 2), pds))
+    (close - mean) / vwapsd
+
+export z_dist() =>
+    int Len2 = 20
+    pmom = 0.1
+    nmom = -0.14
+
+    zvwap = calc_zvwap(Len2)
+
+    p_mom = zvwap > pmom and ta.change(ta.ema(close, 5)) > 0
+    n_mom = zvwap < nmom and ta.change(ta.ema(close, 5)) < 0
+
+    // Generate continuous signal
+    var signal = 0
+    if p_mom
+        signal := 1
+    if n_mom
+        signal := -1
+    signal
+
+// Z distance from VWAP Momentum Trend - }
+
+
+
+
+// RMI Trend Sniper - {
+
+export rmi_trend() =>
+    Length = 8
+    pmom = 55
+    nmom = 55
+    filleshow = true
+    BarRange = high - low
+
+    up = ta.rma(math.max(ta.change(close), 0), Length)
+    down = ta.rma(-math.min(ta.change(close), 0), Length)
+    rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+    mf = ta.mfi(hlc3, Length)
+    rsi_mfi = math.avg(rsi, mf)
+
+    // Generate perpetual signals
+    bool p_mom = rsi_mfi > pmom and ta.change(ta.ema(close, 5)) > 0
+    bool n_mom = rsi_mfi < nmom and ta.change(ta.ema(close, 5)) < 0
+
+    // Generate continuous signal
+    var signal = 0
+    if p_mom
+        signal := 1
+    if n_mom
+        signal := -1
+    signal
+
+// RMI Trend Sniper - }
+
+
+
+
+/// Multi Kernel Regression - {
+
+triangular(source, bandwidth) =>
+    math.abs(source / bandwidth) <= 1 ? 1 - math.abs(source / bandwidth) : 0.0
+
+kernel_func(source, bandwidth, style) =>
+    switch style
+        "Triangular" => triangular(source, bandwidth)
+
+precalculate_nrp(bandwidth, kernel) =>
+    var float[] weights = array.new<float>()
+    var float sumw = 0
+    if barstate.isfirst
+        for i = 0 to bandwidth - 1
+            j = math.pow(i, 2) / (math.pow(bandwidth, 2))
+            weight = kernel_func(j, 1, kernel)
+            array.push(weights, weight)
+            sumw += weight
+        [weights, sumw]
+    else
+        [weights, sumw]
+
+export multi_kernel_regression_l() =>
+    var int bandwidth = 13
+    var float deviations = 2.0
+    var string kernel = "Triangular"
+    var float nrp_sum = na
+    var float nrp_stdev = na
+    var color nrp_color = na
+    source = close
+
+    [weights, sumw] = precalculate_nrp(bandwidth, kernel)
+    float sum = 0.0
+    float sumsq = 0.0
+    for i = 0 to bandwidth - 1
+        weight = array.get(weights, i)
+        sum += nz(source[i]) * weight
+    nrp_sum := sum / sumw
+    for i = 0 to bandwidth - 1
+        sumsq += math.pow(source[i] - nrp_sum, 2)
+    nrp_stdev := math.sqrt(sumsq / (bandwidth - 1)) * deviations
+
+    // Generate continuous signal
+    nrp_sum > nrp_sum[1] ? 1 : nrp_sum < nrp_sum[1] ? -1 : 0
+
+export multi_kernel_regression_h() =>
+    var int bandwidth = 4
+    var float deviations = 2.0
+    var string kernel = "Triangular"
+    var float nrp_sum = na
+    var float nrp_stdev = na
+    var color nrp_color = na
+    source = hlcc4
+
+    [weights, sumw] = precalculate_nrp(bandwidth, kernel)
+    float sum = 0.0
+    float sumsq = 0.0
+    for i = 0 to bandwidth - 1
+        weight = array.get(weights, i)
+        sum += nz(source[i]) * weight
+    nrp_sum := sum / sumw
+    for i = 0 to bandwidth - 1
+        sumsq += math.pow(source[i] - nrp_sum, 2)
+    nrp_stdev := math.sqrt(sumsq / (bandwidth - 1)) * deviations
+
+    // Generate continuous signal
+    nrp_sum > nrp_sum[1] ? 1 : nrp_sum < nrp_sum[1] ? -1 : 0
+
+// Multi Kernel Regression - }
+
+
+
+
+// GKYZFNLRMA - {
+
+import loxx/loxxexpandedsourcetypes/4
+
+nonLinearRegression(float src, int per) =>
+    float AvgX = 0
+    float AvgY = 0
+
+    float[] nlrXValue = array.new<float>(per, 0)
+    float[] nlrYValue = array.new<float>(per, 0)
+
+    for i = 0 to per - 1
+        array.set(nlrXValue, i, i)
+        array.set(nlrYValue, i, nz(src[i]))
+        AvgX += array.get(nlrXValue, i)
+        AvgY += array.get(nlrYValue, i)
+    
+    AvgX /= per
+    AvgY /= per
+ 
+    float SXX = 0
+    float SXY = 0
+    float SYY = 0
+    float SXX2 = 0
+    float SX2X2 = 0
+    float SYX2 = 0
+
+    for i = 0 to per - 1
+        float XM = array.get(nlrXValue, i) - AvgX
+        float YM = array.get(nlrYValue, i) - AvgY
+        float XM2 = array.get(nlrXValue, i) * array.get(nlrXValue, i) - AvgX * AvgX
+        SXX += XM * XM
+        SXY += XM * YM
+        SYY += YM * YM
+        SXX2 += XM * XM2
+        SX2X2 += XM2 * XM2
+        SYX2 += YM * XM2
+    
+    float tmp = 0
+    float ACoeff = 0
+    float BCoeff = 0
+    float CCoeff = 0
+
+    tmp := SXX * SX2X2 - SXX2 * SXX2
+
+    if tmp != 0
+        BCoeff := (SXY * SX2X2 - SYX2 * SXX2) / tmp
+        CCoeff := (SXX * SYX2 - SXX2 * SXY) / tmp
+    
+    ACoeff := AvgY - BCoeff * AvgX - CCoeff * AvgX * AvgX
+    tmp := ACoeff + CCoeff 
+    tmp
+
+gkyzvol(int per) =>
+    float gzkylog = math.log(open / nz(close[1]))
+    float pklog = math.log(high / low)
+    float gklog = math.log(close / open)
+    float garmult = (2 * math.log(2) - 1)
+    
+    float gkyzsum = 1 / per * math.sum(math.pow(gzkylog, 2), per)
+    float parkinsonsum = 1 / (2 * per) * math.sum(math.pow(pklog, 2), per)
+    float garmansum = garmult / per * math.sum(math.pow(gklog, 2), per)
+    
+    float sum = gkyzsum + parkinsonsum - garmansum
+    float devpercent = math.sqrt(sum)  
+    devpercent
+
+gkyzFilter(float src, int len, float filter) =>
+    float price = src
+    float filtdev = filter * gkyzvol(len) * src
+    price := math.abs(price - nz(price[1])) < filtdev ? nz(price[1]) : price
+    price
+
+export gkyz() =>
+    smthtype = "Kaufman"
+    srcin = "Trend Biased (Extreme)"
+    per = 38
+    filterop = "Both"
+    filter = 0.41
+    filterperiod = 17
+    kfl = 0.666
+    ksl = 0.0645
+    amafl = 2
+    amasl = 30
+
+    float src = switch srcin
+        "Trend Biased (Extreme)" => loxxexpandedsourcetypes.rtrendbext()
+
+    src := filterop == "Both" or filterop == "Price" and filter > 0 ? gkyzFilter(src, filterperiod, filter) : src
+
+    out = nonLinearRegression(src, per)
+
+    out := filterop == "Both" or filterop == "GKYZFNLRMA" and filter > 0 ? gkyzFilter(out, filterperiod, filter) : out
+
+    sig = out[1]
+
+    // Generate continuous signal
+
+    var signal = 0
+    if out > sig 
+        signal := 1
+    if out < sig
+        signal := -1
+    signal
+
+// GKYZFNLRMA - }
+
+
+
+
+// LNL - {
+
+// Define functions required for the calculations above the exported function
+BullishDMI(high, low, high1, low1) =>
+    (high - high1) > (low1 - low) and (high - high1) > 0 ? (high - high1) : 0
+
+BearishDMI(high, low, high1, low1) =>
+    (low1 - low) > (high - high1) and (low1 - low) > 0 ? (low1 - low) : 0
+
+calculateATR(ATRLength, close, Trend) =>
+    ATR = (ATRLength/100) * ta.ema(ta.tr(true),8)
+    Up = close > (Trend + ATR)
+    Down = close < (Trend - ATR)
+    T = 0.0
+    T := Up ? 1 : Down ? -1 : T[1]
+
+calculateATR2(ATRLength, close, Trend) =>
+    ATRA2 = (ATRLength - 20) /100 * ta.ema(ta.tr(true),8)
+    Up21 = close > (Trend + ATRA2)
+    Down21 = close < (Trend - ATRA2)
+    T2 = 0.0
+    T2 := Up21 ? 1 : Down21 ? -1 : T2[1]
+
+export en_lnl() =>
+    // Date Range
+    useDateFilter = true
+    backtestStartDate = timestamp("1 Jan 2018")
+    inDateRange = not useDateFilter or (time >= backtestStartDate)
+
+    // LNL - {
+
+    // Inputs
+    DMIL = 14
+    ATRL = 52
+    EMAL = 6
+    TrendL = 16
+
+    // Trend System 1 {
+    BullishDMIValue = BullishDMI(high, low, high[1], low[1])
+    BearishDMIValue = BearishDMI(high, low, high[1], low[1])
+    DMIUp = 100 * ta.rma(BullishDMIValue, DMIL) / ta.rma(ta.tr(true), DMIL)
+    DMIDown = 100 * ta.rma(BearishDMIValue, DMIL) / ta.rma(ta.tr(true), DMIL)
+    ADXx = (DMIUp + DMIDown) > 0 ? 100 * math.abs(DMIUp - DMIDown) / (DMIUp + DMIDown) : na
+    ADX = ta.rma(ADXx, DMIL)
+
+    LNL_DMI = (DMIUp > DMIDown and ADX > 20) ? 1 : (DMIUp < DMIDown and ADX > 20) ? -1 : 0
+    //}
+
+    // Trend System 2 {
+    ema8 =  ta.vwma(close, EMAL)
+    ema13 = ta.vwma(close, (EMAL + 5))
+    ema21 = ta.vwma(close, (EMAL + 13))
+    ema34 = ta.vwma(close, (EMAL + 26))
+
+    E1 = ema8 > ema13 ? 1 : -1
+    E2 = ema13 > ema21 ? 1 : -1
+    E3 = ema21 > ema34 ? 1 : -1
+    ET = math.avg(E1,E2,E3)
+
+    Trend = ta.ema(close, TrendL)
+    LNL_EMA = ET > 0.5 ? 1 : ET < -0.5 ? -1 : 0
+    //}
+
+    // Trend System 3 {
+    ATRLength = ATRL
+    T = calculateATR(ATRLength, close, Trend)
+    T2 = calculateATR2(ATRLength, close, Trend)
+
+    Signal = math.avg(T,T2)
+    LNL_ATR = Signal > 0 ? 1 : Signal < 0 ? -1 : 0
+    //}
+
+    // Trend System 4 {
+    A4 = T == 1 ? 1 : -1
+    B4 = T2 == 1 ? 1 : -1
+    LNL_Cloud = math.avg(A4,B4)
+    //}
+
+    // Average Signal {
+    Average = math.avg(LNL_EMA,LNL_EMA,LNL_ATR, LNL_Cloud)
+    LNL_TPI = Average > 0 ? 1 : Average < 0 ? -1 : 0
+
+    // Detect buy & sell signals
+    long_condition  = LNL_TPI == 1
+    short_condition = LNL_TPI == -1
+
+    var score = 0
+    if long_condition
+        score := 1 
+    if short_condition
+        score := -1
+    score
+
+// LNL - }
+
+
+
+
+// MAGIC TREND - {
+
+// Define the AAAA equivalent function
+calculateCCI(src, length) =>
+    ma = ta.sma(src, length)
+    cci = (src - ma) / (0.015 * ta.dev(src, length))
+    cci
+
+// Export the Magic Trend function
+export magicTrend() =>
+    // Define inputs with default values
+    length = 36
+    CCI_upper = 78
+    CCI_lower = -68
+    src = close
+    
+    var signal = 0
+    
+    cci = calculateCCI(src, length)
+    
+    CCIlong = ta.crossover(cci, CCI_upper)
+    CCIshort = ta.crossunder(cci, CCI_lower)
+
+    var score = 0
+    if CCIlong
+        score := 1
+    if CCIshort
+        score := -1
+    score
+
+
+// MAGIC TREND - }
+
+
+/// PERPETUALS /// - }

@@ -1,0 +1,767 @@
+//@version=5
+indicator(title="[AzMoh]_Dynamic_VWAP_Bands_V2", overlay=true, max_lines_count = 500)
+
+//Day_High_Low
+//Ascertaining Day Start and Bar-Count
+_day = time('1440', session.regular)
+is_first = na(_day[1]) and not na(_day) or _day[1] < _day
+
+bar_count=ta.barssince(is_first)+1
+
+//Asceratining new_high, new_low
+day_high=(bar_count>0?ta.highest(high,bar_count):na)
+day_low=(bar_count>0?ta.lowest(low,bar_count):na)
+
+// timeframe="1"
+timeframe_gaps=true
+hideonDWM = false
+var anchor = "Session"
+src = hlc3
+
+if barstate.islast and ta.cum(volume) == 0
+    runtime.error("No volume is provided by the data vendor.")
+isNewPeriod = switch anchor  
+    "Session" => timeframe.change("D")
+    => false
+
+isEsdAnchor = anchor == "Earnings" or anchor == "Dividends" or anchor == "Splits"
+if na(src[1]) and not isEsdAnchor
+    isNewPeriod := true
+
+float vwapValue = na
+if not (hideonDWM and timeframe.isdwm)
+    [_vwap, _stdevUpper, _] = ta.vwap(src, isNewPeriod, 1)
+    vwapValue := _vwap
+    stdevAbs = _stdevUpper - _vwap
+
+
+plot(vwapValue, title="VWAP", color=close>vwapValue?color.lime:close<vwapValue?#FF0000:na, offset=0, linewidth=1)
+
+
+// plot(day_high, color=color.lime)
+// plot(day_low, color=color.red)
+var float old_vwap_value = 0.0
+var int aB = 0
+var int aC = 0
+var float vwap_diff = na
+var bx = bar_index
+var line base_vwap_line = na
+var float base_vwap_value_ = 0.0
+
+var line vwap_band_line_up_1 = na
+var line vwap_band_line_dn_1 = na
+
+var line vwap_band_line_up_2 = na
+var line vwap_band_line_dn_2 = na
+
+var line vwap_band_line_up_3 = na
+var line vwap_band_line_dn_3 = na
+
+var line vwap_band_line_up_4 = na
+var line vwap_band_line_dn_4 = na
+
+var line vwap_band_line_up_5 = na
+var line vwap_band_line_dn_5 = na
+
+var line vwap_band_line_up_6 = na
+var line vwap_band_line_dn_6 = na
+
+var line vwap_band_line_up_7 = na
+var line vwap_band_line_dn_7 = na
+
+var line vwap_band_line_up_8 = na
+var line vwap_band_line_dn_8 = na
+
+var line vwap_band_line_up_9 = na
+var line vwap_band_line_dn_9 = na
+
+var line vwap_band_line_up_10 = na
+var line vwap_band_line_dn_10 = na
+
+var line vwap_band_line_up_11 = na
+var line vwap_band_line_dn_11 = na
+
+var line vwap_band_line_up_12 = na
+var line vwap_band_line_dn_12 = na
+
+var line vwap_band_line_up_13 = na
+var line vwap_band_line_dn_13 = na
+
+var line vwap_band_line_up_14 = na
+var line vwap_band_line_dn_14 = na
+
+var line vwap_band_line_up_15 = na
+var line vwap_band_line_dn_15 = na
+
+var line vwap_band_line_up_16 = na
+var line vwap_band_line_dn_16 = na
+
+var line vwap_band_line_up_17 = na
+var line vwap_band_line_dn_17 = na
+
+var line vwap_band_line_up_18 = na
+var line vwap_band_line_dn_18 = na
+
+var line vwap_band_line_up_19 = na
+var line vwap_band_line_dn_19 = na
+
+var line vwap_band_line_up_20 = na
+var line vwap_band_line_dn_20 = na
+
+var line vwap_band_line_up_21 = na
+var line vwap_band_line_dn_21 = na
+
+var line vwap_band_line_up_22 = na
+var line vwap_band_line_dn_22 = na
+
+var line vwap_band_line_up_23 = na
+var line vwap_band_line_dn_23 = na
+
+var line vwap_band_line_up_24 = na
+var line vwap_band_line_dn_24 = na
+
+var line vwap_band_line_up_25 = na
+var line vwap_band_line_dn_25 = na
+
+var line vwap_band_line_up_26 = na
+var line vwap_band_line_dn_26 = na
+
+var line vwap_band_line_up_27 = na
+var line vwap_band_line_dn_27 = na
+
+var line vwap_band_line_up_28 = na
+var line vwap_band_line_dn_28 = na
+
+var line vwap_band_line_up_29 = na
+var line vwap_band_line_dn_29 = na
+
+var line vwap_band_line_up_30 = na
+var line vwap_band_line_dn_30 = na
+
+var label base_vwap_label = na
+
+var label wap_band_label_up_1 = na
+var label vwap_band_label_dn_1 = na
+
+var label wap_band_label_up_2 = na
+var label vwap_band_label_dn_2 = na
+
+var bool vwap_band_line_up_1_set = false
+var bool vwap_band_line_dn_1_set = false
+
+var bool vwap_band_line_up_2_set = false
+var bool vwap_band_line_dn_2_set = false
+
+var bool vwap_band_line_up_3_set = false
+var bool vwap_band_line_dn_3_set = false
+
+var bool vwap_band_line_up_4_set = false
+var bool vwap_band_line_dn_4_set = false
+
+var bool vwap_band_line_up_5_set = false
+var bool vwap_band_line_dn_5_set = false
+
+var bool vwap_band_line_up_6_set = false
+var bool vwap_band_line_dn_6_set = false
+
+var bool vwap_band_line_up_7_set = false
+var bool vwap_band_line_dn_7_set = false
+
+var bool vwap_band_line_up_8_set = false
+var bool vwap_band_line_dn_8_set = false
+
+var bool vwap_band_line_up_9_set = false
+var bool vwap_band_line_dn_9_set = false
+
+var bool vwap_band_line_up_10_set = false
+var bool vwap_band_line_dn_10_set = false
+
+var bool vwap_band_line_up_11_set = false
+var bool vwap_band_line_dn_11_set = false
+
+var bool vwap_band_line_up_12_set = false
+var bool vwap_band_line_dn_12_set = false
+
+var bool vwap_band_line_up_13_set = false
+var bool vwap_band_line_dn_13_set = false
+
+var bool vwap_band_line_up_14_set = false
+var bool vwap_band_line_dn_14_set = false
+
+var bool vwap_band_line_up_15_set = false
+var bool vwap_band_line_dn_15_set = false
+
+var bool vwap_band_line_up_16_set = false
+var bool vwap_band_line_dn_16_set = false
+
+var bool vwap_band_line_up_17_set = false
+var bool vwap_band_line_dn_17_set = false
+
+var bool vwap_band_line_up_18_set = false
+var bool vwap_band_line_dn_18_set = false
+
+var bool vwap_band_line_up_19_set = false
+var bool vwap_band_line_dn_19_set = false
+
+var bool vwap_band_line_up_20_set = false
+var bool vwap_band_line_dn_20_set = false
+
+var bool vwap_band_line_up_21_set = false
+var bool vwap_band_line_dn_21_set = false
+
+var bool vwap_band_line_up_22_set = false
+var bool vwap_band_line_dn_22_set = false
+
+var bool vwap_band_line_up_23_set = false
+var bool vwap_band_line_dn_23_set = false
+
+var bool vwap_band_line_up_24_set = false
+var bool vwap_band_line_dn_24_set = false
+
+var bool vwap_band_line_up_25_set = false
+var bool vwap_band_line_dn_25_set = false
+
+var bool vwap_band_line_up_26_set = false
+var bool vwap_band_line_dn_26_set = false
+
+var bool vwap_band_line_up_27_set = false
+var bool vwap_band_line_dn_27_set = false
+
+var bool vwap_band_line_up_28_set = false
+var bool vwap_band_line_dn_28_set = false
+
+var bool vwap_band_line_up_29_set = false
+var bool vwap_band_line_dn_29_set = false
+
+var bool vwap_band_line_up_30_set = false
+var bool vwap_band_line_dn_30_set = false
+
+if session.islastbar
+    old_vwap_value := vwapValue
+    aB := bar_index
+    [old_vwap_value,aB]
+
+var initial_bar_index = bar_index
+var float base_vwap_value = 0.0
+
+if session.isfirstbar
+    line.delete(base_vwap_line)
+    label.delete(base_vwap_label)
+
+    line.delete(vwap_band_line_up_1)
+    line.delete(vwap_band_line_dn_1)
+
+    line.delete(vwap_band_line_up_2)
+    line.delete(vwap_band_line_dn_2)
+
+    line.delete(vwap_band_line_up_3)
+    line.delete(vwap_band_line_dn_3)
+
+    line.delete(vwap_band_line_up_4)
+    line.delete(vwap_band_line_dn_4)
+
+    line.delete(vwap_band_line_up_5)
+    line.delete(vwap_band_line_dn_5)
+
+    line.delete(vwap_band_line_up_6)
+    line.delete(vwap_band_line_dn_6)
+
+    line.delete(vwap_band_line_up_7)
+    line.delete(vwap_band_line_dn_7)
+
+    line.delete(vwap_band_line_up_8)
+    line.delete(vwap_band_line_dn_8)
+
+    line.delete(vwap_band_line_up_9)
+    line.delete(vwap_band_line_dn_9)
+
+    line.delete(vwap_band_line_up_10)
+    line.delete(vwap_band_line_dn_10)
+
+    line.delete(vwap_band_line_up_11)
+    line.delete(vwap_band_line_dn_11)
+
+    line.delete(vwap_band_line_up_12)
+    line.delete(vwap_band_line_dn_12)
+
+    line.delete(vwap_band_line_up_13)
+    line.delete(vwap_band_line_dn_13)
+
+    line.delete(vwap_band_line_up_14)
+    line.delete(vwap_band_line_dn_14)
+
+    line.delete(vwap_band_line_up_15)
+    line.delete(vwap_band_line_dn_15)
+
+    line.delete(vwap_band_line_up_16)
+    line.delete(vwap_band_line_dn_16)
+
+    line.delete(vwap_band_line_up_17)
+    line.delete(vwap_band_line_dn_17)
+
+    line.delete(vwap_band_line_up_18)
+    line.delete(vwap_band_line_dn_18)
+
+    line.delete(vwap_band_line_up_19)
+    line.delete(vwap_band_line_dn_19)
+
+
+    line.delete(vwap_band_line_up_20)
+    line.delete(vwap_band_line_dn_20)
+
+    line.delete(vwap_band_line_up_21)
+    line.delete(vwap_band_line_dn_21)
+
+    line.delete(vwap_band_line_up_22)
+    line.delete(vwap_band_line_dn_22)
+
+    line.delete(vwap_band_line_up_23)
+    line.delete(vwap_band_line_dn_23)
+
+    line.delete(vwap_band_line_up_24)
+    line.delete(vwap_band_line_dn_24)
+
+    line.delete(vwap_band_line_up_25)
+    line.delete(vwap_band_line_dn_25)
+
+    line.delete(vwap_band_line_up_26)
+    line.delete(vwap_band_line_dn_26)
+
+    line.delete(vwap_band_line_up_27)
+    line.delete(vwap_band_line_dn_27)
+
+    line.delete(vwap_band_line_up_28)
+    line.delete(vwap_band_line_dn_28)
+
+    line.delete(vwap_band_line_up_29)
+    line.delete(vwap_band_line_dn_29)
+
+    line.delete(vwap_band_line_up_30)
+    line.delete(vwap_band_line_dn_30)
+
+    vwap_band_line_up_1_set := false
+    vwap_band_line_dn_1_set := false
+
+    vwap_band_line_up_2_set := false
+    vwap_band_line_dn_2_set := false
+
+    vwap_band_line_up_3_set := false
+    vwap_band_line_dn_3_set := false
+
+    vwap_band_line_up_4_set := false
+    vwap_band_line_dn_4_set := false
+
+    vwap_band_line_up_5_set := false
+    vwap_band_line_dn_5_set := false
+
+    vwap_band_line_up_6_set := false
+    vwap_band_line_dn_6_set := false
+
+    vwap_band_line_up_7_set := false
+    vwap_band_line_dn_7_set := false
+
+    vwap_band_line_up_8_set := false
+    vwap_band_line_dn_8_set := false
+
+    vwap_band_line_up_9_set := false
+    vwap_band_line_dn_9_set := false
+
+    vwap_band_line_up_10_set := false
+    vwap_band_line_dn_10_set := false
+
+    vwap_band_line_up_11_set := false
+    vwap_band_line_dn_11_set := false
+
+    vwap_band_line_up_12_set := false
+    vwap_band_line_dn_12_set := false
+
+    vwap_band_line_up_13_set := false
+    vwap_band_line_dn_13_set := false
+
+    vwap_band_line_up_14_set := false
+    vwap_band_line_dn_14_set := false
+
+    vwap_band_line_up_15_set := false
+    vwap_band_line_dn_15_set := false
+
+    vwap_band_line_up_16_set := false
+    vwap_band_line_dn_16_set := false
+
+    vwap_band_line_up_17_set := false
+    vwap_band_line_dn_17_set := false
+
+    vwap_band_line_up_18_set := false
+    vwap_band_line_dn_18_set := false
+
+    vwap_band_line_up_19_set := false
+    vwap_band_line_dn_19_set := false
+
+    vwap_band_line_up_20_set := false
+    vwap_band_line_dn_20_set := false
+
+    vwap_band_line_up_21_set := false
+    vwap_band_line_dn_21_set := false
+
+    vwap_band_line_up_22_set := false
+    vwap_band_line_dn_22_set := false
+
+    vwap_band_line_up_23_set := false
+    vwap_band_line_dn_23_set := false
+
+    vwap_band_line_up_24_set := false
+    vwap_band_line_dn_24_set := false
+
+    vwap_band_line_up_25_set := false
+    vwap_band_line_dn_25_set := false
+
+    vwap_band_line_up_26_set := false
+    vwap_band_line_dn_26_set := false
+
+    vwap_band_line_up_27_set := false
+    vwap_band_line_dn_27_set := false
+
+    vwap_band_line_up_28_set := false
+    vwap_band_line_dn_28_set := false
+
+    vwap_band_line_up_29_set := false
+    vwap_band_line_dn_29_set := false
+
+    vwap_band_line_up_30_set := false
+    vwap_band_line_dn_30_set := false
+
+    initial_bar_index := bar_index
+    base_vwap_value := vwapValue
+    base_vwap_value_ := close>10?math.round(vwapValue, 2):math.round(vwapValue, 4)
+    bx := bar_index + 1
+    vwap_diff := ((vwapValue > old_vwap_value)?(base_vwap_value - old_vwap_value) : (base_vwap_value < old_vwap_value)? (old_vwap_value - base_vwap_value):0.0)
+    base_vwap_line := line.new(initial_bar_index, base_vwap_value, bx, base_vwap_value, color = #2196f3, width = 2)
+    base_vwap_label := label.new( bx, base_vwap_value, text = "VWAP: " + str.tostring(base_vwap_value_), textcolor = #2196f3,  style = label.style_label_left, color=na)
+    vwap_band_line_up_1 := line.new(initial_bar_index, (base_vwap_value + vwap_diff), bx, (base_vwap_value + vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_dn_1 := line.new(initial_bar_index, (base_vwap_value - vwap_diff), bx, (base_vwap_value - vwap_diff), color = color.red, width = 1)
+
+//vwap_band_1
+if day_high > (base_vwap_value + 1*vwap_diff) and  not vwap_band_line_up_2_set
+    vwap_band_line_up_2 := line.new(initial_bar_index, (base_vwap_value + 2*vwap_diff), bx, (base_vwap_value + 2*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_2_set := true
+if day_low < (base_vwap_value - 1*vwap_diff) and  not vwap_band_line_dn_2_set
+    vwap_band_line_dn_2 := line.new(initial_bar_index, (base_vwap_value - 2*vwap_diff), bx, (base_vwap_value - 2*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_2_set := true
+
+//vwap_band_3
+if day_high > (base_vwap_value + 2*vwap_diff) and  not vwap_band_line_up_3_set
+    vwap_band_line_up_3 := line.new(initial_bar_index, (base_vwap_value + 3*vwap_diff), bx, (base_vwap_value + 3*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_3_set := true
+if day_low < (base_vwap_value - 2*vwap_diff) and  not vwap_band_line_dn_3_set
+    vwap_band_line_dn_3 := line.new(initial_bar_index, (base_vwap_value - 3*vwap_diff), bx, (base_vwap_value - 3*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_3_set := true
+
+
+//vwap_band_4
+if day_high > (base_vwap_value + 3*vwap_diff) and  not vwap_band_line_up_4_set
+    vwap_band_line_up_4 := line.new(initial_bar_index, (base_vwap_value + 4*vwap_diff), bx, (base_vwap_value + 4*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_4_set := true
+if day_low < (base_vwap_value - 3*vwap_diff) and  not vwap_band_line_up_4_set
+    vwap_band_line_dn_4 := line.new(initial_bar_index, (base_vwap_value - 4*vwap_diff), bx, (base_vwap_value - 4*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_up_4_set := true
+
+//vwap_band_5
+if day_high > (base_vwap_value + 4*vwap_diff) and  not vwap_band_line_up_5_set
+    vwap_band_line_up_5 := line.new(initial_bar_index, (base_vwap_value + 5*vwap_diff), bx, (base_vwap_value + 5*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_5_set := true
+if day_low < (base_vwap_value - 4*vwap_diff) and  not vwap_band_line_dn_5_set
+    vwap_band_line_dn_5 := line.new(initial_bar_index, (base_vwap_value - 5*vwap_diff), bx, (base_vwap_value - 5*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_5_set := true
+
+//vwap_band_6
+if day_high > (base_vwap_value + 5*vwap_diff) and  not vwap_band_line_up_6_set
+    vwap_band_line_up_6 := line.new(initial_bar_index, (base_vwap_value + 6*vwap_diff), bx, (base_vwap_value + 6*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_6_set := true
+if day_low < (base_vwap_value - 5*vwap_diff) and  not vwap_band_line_dn_6_set
+    vwap_band_line_dn_6 := line.new(initial_bar_index, (base_vwap_value - 6*vwap_diff), bx, (base_vwap_value - 6*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_6_set := true
+
+//vwap_band_7
+if day_high > (base_vwap_value + 6*vwap_diff) and  not vwap_band_line_up_7_set
+    vwap_band_line_up_7 := line.new(initial_bar_index, (base_vwap_value + 7*vwap_diff), bx, (base_vwap_value + 7*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_7_set := true
+if day_low < (base_vwap_value - 6*vwap_diff) and  not vwap_band_line_dn_7_set
+    vwap_band_line_dn_7 := line.new(initial_bar_index, (base_vwap_value - 7*vwap_diff), bx, (base_vwap_value - 7*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_7_set := true
+
+//vwap_band_8
+if day_high > (base_vwap_value + 7*vwap_diff) and  not vwap_band_line_up_8_set
+    vwap_band_line_up_8 := line.new(initial_bar_index, (base_vwap_value + 8*vwap_diff), bx, (base_vwap_value + 8*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_8_set := true
+if day_low < (base_vwap_value - 7*vwap_diff) and  not vwap_band_line_dn_8_set
+    vwap_band_line_dn_8 := line.new(initial_bar_index, (base_vwap_value - 8*vwap_diff), bx, (base_vwap_value - 8*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_8_set := true
+
+//vwap_band_9
+if day_high > (base_vwap_value + 8*vwap_diff) and  not vwap_band_line_up_9_set
+    vwap_band_line_up_9 := line.new(initial_bar_index, (base_vwap_value + 9*vwap_diff), bx, (base_vwap_value + 9*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_9_set := true
+if day_low < (base_vwap_value - 8*vwap_diff) and  not vwap_band_line_dn_9_set
+    vwap_band_line_dn_9 := line.new(initial_bar_index, (base_vwap_value - 9*vwap_diff), bx, (base_vwap_value - 9*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_9_set := true
+
+//vwap_band_10
+if day_high > (base_vwap_value + 9*vwap_diff) and  not vwap_band_line_up_10_set
+    vwap_band_line_up_10 := line.new(initial_bar_index, (base_vwap_value + 10*vwap_diff), bx, (base_vwap_value + 10*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_10_set := true
+if day_low < (base_vwap_value - 9*vwap_diff) and  not vwap_band_line_dn_10_set
+    vwap_band_line_dn_10 := line.new(initial_bar_index, (base_vwap_value - 10*vwap_diff), bx, (base_vwap_value - 10*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_10_set := true
+
+//vwap_band_11
+if day_high > (base_vwap_value + 10*vwap_diff) and  not vwap_band_line_up_11_set
+    vwap_band_line_up_11 := line.new(initial_bar_index, (base_vwap_value + 11*vwap_diff), bx, (base_vwap_value + 11*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_11_set := true
+if day_low < (base_vwap_value - 10*vwap_diff) and  not vwap_band_line_dn_11_set
+    vwap_band_line_dn_11 := line.new(initial_bar_index, (base_vwap_value - 11*vwap_diff), bx, (base_vwap_value - 11*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_11_set := true
+
+//vwap_band_12
+if day_high > (base_vwap_value + 11*vwap_diff) and  not vwap_band_line_up_12_set
+    vwap_band_line_up_12 := line.new(initial_bar_index, (base_vwap_value + 12*vwap_diff), bx, (base_vwap_value + 12*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_12_set := true
+if day_low < (base_vwap_value - 11*vwap_diff) and  not vwap_band_line_dn_12_set
+    vwap_band_line_dn_12 := line.new(initial_bar_index, (base_vwap_value - 12*vwap_diff), bx, (base_vwap_value - 12*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_12_set := true
+
+//vwap_band_13
+if day_high > (base_vwap_value + 12*vwap_diff) and  not vwap_band_line_up_13_set
+    vwap_band_line_up_13 := line.new(initial_bar_index, (base_vwap_value + 13*vwap_diff), bx, (base_vwap_value + 13*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_13_set := true
+if day_low < (base_vwap_value - 12*vwap_diff) and  not vwap_band_line_dn_13_set
+    vwap_band_line_dn_13 := line.new(initial_bar_index, (base_vwap_value - 13*vwap_diff), bx, (base_vwap_value - 13*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_13_set := true
+
+//vwap_band_14
+if day_high > (base_vwap_value + 13*vwap_diff) and  not vwap_band_line_up_14_set
+    vwap_band_line_up_14 := line.new(initial_bar_index, (base_vwap_value + 14*vwap_diff), bx, (base_vwap_value + 14*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_14_set := true
+if day_low < (base_vwap_value - 13*vwap_diff) and  not vwap_band_line_dn_14_set
+    vwap_band_line_dn_14 := line.new(initial_bar_index, (base_vwap_value - 14*vwap_diff), bx, (base_vwap_value - 14*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_14_set := true
+    
+//vwap_band_15
+if day_high > (base_vwap_value + 14*vwap_diff) and  not vwap_band_line_up_15_set
+    vwap_band_line_up_15 := line.new(initial_bar_index, (base_vwap_value + 15*vwap_diff), bx, (base_vwap_value + 15*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_15_set := true
+if day_low < (base_vwap_value - 14*vwap_diff) and  not vwap_band_line_dn_15_set
+    vwap_band_line_dn_15 := line.new(initial_bar_index, (base_vwap_value - 15*vwap_diff), bx, (base_vwap_value - 15*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_15_set := true
+
+//vwap_band_16
+if day_high > (base_vwap_value + 15*vwap_diff) and  not vwap_band_line_up_16_set
+    vwap_band_line_up_16 := line.new(initial_bar_index, (base_vwap_value + 16*vwap_diff), bx, (base_vwap_value + 16*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_16_set := true
+if day_low < (base_vwap_value - 15*vwap_diff) and  not vwap_band_line_dn_16_set
+    vwap_band_line_dn_16 := line.new(initial_bar_index, (base_vwap_value - 16*vwap_diff), bx, (base_vwap_value - 16*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_16_set := true
+
+//vwap_band_17
+if day_high > (base_vwap_value + 16*vwap_diff) and  not vwap_band_line_up_17_set
+    vwap_band_line_up_17 := line.new(initial_bar_index, (base_vwap_value + 17*vwap_diff), bx, (base_vwap_value + 17*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_17_set := true
+if day_low < (base_vwap_value - 16*vwap_diff) and  not vwap_band_line_dn_17_set
+    vwap_band_line_dn_17 := line.new(initial_bar_index, (base_vwap_value - 17*vwap_diff), bx, (base_vwap_value - 17*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_17_set := true
+
+//vwap_band_18
+if day_high > (base_vwap_value + 17*vwap_diff) and  not vwap_band_line_up_18_set
+    vwap_band_line_up_18 := line.new(initial_bar_index, (base_vwap_value + 18*vwap_diff), bx, (base_vwap_value + 18*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_18_set := true
+if day_low < (base_vwap_value - 17*vwap_diff) and  not vwap_band_line_dn_18_set
+    vwap_band_line_dn_18 := line.new(initial_bar_index, (base_vwap_value - 18*vwap_diff), bx, (base_vwap_value - 18*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_18_set := true
+//vwap_band_19
+if day_high > (base_vwap_value + 18*vwap_diff) and  not vwap_band_line_up_19_set
+    vwap_band_line_up_19 := line.new(initial_bar_index, (base_vwap_value + 19*vwap_diff), bx, (base_vwap_value + 19*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_19_set := true
+if day_low < (base_vwap_value - 18*vwap_diff) and  not vwap_band_line_dn_19_set
+    vwap_band_line_dn_19 := line.new(initial_bar_index, (base_vwap_value - 19*vwap_diff), bx, (base_vwap_value - 19*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_19_set := true
+
+//vwap_band_20
+if day_high > (base_vwap_value + 19*vwap_diff) and  not vwap_band_line_up_20_set
+    vwap_band_line_up_20 := line.new(initial_bar_index, (base_vwap_value + 20*vwap_diff), bx, (base_vwap_value + 20*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_20_set := true
+if day_low < (base_vwap_value - 19*vwap_diff) and  not vwap_band_line_dn_20_set
+    vwap_band_line_dn_20 := line.new(initial_bar_index, (base_vwap_value - 20*vwap_diff), bx, (base_vwap_value - 20*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_20_set := true
+
+//vwap_band_21
+if day_high > (base_vwap_value + 20*vwap_diff) and  not vwap_band_line_up_21_set
+    vwap_band_line_up_21 := line.new(initial_bar_index, (base_vwap_value + 21*vwap_diff), bx, (base_vwap_value + 21*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_21_set := true
+if day_low < (base_vwap_value - 20*vwap_diff) and  not vwap_band_line_dn_21_set
+    vwap_band_line_dn_21 := line.new(initial_bar_index, (base_vwap_value - 21*vwap_diff), bx, (base_vwap_value - 21*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_21_set := true
+
+//vwap_band_22
+if day_high > (base_vwap_value + 21*vwap_diff) and  not vwap_band_line_up_22_set
+    vwap_band_line_up_22 := line.new(initial_bar_index, (base_vwap_value + 22*vwap_diff), bx, (base_vwap_value + 22*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_22_set := true
+if day_low < (base_vwap_value - 21*vwap_diff) and  not vwap_band_line_dn_22_set
+    vwap_band_line_dn_22 := line.new(initial_bar_index, (base_vwap_value - 22*vwap_diff), bx, (base_vwap_value - 22*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_22_set := true
+
+//vwap_band_23
+if day_high > (base_vwap_value + 22*vwap_diff) and  not vwap_band_line_up_23_set
+    vwap_band_line_up_23 := line.new(initial_bar_index, (base_vwap_value + 23*vwap_diff), bx, (base_vwap_value + 23*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_23_set := true
+if day_low < (base_vwap_value - 22*vwap_diff) and  not vwap_band_line_dn_23_set
+    vwap_band_line_dn_23 := line.new(initial_bar_index, (base_vwap_value - 23*vwap_diff), bx, (base_vwap_value - 23*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_23_set := true
+
+//vwap_band_24
+if day_high > (base_vwap_value + 23*vwap_diff) and  not vwap_band_line_up_24_set
+    vwap_band_line_up_24 := line.new(initial_bar_index, (base_vwap_value + 24*vwap_diff), bx, (base_vwap_value + 24*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_24_set := true
+if day_low < (base_vwap_value - 23*vwap_diff) and  not vwap_band_line_dn_24_set
+    vwap_band_line_dn_24 := line.new(initial_bar_index, (base_vwap_value - 24*vwap_diff), bx, (base_vwap_value - 24*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_24_set := true
+
+//vwap_band_25
+if day_high > (base_vwap_value + 24*vwap_diff) and  not vwap_band_line_up_25_set
+    vwap_band_line_up_25 := line.new(initial_bar_index, (base_vwap_value + 25*vwap_diff), bx, (base_vwap_value + 25*vwap_diff), color = color.new(color.lime, 0), width = 1)
+    vwap_band_line_up_25_set := true
+if day_low < (base_vwap_value - 24*vwap_diff) and  not vwap_band_line_dn_25_set
+    vwap_band_line_dn_25 := line.new(initial_bar_index, (base_vwap_value - 25*vwap_diff), bx, (base_vwap_value - 25*vwap_diff), color = color.new(color.red, 0), width = 1)
+    vwap_band_line_dn_25_set := true
+
+//vwap_band_26
+if day_high > (base_vwap_value + 25*vwap_diff) and not vwap_band_line_up_26_set
+    vwap_band_line_up_26 := line.new(initial_bar_index, (base_vwap_value + 26*vwap_diff), bx, (base_vwap_value + 26*vwap_diff), color = color.lime, width = 1)
+    vwap_band_line_up_26_set := true
+if day_low < (base_vwap_value - 25*vwap_diff) and not vwap_band_line_dn_26_set
+    vwap_band_line_dn_26 := line.new(initial_bar_index, (base_vwap_value - 26*vwap_diff), bx, (base_vwap_value - 26*vwap_diff), color = color.red, width = 1)
+    vwap_band_line_dn_26_set := true
+
+
+//vwap_band_27
+if day_high > (base_vwap_value + 26*vwap_diff) and not vwap_band_line_up_27_set
+    vwap_band_line_up_27 := line.new(initial_bar_index, (base_vwap_value + 27*vwap_diff), bx, (base_vwap_value + 27*vwap_diff), color = color.lime, width = 1)
+    vwap_band_line_up_27_set := true
+if day_low < (base_vwap_value - 26*vwap_diff) and not vwap_band_line_dn_27_set
+    vwap_band_line_dn_27 := line.new(initial_bar_index, (base_vwap_value - 27*vwap_diff), bx, (base_vwap_value - 27*vwap_diff), color = color.red, width = 1)
+    vwap_band_line_dn_27_set := true
+
+    //vwap_band_28
+if day_high > (base_vwap_value + 27*vwap_diff) and not vwap_band_line_up_28_set
+    vwap_band_line_up_28 := line.new(initial_bar_index, (base_vwap_value + 28*vwap_diff), bx, (base_vwap_value + 28*vwap_diff), color = color.lime, width = 1)
+    vwap_band_line_up_28_set := true
+if day_low < (base_vwap_value - 27*vwap_diff) and not vwap_band_line_dn_28_set
+    vwap_band_line_dn_28 := line.new(initial_bar_index, (base_vwap_value - 28*vwap_diff), bx, (base_vwap_value - 28*vwap_diff), color = color.red, width = 1)
+    vwap_band_line_dn_28_set := true
+
+    //vwap_band_29
+if day_high > (base_vwap_value + 28*vwap_diff) and not vwap_band_line_up_29_set
+    vwap_band_line_up_29 := line.new(initial_bar_index, (base_vwap_value + 29*vwap_diff), bx, (base_vwap_value + 29*vwap_diff), color = color.lime, width = 1)
+    vwap_band_line_up_29_set := true
+if day_low < (base_vwap_value - 28*vwap_diff) and not vwap_band_line_dn_29_set
+    vwap_band_line_dn_29 := line.new(initial_bar_index, (base_vwap_value - 29*vwap_diff), bx, (base_vwap_value - 29*vwap_diff), color = color.red, width = 1)
+    vwap_band_line_dn_29_set := true
+
+    //vwap_band_30
+if day_high > (base_vwap_value + 29*vwap_diff) and not vwap_band_line_up_30_set
+    vwap_band_line_up_30 := line.new(initial_bar_index, (base_vwap_value + 30*vwap_diff), bx, (base_vwap_value + 30*vwap_diff), color = color.lime, width = 1)
+    vwap_band_line_up_30_set := true
+if day_low < (base_vwap_value - 29*vwap_diff) and not vwap_band_line_dn_30_set
+    vwap_band_line_dn_30 := line.new(initial_bar_index, (base_vwap_value - 30*vwap_diff), bx, (base_vwap_value - 30*vwap_diff), color = color.red, width = 1)
+    vwap_band_line_dn_30_set := true
+if barstate.isconfirmed
+    bx := bx + 1
+    line.set_x2(base_vwap_line, bx)
+    label.set_x(base_vwap_label, bx+3)
+
+    line.set_x2(vwap_band_line_up_1, bx)
+    line.set_x2(vwap_band_line_dn_1, bx)
+
+    line.set_x2(vwap_band_line_up_2, bx)
+    line.set_x2(vwap_band_line_dn_2, bx)
+
+    line.set_x2(vwap_band_line_up_3, bx)
+    line.set_x2(vwap_band_line_dn_3, bx)
+
+    line.set_x2(vwap_band_line_up_4, bx)
+    line.set_x2(vwap_band_line_dn_4, bx)
+
+    line.set_x2(vwap_band_line_up_5, bx)
+    line.set_x2(vwap_band_line_dn_5, bx)
+
+    line.set_x2(vwap_band_line_up_6, bx)
+    line.set_x2(vwap_band_line_dn_6, bx)
+
+    line.set_x2(vwap_band_line_up_7, bx)
+    line.set_x2(vwap_band_line_dn_7, bx)
+
+    line.set_x2(vwap_band_line_up_8, bx)
+    line.set_x2(vwap_band_line_dn_8, bx)
+
+    line.set_x2(vwap_band_line_up_9, bx)
+    line.set_x2(vwap_band_line_dn_9, bx)
+
+    line.set_x2(vwap_band_line_up_10, bx)
+    line.set_x2(vwap_band_line_dn_10, bx)
+
+    line.set_x2(vwap_band_line_up_11, bx)
+    line.set_x2(vwap_band_line_dn_11, bx)
+
+    line.set_x2(vwap_band_line_up_12, bx)
+    line.set_x2(vwap_band_line_dn_12, bx)
+
+    line.set_x2(vwap_band_line_up_13, bx)
+    line.set_x2(vwap_band_line_dn_13, bx)
+
+    line.set_x2(vwap_band_line_up_14, bx)
+    line.set_x2(vwap_band_line_dn_14, bx)
+
+    line.set_x2(vwap_band_line_up_15, bx)
+    line.set_x2(vwap_band_line_dn_15, bx)
+
+    line.set_x2(vwap_band_line_up_16, bx)
+    line.set_x2(vwap_band_line_dn_16, bx)
+
+    line.set_x2(vwap_band_line_up_17, bx)
+    line.set_x2(vwap_band_line_dn_17, bx)
+
+    line.set_x2(vwap_band_line_up_18, bx)
+    line.set_x2(vwap_band_line_dn_18, bx)
+
+    line.set_x2(vwap_band_line_up_19, bx)
+    line.set_x2(vwap_band_line_dn_19, bx)
+
+    line.set_x2(vwap_band_line_up_20, bx)
+    line.set_x2(vwap_band_line_dn_20, bx)
+
+    line.set_x2(vwap_band_line_up_21, bx)
+    line.set_x2(vwap_band_line_dn_21, bx)
+
+    line.set_x2(vwap_band_line_up_22, bx)
+    line.set_x2(vwap_band_line_dn_22, bx)
+
+    line.set_x2(vwap_band_line_up_23, bx)
+    line.set_x2(vwap_band_line_dn_23, bx)
+
+    line.set_x2(vwap_band_line_up_24, bx)
+    line.set_x2(vwap_band_line_dn_24, bx)
+
+    line.set_x2(vwap_band_line_up_25, bx)
+    line.set_x2(vwap_band_line_dn_25, bx)
+
+    line.set_x2(vwap_band_line_up_26, bx)
+    line.set_x2(vwap_band_line_dn_26, bx)
+
+    line.set_x2(vwap_band_line_up_27, bx)
+    line.set_x2(vwap_band_line_dn_27, bx)
+
+    line.set_x2(vwap_band_line_up_28, bx)
+    line.set_x2(vwap_band_line_dn_28, bx)
+
+    line.set_x2(vwap_band_line_up_29, bx)
+    line.set_x2(vwap_band_line_dn_29, bx)
+
+    line.set_x2(vwap_band_line_up_30, bx)
+    line.set_x2(vwap_band_line_dn_30, bx)

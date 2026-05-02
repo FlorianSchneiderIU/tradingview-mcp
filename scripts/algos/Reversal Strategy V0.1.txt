@@ -1,0 +1,843 @@
+//@version=5
+strategy("Reversal Strategy V0.1", 
+   overlay=true,
+   max_labels_count = 500,
+   pyramiding = 5,
+   default_qty_type = strategy.cash,
+   initial_capital = 1000,
+   commission_type = strategy.commission.percent,
+   commission_value = 0.07,
+   default_qty_value = 100
+   )
+
+  //
+
+   
+// inputs 
+color bgray                                  = color.rgb(128, 223, 236, 81)
+color WHITE                                  = color.rgb(210, 210, 210)
+color red                                    = color.rgb(128, 49, 49, 67)
+color white                                  = color.rgb(248, 248, 248, 14)
+color olive                                  = color.olive
+color blue                                   = color.rgb(23, 43, 77)
+color Yellow                                 = color.rgb(255, 186, 75)
+color BG                                     = color.from_gradient(close,low,high ,color.rgb(16, 194, 167),color.rgb(240, 141, 71))
+string s_group                               = " Strategy Settings"
+string visual                                = "Visuals" 
+int offset                                   = 15
+var int glb_dealstart_bar_time               = 0
+int Length                                   = 14
+float ChangePercentage                       = input.float(title='SRP %',defval=1.4,group='SRP Settings (TakeProfit)',inline = "00",step=0.1)
+float core                                   = ta.vwma(hlc3, Length)  
+float below                                  = input(55,title="⬇️",group='SRP Settings (TakeProfit)',inline = "00")
+float above                                  = input(100,title="⬆️",group='SRP Settings (TakeProfit)',inline = "00")
+bool mintpbool                               = input.bool(true,"Minimal TP❓➔ ",group = s_group,inline="01")
+float mintp                                  = input.float(4.0,"Min",step= 0.1 , group = s_group,inline="01")/100
+float minSOchange                            = input.float(title='Price change %', defval=2.0, step=0.1, group = s_group,inline="01")
+float base                                   = input.float(title='$ Base order', defval=100, step=1, group = s_group,inline="01")
+float safety                                 = input.float(title='DCA Multi', defval=1.5, step=1, group = s_group,inline="01",tooltip = "It Multiply the position size by this value")
+int sonum                                    = input.int(title='DCA Count', defval=0, step=1, group = s_group,inline="01",tooltip = "How Many DCA orders Do you want ?!")+1
+bool DCATYPE                                 = input.string("Volume Multiply",title ="DCA TYPE",options = ["Volume Multiply","Base Multiply"],group = s_group,inline="01") == "Volume Multiply"
+
+//
+bool limit_date_range                        = input.bool(title='Backtest Date', defval=true, group="Backtest Date")
+int start_time                               = input.time(defval=timestamp('11 OCT 2022 00:00 +0000'), title='Start Time', group="Backtest Date")
+int end_time                                 = input.time(defval=timestamp('31 Dec 2080 00:00 +0000'), title='End Time', group="Backtest Date")
+
+bool show_table                              = input(true,title= "Show Table ❓",inline = "001",group = visual)
+string position                              = input.string("Top Right", options = ["Middle Right","Top Center","Top Right","Middle Left","Middle Center","Bottom Left","Bottom Center","Bottom Right"],title = 'Position',inline = "001",group = visual)
+color textcolos                              = input.color(Yellow,title = "Text Color",inline = "001",group = visual)
+bool showdeals                               = input(true,"Deal lines❓",inline = "002",group =visual )
+color profitcolor                            = input.color(bgray,"",inline = "002",group =visual )  
+color socolor                                = input.color(red,"",inline = "002",group =visual )  
+color avgcolor                               = input.color(white,"",inline = "002",group =visual )
+bool showBG                                  = input(false,"Deal BG Color❓",inline = "003",group =visual ) 
+color bgcolor                                = input.color(blue,"",inline = "003",group =visual )  
+bool showpnllabel                            = input(true,"PNL Label❓",inline = "004",group =visual )
+color pnlcolor                               = input.color(olive,"",inline = "004",group =visual ) 
+
+
+
+string table_name                            ='SRP Strategy [ZCrypto]'
+var int socounter = 0
+var int dealcount = 0
+var int socounterS = 0
+var int dealcountS = 0
+
+
+//TRENDING MARKET TP SL
+stopLossPct = input.float(4.2, title="Stop Loss Percent", group='Stop Loss')
+var float stop_L = 0.0
+var float stop_S = 0.0
+var float stopLossPctStrat = 0.0
+//stoploss price TRANDING or RANGE
+stop_L := close * (1-(stopLossPct)/100)
+stop_S := close * (1+(stopLossPct)/100)
+stopLossPctStrat :=  stopLossPct
+
+
+
+
+//######################################################################################################################
+//#####################Algopoint Reversal Finder########################################################################
+//######################################################################################################################
+aisensitivitysetter = input.int(defval=2, minval=1, maxval = 6, step = 1, title="Contrarian Sensitivity | 1-6", group="Contrarıan Sıgnals")
+Strengthfilter = input.int(defval=0, minval=0, maxval = 5, step = 1, title="Strength Filter | 1-5", group="Contrarıan Sıgnals") -0.1
+stability = aisensitivitysetter == 1 ? 0.4 : aisensitivitysetter == 2 ? 0.5 : aisensitivitysetter == 3 ? 0.6 : aisensitivitysetter == 4 ? 0.7 : aisensitivitysetter == 5 ? 0.8 : aisensitivitysetter == 6 ? 0.9 : 1
+rsiindex = 50
+candledelta = 5
+
+stable_candle = math.abs(close - open) / ta.tr > stability
+rsiR = ta.rsi(close, 14)
+
+bullish_engulfing = close[1] < open[1] and close > open and close > open[1]
+rsi_below_50 = rsiR < rsiindex
+decrease_over_5 = close < close[candledelta]
+
+bull = bullish_engulfing and stable_candle and rsi_below_50 and decrease_over_5
+
+
+bearish_engulfing = close[1] > open[1] and close < open and close < open[1]
+rsi_above_50 = rsiR > rsiindex
+increase_over_5 = close > close[candledelta]
+
+bear = bearish_engulfing and stable_candle and rsi_above_50 and increase_over_5
+
+
+lblsz = 'tiny'
+sizy = lblsz == 'tiny' ? size.tiny : lblsz == 'small' ? size.small : lblsz == 'normal' ? size.normal : lblsz == 'large' ? size.large : lblsz == 'huge' ? size.huge : na
+
+labystyly = 'text bubble'
+labelystylybear = labystyly == 'text bubble' ? label.style_label_down : labystyly == 'triangle' ? label.style_triangledown :  labystyly == 'arrow' ? label.style_arrowdown : na
+labelystylybear1 = labystyly == 'text bubble' ? label.style_label_up : labystyly == 'triangle' ? label.style_triangleup :  labystyly == 'arrow' ? label.style_arrowup : na
+
+buylbl = #898d94
+selllbl = #089981
+txtcl = #ffffff
+
+//=============================================================================
+// INDICATOR 11 - Trend Confidence
+//============================================================================
+ 
+ 
+// CCI 
+ 
+TM_Long = ta.cci(close, 20) < -140
+TM_Short = ta.cci(close, 20) > 140
+ 
+ 
+ 
+//color1 = ta.cci(close, 5) >= 0 ? #0022FC : #FC0400
+//plot(MagicTrend, color=color1, linewidth=3)
+ 
+ 
+// ADX
+lenadx = 14
+lensig = 14
+limadx = 18
+ 
+ 
+ADX_up = ta.change(high)
+ADX_down = -ta.change(low)
+trur = ta.rma(ta.tr, lenadx)
+plus = fixnan(100 * ta.rma(ADX_up > ADX_down and ADX_up > 0 ? ADX_up : 0, lenadx) / trur)
+minus = fixnan(100 * ta.rma(ADX_down > ADX_up and ADX_down > 0 ? ADX_down : 0, lenadx) / trur)
+sumR = plus + minus
+adx = 100 * ta.rma(math.abs(plus - minus) / (sumR == 0 ? 1 : sumR), lensig)
+ 
+macol = adx > limadx and plus > minus ? #898d94 : adx > limadx and plus < minus ? #089981  : color.black
+
+ADX_Long = adx > limadx and plus > minus
+ADX_Short = adx > limadx and plus < minus
+ 
+ 
+//Acumulation/Distribution
+RSI_Dist = ta.rsi(close, 14)
+ 
+ACC_Long = RSI_Dist < 40
+ACC_Short = RSI_Dist > 60
+ 
+ 
+// MFI
+
+MFI = ta.mfi(close , 14)
+MFI_SMA = ta.sma (MFI, 9)
+ 
+MFI_Long = MFI < 40
+MFI_Short = MFI > 60
+ 
+// Relative Volatility Index
+
+lengthrvi = 10
+srcrvi = close
+lenrvi = 14
+stddev = ta.stdev(srcrvi, lengthrvi)
+upperrvi = ta.ema(ta.change(srcrvi) <= 0 ? 0 : stddev, lenrvi)
+lowerrvi = ta.ema(ta.change(srcrvi) > 0 ? 0 : stddev, lenrvi)
+rvi = upperrvi / (upperrvi + lowerrvi) * 100
+
+MOML_Long = rvi < 40
+MOML_Short = rvi > 60
+//
+entry_long = true
+entry_short = true
+
+Long_Signal_Strength = 0
+Short_Signal_Strength = 0 
+ 
+if entry_long
+    if TM_Long 
+        Long_Signal_Strength += 1
+    if ADX_Long
+        Long_Signal_Strength += 1
+    if ACC_Long
+        Long_Signal_Strength += 1
+    if MFI_Long
+        Long_Signal_Strength += 1
+    if MOML_Long
+        Long_Signal_Strength += 1
+ 
+if entry_short
+    if TM_Short 
+        Short_Signal_Strength += 1
+    if ADX_Short
+        Short_Signal_Strength += 1
+    if ACC_Short
+        Short_Signal_Strength += 1
+    if MFI_Short
+        Short_Signal_Strength += 1
+    if MOML_Short
+        Short_Signal_Strength += 1
+//Plot Buy/Sell Signals on chart
+ 
+enter_Long_Text = "Buy " + str.tostring(Long_Signal_Strength)
+enter_Short_Text = "Sell " + str.tostring(Short_Signal_Strength)
+ 
+frost = bull and Long_Signal_Strength >= Strengthfilter ? label.new(bar_index , low, enter_Long_Text, color=buylbl, style=labelystylybear1, textcolor=txtcl, size=sizy) : na
+frost1 = bear and Short_Signal_Strength >= Strengthfilter ? label.new(bar_index , high, enter_Short_Text, color=selllbl, style=labelystylybear, textcolor=txtcl, size=sizy) : na
+
+//alerts buy sell
+// Plot buy signal
+plotshape(bull and Long_Signal_Strength >= Strengthfilter, title="Buy flag", text="B", location=location.belowbar, style=shape.labelup, size=size.tiny, color=color.blue, textcolor=color.white)
+plotshape(bear and Short_Signal_Strength >= Strengthfilter, title="Sell flag", text="B", location=location.abovebar, style=shape.labeldown, size=size.tiny, color=#ebbc7e, textcolor=color.white)
+
+//######################################################################################################################
+//######################################################################################################################
+//######################################################################################################################
+
+
+
+
+// #########################################################################################################################
+// MULTITIMEFRAME SUPPORT RESISTANCE
+// #########################################################################################################################
+bool HF_TF_ResSup    = input.bool(true,"Higher TF Stoploss (SupportResistance)",group = "Support Resistance filter")
+resistance          = input.int(title="Number of bars to go back", defval=34, minval=0, group = "Support Resistance filter")
+resistanceTop       = ta.valuewhen(high >= ta.highest(high, resistance), high, 0)
+resistanceBottom    = ta.valuewhen(low <= ta.lowest(resistance), low, 0)
+TF                  = input.timeframe(title="Timeframe", defval="240", group = "Support Resistance filter")
+
+TFHigh = request.security(syminfo.tickerid, TF, ta.valuewhen(high >= ta.highest(high, resistance), high, 0))
+TFLow  = request.security(syminfo.tickerid, TF, ta.valuewhen(low <= ta.lowest(resistance), low, 0))
+
+plot(title="Resistance", series=TFHigh, color=color.green, linewidth=1, style=plot.style_circles)
+plot(title="Support", series=TFLow, color=color.green, linewidth=1, style=plot.style_cross)
+
+
+//show support only once when crossunder
+var bool SupportShowOnce = na
+var bool ShowOnce = na
+var bool SupportCrossDwnCond = false
+//reset SupportShowOnce when new support lines
+if TFLow != TFLow[1]
+    SupportShowOnce := true
+
+SupportCrossDwn = ta.crossunder(close,TFLow)
+if SupportCrossDwn and SupportShowOnce
+    SupportShowOnce := false
+    SupportCrossDwnCond := true
+else
+    SupportCrossDwnCond := false
+plotshape(SupportCrossDwnCond, style=shape.triangledown,
+                 location=location.belowbar, color=color.red, size = size.small)
+
+//show resistance only once when crossover
+
+// obsolotote DOWN =========================
+var bool ResistanceShowOnce = na
+var bool ShowOnceR = na
+var bool ResistanceCrossUpCond = false
+var bool ResistanceCrossUp2 = false
+var bool test = false
+//reset ResistanceShowOnce when new support lines
+if TFHigh != TFHigh[1]
+    ResistanceShowOnce := true
+ResistanceCrossUp = ta.crossover(close,TFHigh)
+if ResistanceCrossUp and ResistanceShowOnce
+    ResistanceShowOnce := false
+    ResistanceCrossUpCond := true
+else if ResistanceCrossUp[1]
+    ResistanceCrossUpCond := true
+else
+    ResistanceCrossUpCond := false
+// obsolotote UP =========================
+
+ResistanceCrossUp2 := TFHigh[1] < close ? true : false
+
+
+
+if ResistanceCrossUp2
+    alert("test",freq = alert.freq_once_per_bar_close)
+
+// plotshape(ResistanceCrossUp, style=shape.triangleup,
+//                  location=location.abovebar, color=color.green, size = size.small)
+plotshape(ResistanceCrossUp2, style=shape.circle,
+                 location=location.abovebar, color=color.green, size = size.tiny)
+
+// #########################################################################################################################
+
+// #########################################################################################################################
+//avg T3
+//Enable
+var EnabledT3 = input.bool(defval = false , title = "Trend with T3 average", tooltip = "", group ="Trend with T3 average" ) 
+T3func(LengthT3) =>
+    xPrice = close
+    xe1 = ta.ema(xPrice, LengthT3)
+    xe2 = ta.ema(xe1, LengthT3)
+    xe3 = ta.ema(xe2, LengthT3)
+    xe4 = ta.ema(xe3, LengthT3)
+    xe5 = ta.ema(xe4, LengthT3)
+    xe6 = ta.ema(xe5, LengthT3)
+    b = 0.7
+    c1 = -b*b*b
+    c2 = 3*b*b+3*b*b*b
+    c3 = -6*b*b-3*b-3*b*b*b
+    c4 = 1+3*b+b*b*b+3*b*b
+    nT3Average = c1 * xe6 + c2 * xe5 + c3 * xe4 + c4 * xe3
+
+
+LengthT3_short = input.int(90, minval=1)
+LengthT3_long = input.int(100, minval=1)
+
+avgT3_S = T3func(LengthT3_short)
+avgT3_L = T3func(LengthT3_long)
+avgT3_S_plot = plot(avgT3_S, color=color.rgb(219, 126, 170), title="T3")
+avgT3_L_plot = plot(avgT3_L, color=color.rgb(219, 126, 169, 70), title="T3", linewidth=2)
+fill(avgT3_S_plot, avgT3_L_plot, color = (avgT3_S > avgT3_L) ? color.rgb(76, 175, 79, 69) : na)
+fill(avgT3_S_plot, avgT3_L_plot, color = (avgT3_S < avgT3_L) ? color.rgb(255, 82, 82, 75) : na)
+T3long  =   avgT3_S > avgT3_L
+T3short =   avgT3_S < avgT3_L
+// #########################################################################################################################
+
+
+// Core calculation ---------{
+
+in_date_range = true
+if limit_date_range
+    in_date_range := time >= start_time and time <= end_time
+    
+else
+    in_date_range := true
+
+
+vwma_above = core * (1 + (ChangePercentage / 100))
+vwma_below = core * (1 - (ChangePercentage / 100))
+
+//
+up = ta.rma(math.max(ta.change(close), 0), 7)
+down = ta.rma(-math.min(ta.change(close), 0), 7)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+mf = ta.mfi(hlc3, 7)
+rsi_mfi = math.abs(rsi+mf/2)
+
+//#############################################################entry###########################
+//entry from Reversals
+longBO = bull and Long_Signal_Strength >= Strengthfilter
+shortBO = bear and Short_Signal_Strength >= Strengthfilter
+long = low <= vwma_below and (rsi_mfi < below)
+short = high >= vwma_above and (rsi_mfi > above)
+//plot long short
+plotshape(long, style=shape.triangleup,
+                 location=location.belowbar, color=color.green, size = size.small)
+plotshape(short, style=shape.triangledown,
+                 location=location.abovebar, color=color.red, size = size.small)
+
+table_position() =>
+    switch position
+        "Middle Right" => position.middle_right
+        "Top Center" => position.top_center
+        "Top Right" => position.top_right
+        "Middle Left" => position.middle_left
+        "Middle Center" => position.middle_center
+        "Bottom Left" => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        "Bottom Right" => position.bottom_right      
+      
+var summary_table          = table.new(table_position(), 15, 33, frame_color=color.rgb(58, 58, 59, 38), frame_width=3,border_width = 2)
+change_color(con)=>
+    con ? color.rgb(0, 149, 77) : color.rgb(152, 46, 46)    
+
+table_cell(table,_row,in1,in2)=>
+    
+    table.cell(table, 0, _row, 
+     in1, 
+     text_color=textcolos,
+     bgcolor = color.rgb(58, 58, 59, 38),
+     text_size = size.small,
+     text_halign = text.align_left
+     )
+    table.cell(table, 1, _row, str.tostring(in2), text_color=WHITE,text_size = size.small,bgcolor =color.rgb(120, 123, 134, 38) )
+
+//------------}
+calcNextSOprice(pcnt) =>
+    if strategy.position_size > 0
+        strategy.position_avg_price - (math.round(pcnt / 100 * strategy.position_avg_price / syminfo.mintick)) * syminfo.mintick
+    else if strategy.position_size < 0
+        strategy.position_avg_price + (math.round(pcnt / 100 * strategy.position_avg_price / syminfo.mintick)) * syminfo.mintick
+    else
+        na
+calcChnagefromlastdeal() =>
+    last_deal = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    math.abs(((close - (last_deal)  ) /close )  * 100 )
+
+
+Calcprofitpercent() =>
+    math.abs(((close - strategy.position_avg_price  ) /close )  * 100 )
+
+
+// def calculate(base, SO):
+    
+//     return so_size    
+SO = base * safety
+CapitalCalculation() =>
+    float total = 0.0
+
+    for x= 1 to sonum - 1 by 1
+        so_size = SO * math.pow(safety, x-1)
+        total+= so_size
+
+
+    total + base
+//
+
+
+
+// plot(SO,"?111!") 
+//plot(CapitalCalculation(),"?!")    
+calculateSO(num)=>
+    SOv = base * math.pow(safety,num)
+    SOv
+calculateSOShort(num)=>
+    SOv = base * math.pow(safety,num)
+    SOv
+
+SOconditions()=>
+    (calcChnagefromlastdeal() > minSOchange ) and (close < calcNextSOprice(minSOchange))
+SOconditionsShort()=>
+    (calcChnagefromlastdeal() > minSOchange ) and (close > calcNextSOprice(minSOchange))
+ 
+mintpclogic()=> 
+   (close > (strategy.position_avg_price * (1 + mintp)))
+mintpclogicShort()=> 
+   (close < (strategy.position_avg_price * (1 - mintp)))
+
+
+get_timestring_from_seconds(seconds) =>
+    if seconds >= 86400
+        string _string = str.tostring(math.round(seconds / 86400, 1)) + ' days'
+    else if seconds >= 3600
+        string _string = str.tostring(math.round(seconds / 3600, 1)) + ' hours'
+    else
+        string _string = str.tostring(math.round(seconds / 60, 1)) + ' mins'
+
+get_timespan_string(start_time, end_time) =>
+    _seconds_diff = (end_time - start_time) / 1000
+    get_timestring_from_seconds(_seconds_diff)
+
+Calcprofit()=>
+    (( close * strategy.position_size ) - (strategy.position_avg_price * strategy.position_size))
+// var label t = na , label.delete(t) , t:= label.new(bar_index,high,str.tostring(mintpclogic()))
+
+// plot(strategy.netprofit,"?!",display = display.data_window)
+
+PNLlabel()=>    
+          
+    message = ""    
+    message += "PNL :  " +str.tostring(math.round(Calcprofit(), 2)) + '  ' + str.tostring(syminfo.currency) + '\n'
+    message += "Time:  " +get_timespan_string(glb_dealstart_bar_time, time)+ '\n'
+    message += "PNL%:  " + str.tostring(math.round(Calcprofitpercent(),2))+ " %"
+    topy = high + (high* 0.04)  
+    label.new(bar_index + 1,
+     topy, 
+     text=message,
+     yloc=yloc.price, 
+     size=size.normal, 
+     style=label.style_label_lower_left, 
+     textcolor=color.black,
+     textalign = text.align_left,
+     color=pnlcolor
+     ) 
+
+
+var float removed = na
+
+Opentrade()=>
+    strategy.opentrades > 0 ? 1 : 0
+
+PNLpercentage()=> ((close - strategy.position_avg_price  ) /close )  * 100 
+
+
+
+
+// # ========================================================================= #
+// #                   ||   Alerts  ||
+// # ========================================================================= #
+
+//alert_entry_long = input.text_area(defval = "", title = "Long Entry Message", group = "Alerts")
+//alert_entry_short = input.text_area(defval = "", title = "Short Entry Message", group = "Alerts")
+//alert_exit_long = input.text_area(defval = "", title = "Long Exit Message", group = "Alerts")
+//alert_exit_short = input.text_area(defval = "", title = "Short Exit Message", group = "Alerts")
+
+//# WICKHUNTER
+GroupTxtWick = "WickHunter Inputs - works only for DCATYPE:Volume, max 5 DCA orders"
+uuid = input("xxxxx", "UID:", group = GroupTxtWick)
+symbol = input("FXSUSDT", "SYMBOL:", group = GroupTxtWick)
+SizeType = input.string(title='Size Type', defval="DOLLAR", options=["DOLLAR", "PERCENT"], group = GroupTxtWick)
+entrySize = input.float(1.0,"Entry Size", group = GroupTxtWick)
+leverage = input(10,"Leverage", group = GroupTxtWick)
+entryOrderType = input.string(title='Order Type', defval="MARKET", options=["MARKET", "LIMIT","POST_ONLY"], group = GroupTxtWick)
+float actual_size = 0
+if SizeType == "DOLLAR"
+    actual_size := entrySize 
+if SizeType == "PERCENT"
+    actual_size := entrySize / 100
+
+configL_ENTRY_OPEN = '{\n "cmd": "OPEN", \n "uuid": "'+uuid+'", \n "symbol": "'+symbol+'", \n "side": "BUY", \n "config": { "id": "23907", \n "entry": { "mode": "SIGNAL", \n "size": '+str.tostring(actual_size)+', \n "sizeType": "'+SizeType+'", \n "leverageValue": '+str.tostring(leverage)+', \n "leverageType": "CROSS", \n "entryOrderType": "'+entryOrderType+'" \n }, \n'
+configL_ENTRY_SL = '"sl": { "mode": "MANUAL", "stoplossType": "CURRENT_ENTRY_PRICE", "orders": [] }, \n'
+configL_ENTRY_TP = '"tp": { "mode": "MANUAL", "orders": [ { "offset": 1, "size": 1, "orderType": "POST_ONLY", "offsetType": "PERCENT"} ] } \n } \n } \n'
+configL_ENTRY = configL_ENTRY_OPEN + configL_ENTRY_SL + configL_ENTRY_TP
+configL_Close = '{\n "cmd": "MARKET_CLOSE", \n "uuid": "'+uuid+'", \n "symbol": "'+symbol+'", \n "side": "BUY"\n } \n' 
+
+//--------------------------------------------------------------------------
+//                        # Strategy Inputs #                              |
+//--------------------------------------------------------------------------
+
+LongPos = strategy.position_size > 0   
+ShortPos  = strategy.position_size < 0   
+
+
+//#################################### ENTRY #########################################################
+// long
+if (longBO and ( EnabledT3 ? T3long : true ) ) and strategy.opentrades == 0 and in_date_range
+    socounter := 0
+    dealcount+=1
+    dealcount
+    glb_dealstart_bar_time      := time
+    strategy.entry("LONG", strategy.long,comment = "D # " + str.tostring(dealcount),qty = base/close, alert_message = configL_ENTRY )
+    alert("New LONG DEAL - ENTRTY",freq = alert.freq_once_per_bar_close)
+    removed:= strategy.netprofit / close
+
+     //showBOtxt = '"BO# \n '+str.tostring(entrySize)+' \n[%][$] \n '
+    // label= label.new( bar_index, high, 
+    //              text=configL_ENTRY,
+    //              color=color.white, 
+    //              textcolor= color.green,
+    //              style =  label.style_none,
+    //              yloc = yloc.abovebar)
+    // showSOtxt = 'ENTRY:\n '+str.tostring(entrySize)+'\n [%][$] \n'
+    // label= label.new( bar_index, high, 
+    //              text=showSOtxt,
+    //              color=color.white,  
+    //              textcolor= color.green,
+    //              style =  label.style_none,
+    //              yloc = yloc.abovebar)
+    // showSOtxt = configL_ENTRY
+    // label= label.new( bar_index, high, 
+    //              text=showSOtxt,
+    //              color=color.white,  
+    //              textcolor= color.green,
+    //              style =  label.style_none,
+    //              yloc = yloc.abovebar)
+    showSOtxt = 'XDX' +str.tostring(base/close)
+    label= label.new( bar_index, high, 
+                 text=showSOtxt,
+                 color=color.white,  
+                 textcolor= color.green,
+                 style =  label.style_none,
+                 yloc = yloc.abovebar)
+if (shortBO and ( EnabledT3 ? T3short : true ) ) and strategy.opentrades == 0 and in_date_range
+    socounterS := 0
+    dealcountS+=1
+    dealcountS
+    glb_dealstart_bar_time      := time
+    strategy.entry("SHORT", strategy.short,comment = "D # " + str.tostring(dealcount),qty = base/close, alert_message = configL_ENTRY )
+    alert("New SHORT DEAL - ENTRY",freq = alert.freq_once_per_bar_close)
+    removed:= strategy.netprofit / close
+    showSOtxt = 'XDX' +str.tostring(base/close)
+    label= label.new( bar_index, high, 
+                 text=showSOtxt,
+                 color=color.white,  
+                 textcolor= color.green,
+                 style =  label.style_none,
+                 yloc = yloc.abovebar)
+//#################################### DCA #########################################################
+float sum = 0
+
+//(long) .. condition from SRP
+//(longBO) .. condition from QFL
+//if (longBO) and  SOconditions() and strategy.opentrades > 0 and strategy.opentrades < sonum
+if (longBO and LongPos) and SOconditions() and strategy.opentrades < sonum
+//if (longBO and LongPos) and SOconditionsShort() and strategy.opentrades > 0 and strategy.opentrades < sonum
+    socounter+=1
+    socounter
+    //count orders coin or perc
+    if socounter >= 1
+        sum := entrySize
+    if socounter > 1
+        for i = 2 to socounter by 1
+            sum := sum * safety
+    
+    float SO1 = 0.0
+    float SO2 = 0.0
+    float SO3 = 0.0
+    float SO4 = 0.0
+    float SO5 = 0.0
+    SO1 := (socounter >= 1) ? safety * (entrySize) : na
+    SO2 := (socounter >= 2) ? safety * (SO1 + entrySize) : na
+    SO3 := (socounter >= 3) ? safety * (SO2 + SO1 + entrySize) : na
+    SO4 := (socounter >= 4) ? safety * (SO3 + SO2 + SO1 + entrySize) : na
+    SO5 := (socounter >= 5) ? safety * (SO4 + SO3 + SO2 + SO1 + entrySize) : na
+  
+
+    float SOorder = 0.0  
+    if (socounter == 1)
+        SOorder := SO1
+    if (socounter == 2)
+        SOorder := SO2
+    if (socounter == 3)
+        SOorder := SO3
+    if (socounter == 4)
+        SOorder := SO4
+    if (socounter == 5)
+        SOorder := SO5
+
+    // float SOorder = 0.0
+    // for i = 0 to socounter
+    //     SOorder += safety * (entrySize)
+      
+    //alert_message DCA
+    
+    configL_DCA = '{\n "cmd":"DCA",\n "uuid": "'+uuid+'",\n "symbol": "'+symbol+'",\n "side":"BUY",\n "quantity":'+str.tostring(SOorder)+',\n "sizeType": "'+SizeType+'"  \n } \n' 
+    strategy.entry('LONG' , strategy.long,qty = DCATYPE ? (strategy.position_size*safety) : calculateSO(socounter)/close,comment = "SO # "+str.tostring(socounter), alert_message = configL_DCA )
+    //alert("New DCA DEAL for {{ticker}}",freq = alert.freq_once_per_bar_close)
+
+    // showSOtxt = 'SO#'+str.tostring(socounter)+' \n DCA:\n'+str.tostring(SOorder)+'\n [%][$] \n'
+    // label= label.new( bar_index, high, 
+    //              text=showSOtxt,
+    //              color=color.white,  
+    //              textcolor= color.green,
+    //              style =  label.style_none,
+    //              yloc = yloc.abovebar)
+    showSOtxt = 'XDX' +str.tostring(calculateSO(socounter)/close)
+    label= label.new( bar_index, high, 
+                 text=showSOtxt,
+                 color=color.white,  
+                 textcolor= color.green,
+                 style =  label.style_none,
+                 yloc = yloc.abovebar)
+
+if (shortBO and ShortPos) and SOconditionsShort() and strategy.opentrades < sonum
+    
+    socounter+=1
+    socounter
+    //count orders coin or perc
+    if socounter >= 1
+        sum := entrySize
+    if socounter > 1
+        for i = 2 to socounter by 1
+            sum := sum * safety
+    
+    float SO1 = 0.0
+    float SO2 = 0.0
+    float SO3 = 0.0
+    float SO4 = 0.0
+    float SO5 = 0.0
+    SO1 := (socounter >= 1) ? safety * (entrySize) : na
+    SO2 := (socounter >= 2) ? safety * (SO1 + entrySize) : na
+    SO3 := (socounter >= 3) ? safety * (SO2 + SO1 + entrySize) : na
+    SO4 := (socounter >= 4) ? safety * (SO3 + SO2 + SO1 + entrySize) : na
+    SO5 := (socounter >= 5) ? safety * (SO4 + SO3 + SO2 + SO1 + entrySize) : na
+  
+
+    float SOorder = 0.0  
+    if (socounter == 1)
+        SOorder := SO1
+    if (socounter == 2)
+        SOorder := SO2
+    if (socounter == 3)
+        SOorder := SO3
+    if (socounter == 4)
+        SOorder := SO4
+    if (socounter == 5)
+        SOorder := SO5
+    
+    float VolDCA = 0.0
+    
+    VolDCA := math.round_to_mintick(calculateSOShort(socounter)/close)
+    
+    //alert_message DCA
+    configL_DCA = '{\n "cmd":"DCA",\n "uuid": "'+uuid+'",\n "symbol": "'+symbol+'",\n "side":"BUY",\n "quantity":'+str.tostring(SOorder)+',\n "sizeType": "'+SizeType+'"  \n } \n' 
+    strategy.entry('SHORT', strategy.short, qty = DCATYPE ? (strategy.position_size*safety) : VolDCA , comment = "SO # "+str.tostring(socounter), alert_message = configL_DCA )
+    //strategy.entry('SHORT', strategy.short,qty = DCATYPE ? (strategy.position_size*safety) : calculateSO(socounter)/close,comment = "SO # "+str.tostring(socounter), alert_message = configL_DCA )
+//  
+//     //alert("New DCA DEAL for {{ticker}}",freq = alert.freq_once_per_bar_close) 
+    showSOtxt = 'Vol' +str.tostring(VolDCA) + 'Base' +str.tostring((strategy.position_size*safety)) + 'avg' + str.tostring(strategy.position_size)
+    label= label.new( bar_index, high, 
+                 text=showSOtxt,
+                 color=color.white,  
+                 textcolor= color.green,
+                 style =  label.style_none,
+                 yloc = yloc.abovebar)
+
+// if (shortBO and ShortPos) and SOconditionsShort() and strategy.opentrades < sonum
+//     //if (shortBO and ShortPos) and SOconditions() and strategy.opentrades < 0 and strategy.opentrades < sonum
+//     socounter+=1
+//     socounter
+//     //count orders coin or perc
+//     if socounter >= 1
+//         sum := entrySize
+//     if socounter > 1
+//         for i = 2 to socounter by 1
+//             sum := sum * safety
+    
+//     float SO1 = 0.0
+//     float SO2 = 0.0
+//     float SO3 = 0.0
+//     float SO4 = 0.0
+//     float SO5 = 0.0
+//     SO1 := (socounter >= 1) ? safety * (entrySize) : na
+//     SO2 := (socounter >= 2) ? safety * (SO1 + entrySize) : na
+//     SO3 := (socounter >= 3) ? safety * (SO2 + SO1 + entrySize) : na
+//     SO4 := (socounter >= 4) ? safety * (SO3 + SO2 + SO1 + entrySize) : na
+//     SO5 := (socounter >= 5) ? safety * (SO4 + SO3 + SO2 + SO1 + entrySize) : na
+  
+
+//     float SOorder = 0.0  
+//     if (socounter == 1)
+//         SOorder := SO1
+//     if (socounter == 2)
+//         SOorder := SO2
+//     if (socounter == 3)
+//         SOorder := SO3
+//     if (socounter == 4)
+//         SOorder := SO4
+//     if (socounter == 5)
+//         SOorder := SO5
+
+       
+//     //alert_message DCA
+//     configL_DCA = '{\n "cmd":"DCA",\n "uuid": "'+uuid+'",\n "symbol": "'+symbol+'",\n "side":"BUY",\n "quantity":'+str.tostring(SOorder)+',\n "sizeType": "'+SizeType+'"  \n } \n' 
+//     strategy.entry('SHORT' , strategy.short,qty = DCATYPE ? (strategy.position_size*safety) : calculateSO(socounter)/close,comment = "SO # "+str.tostring(socounter), alert_message = configL_DCA )
+//     //alert("New DCA DEAL for {{ticker}}",freq = alert.freq_once_per_bar_close)
+
+//     // showSOtxt = 'SO#'+str.tostring(socounter)+' \n DCA:\n'+str.tostring(SOorder)+'\n [%][$] \n'
+//     // label= label.new( bar_index, high, 
+//     //              text=showSOtxt,
+//     //              color=color.white,  
+//     //              textcolor= color.green,
+//     //              style =  label.style_none,
+//     //              yloc = yloc.abovebar)
+
+
+//#################################### CLOSE #########################################################
+//Take profit condition
+// TP from resistance
+bool ResistTP                               = input.bool(true,"TP from Resistance",group = "Take profit")
+// TP from RSI,MFI
+bool RsiMfiTP                               = input.bool(true,"TP from Rsi and Mfi",group = "Take profit")
+//Take profit FIXED
+bool FixedTP                               = input.bool(true,"TP fixed (From Minimal TP)",group = "Take profit")
+// if strategy.position_size > 0 and short and (mintpbool ? mintpclogic() : true) and in_date_range //srp exit
+
+// if ( (ResistTP ? ResistanceCrossUpCond : na) )
+//     alert("DEAL Close !!! TEST",freq = alert.freq_all)
+// if ( (ResistTP ? ResistanceCrossUp2 : na) )
+//     alert("DEAL Close 2 xxx", freq = alert.freq_once_per_bar_close)
+//     strategy.close("LONG",comment = "TP Res.", alert_message = configL_Close)
+//alert('raise some alert', freq=alert.freq_once_per_bar)
+
+// plotshape(ResistTP, style=shape.flag,
+//                  location=location.abovebar, color=color.blue, size = size.small)
+
+//long
+if strategy.position_size > 0 and (( (ResistTP ? ResistanceCrossUp2 : na) or (RsiMfiTP ? short : na) or ( FixedTP ? mintpclogic() : na ) ) and (mintpbool ? mintpclogic() : true)) and in_date_range
+// if strategy.position_size > 0 and ( (ResistTP ? ResistanceCrossUpCond : true) or (RsiMfiTP ? short : true) ) and (mintpbool ? mintpclogic() : true) and in_date_range
+
+    strategy.close("LONG",comment = "TP:SRP/Res/Fix", alert_message = configL_Close)
+    alert("DEAL Close for {{ticker}}",freq = alert.freq_once_per_bar_close)
+    if showpnllabel
+        PNLlabel()
+    // label= label.new( bar_index, high, 
+    //              text=configL_Close,
+    //              color=color.white, 
+    //              textcolor= color.green,
+    //              style =  label.style_none,
+    //              yloc = yloc.abovebar)
+//short
+//(ResistTP ? ResistanceCrossUp2 : na) or
+if strategy.position_size < 0 and ( ( (RsiMfiTP ? long : na) or ( FixedTP ? mintpclogicShort() : na ) ) and (mintpbool ? mintpclogicShort() : true)) and in_date_range
+//resistance nefunguje
+
+    strategy.close("SHORT",comment = "TP:SRP/Res/Fix", alert_message = configL_Close)
+    alert("DEAL Close for {{ticker}}",freq = alert.freq_once_per_bar_close)
+    if showpnllabel
+        PNLlabel()
+
+    
+//text='socounter: '+str.tostring(socounter)+' \n calculateSO: '+str.tostring(calculateSO(socounter))+' \n',
+
+//exit trade if SL
+if LongPos
+    currentPrice = strategy.opentrades == 0 ? close : strategy.position_avg_price
+    strategy.exit("Single TP/SL Long", "LONG", stop=currentPrice * (1 - stopLossPctStrat/100), alert_message = configL_Close)
+        //, trail_price=currentPrice * (1 + trail_price_converted), trail_offset=currentPrice * trail_offset_converted / syminfo.mintick
+        
+if ShortPos
+    currentPrice = strategy.opentrades == 0 ? close : strategy.position_avg_price
+    strategy.exit("Single TP/SL Short", "SHORT", stop=currentPrice * (1 + stopLossPctStrat/100), alert_message = configL_Close)
+        //, trail_price=currentPrice * (1 - trail_price_converted), trail_offset=currentPrice * trail_offset_converted / syminfo.mintick
+
+
+
+
+// hp= plot(vwma_above, color=color.new(color.red, 0))
+// lp= plot(vwma_below, color=color.new(color.green, 0))
+// plotshape(long and not long[1],title="Buy",style=shape.labelup,color=color.rgb(53, 141, 56),location= location.belowbar ,size=size.tiny,text= "B",textcolor = color.white)
+// plotshape(short,title="Sell",style=shape.labeldown,color=color.rgb(146, 18, 13),location= location.abovebar ,size=size.tiny,text = "S",textcolor = color.white)
+   
+avg = plot(showdeals? strategy.position_avg_price : na, 'AVG Price',color= avgcolor, style=plot.style_linebr,editable = false)
+sl = plot(showdeals ? calcNextSOprice(minSOchange): na, 'SO change %', color.orange, style=plot.style_linebr,editable = false)   
+tpL = plot((showdeals and LongPos) ? strategy.position_avg_price * (1 + mintp): na, 'SO change %', color.rgb(3, 233, 245), style=plot.style_linebr,editable = false)    
+tpS = plot((showdeals and ShortPos) ? strategy.position_avg_price * (1 - mintp): na, 'SO change %', color.rgb(3, 233, 245), style=plot.style_linebr,editable = false)  
+   
+fill(tpL, avg, color =profitcolor)
+fill(tpS, avg, color =profitcolor)
+fill(avg, sl, color = socolor)
+bgcolor(showBG and strategy.position_size > 0 ? color.new(bgcolor,90): na)   
+
+statusOpen()=>
+    Opentrade() == 0 ? str.tostring(Opentrade()) : str.tostring(Opentrade()) + "\n" + "------" + "\n" +  str.tostring(syminfo.currency) + " :" + "$" + str.tostring(math.round(strategy.openprofit,2))+ "\n" 
+         + "------" + "\n" + "% " + " :" + str.tostring(math.round(PNLpercentage(),2))+ " %"
+
+//show SL
+currentPrice = strategy.opentrades == 0 ? close : strategy.position_avg_price
+SL        = LongPos ? currentPrice * (1 - stopLossPctStrat/100) : LongPos ? currentPrice * (1 + stopLossPctStrat/100) : na
+SLPlot = plot(SL,
+     color=color.red, style=plot.style_linebr, linewidth=3)    
+SLS        = ShortPos ? currentPrice * (1 + stopLossPctStrat/100) : ShortPos ? currentPrice * (1 - stopLossPctStrat/100) : na
+SLSPlot = plot(SLS,
+     color=color.red, style=plot.style_linebr, linewidth=3) 
+// fill PLOT average, TP, SL
+fill(SLPlot, avg, color=color.new(color.red, 90))
+fill(SLSPlot, avg, color=color.new(color.red, 90))
+

@@ -1,0 +1,274 @@
+
+
+//@version=6
+indicator(title="louda bhaskar ", overlay=true, max_labels_count=500)
+
+//#region —————————————————————————————————————————————————— Custom Code
+
+//#endregion ————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Common Dependence
+
+p_comm_time_range_to_unix_time(string time_range, int date_time = time, string timezone = syminfo.timezone) =>
+    int start_unix_time = na
+    int end_unix_time = na
+    int start_time_hour = na
+    int start_time_minute = na
+    int end_time_hour = na
+    int end_time_minute = na
+    if str.length(time_range) == 11
+        // Format: hh:mm-hh:mm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 3, 5)))
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 6, 8)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 9, 11)))
+    else if str.length(time_range) == 9
+        // Format: hhmm-hhmm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 2, 4)))
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 5, 7)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 7, 9)))
+    start_unix_time := timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), start_time_hour, start_time_minute, 0)
+    end_unix_time := timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), end_time_hour, end_time_minute, 0)
+    [start_unix_time, end_unix_time]
+
+p_comm_time_range_to_start_unix_time(string time_range, int date_time = time, string timezone = syminfo.timezone) =>
+    int start_time_hour = na
+    int start_time_minute = na
+    if str.length(time_range) == 11
+        // Format: hh:mm-hh:mm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 3, 5)))
+    else if str.length(time_range) == 9
+        // Format: hhmm-hhmm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 2, 4)))
+    timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), start_time_hour, start_time_minute, 0)
+
+p_comm_time_range_to_end_unix_time(string time_range, int date_time = time, string timezone = syminfo.timezone) =>
+    int end_time_hour = na
+    int end_time_minute = na
+    if str.length(time_range) == 11
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 6, 8)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 9, 11)))
+    else if str.length(time_range) == 9
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 5, 7)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 7, 9)))
+    timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), end_time_hour, end_time_minute, 0)
+
+p_comm_timeframe_to_seconds(simple string tf) =>
+    float seconds = 0
+    tf_lower = str.lower(tf)
+    value = str.tonumber(str.substring(tf_lower, 0, str.length(tf_lower) - 1))
+    if str.endswith(tf_lower, 's')
+        seconds := value
+    else if str.endswith(tf_lower, 'd')
+        seconds := value * 86400
+    else if str.endswith(tf_lower, 'w')
+        seconds := value * 604800
+    else if str.endswith(tf_lower, 'm')
+        seconds := value * 2592000
+    else
+        seconds := str.tonumber(tf_lower) * 60
+    seconds
+
+p_custom_sources() =>
+    [open, high, low, close, volume]
+
+//#endregion —————————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Ta Dependence
+
+p_ta_ma(series float source, simple int length, simple string ma_type) =>
+    switch ma_type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "RMA" => ta.rma(source, length)
+        "HMA" => ta.hma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+p_ta_bb(simple int length, simple string ma_type, series float source, series float mult) =>
+    basis = p_ta_ma(source, length, ma_type)
+    dev = mult * ta.stdev(source, length)
+    upper = basis + dev
+    lower = basis - dev
+    bbr = (source - lower)/(upper - lower)
+    bbw = (upper-lower)/basis
+    [basis, upper, lower, bbr, bbw]
+
+p_ta_qqe(series float source, simple int rsi_length, simple int rsi_smoothing_factor) =>
+    rsii = ta.ema(ta.rsi(source, rsi_length), rsi_smoothing_factor)
+    tr = math.abs(rsii - rsii[1])
+    wwalpha = 1 / rsi_length
+    wwma = 0.0
+    wwma := wwalpha * tr + (1 - wwalpha) * nz(wwma[1])
+    atr_rsi = 0.0
+    atr_rsi := wwalpha * wwma + (1 - wwalpha) * nz(atr_rsi[1])
+    qqef = ta.ema(ta.rsi(source, rsi_length), rsi_smoothing_factor)
+    qup = qqef + atr_rsi * 4.236
+    qdown = qqef - atr_rsi * 4.236
+    qqes = 0.0
+    qqes := qup < nz(qqes[1]) ? qup : qqef > nz(qqes[1]) and qqef[1] < nz(qqes[1]) ? qdown : qdown > nz(qqes[1]) ? qdown : qqef < nz(qqes[1]) and qqef[1] > nz(qqes[1]) ? qup : nz(qqes[1])
+    [qqef, qqes]
+
+p_ta_qqe_expand(series float qqef, series float qqes) =>
+    buy_signal = ta.crossover(qqef, qqes)
+    sell_signal = ta.crossunder(qqef, qqes)
+    [buy_signal, sell_signal]
+
+p_ta_supertrend_expand(series float direction) =>
+    buy_signal = ta.crossunder(direction, 0)
+    sell_signal = ta.crossover(direction, 0)
+    [buy_signal, sell_signal]
+
+p_ta_sequential_candles(simple int counting) =>
+    buy_setup = 0
+    buy_setup := close < close[4] ? buy_setup[1] == counting ? 1 : buy_setup[1] + 1 : 0
+    sell_setup = 0
+    sell_setup := close > close[4] ? sell_setup[1] == counting ? 1 : sell_setup[1] + 1 : 0
+    buy_signal = buy_setup == counting
+    sell_signal = sell_setup == counting
+    [buy_signal, sell_signal]
+
+//#endregion —————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Constants
+
+// Input Groups
+string P_GP_1      =      ""
+
+//#endregion —————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Inputs
+
+// Default
+float p_inp_1      =      input.float(defval=3, title="Supertrend Factor", group=P_GP_1, step=0.01)
+int p_inp_2        =      input.int(defval=10, title="Supertrend ATR Length", group=P_GP_1)
+int p_inp_3        =      input.int(defval=20, title="BB Length", group=P_GP_1)
+int p_inp_4        =      input.int(defval=9, title="TD Sequential Counting", group=P_GP_1)
+int p_inp_5        =      input.int(defval=14, title="QQE RSI Length", group=P_GP_1)
+int p_inp_6        =      input.int(defval=20, title="Fast EMA Length", group=P_GP_1)
+int p_inp_7        =      input.int(defval=50, title="Slow EMA Length", group=P_GP_1)
+bool p_inp_8       =      input.bool(defval=true, title="Enable Supertrend Buy Alert", group=P_GP_1)
+bool p_inp_9       =      input.bool(defval=true, title="Enable Supertrend Sell Alert", group=P_GP_1)
+bool p_inp_a       =      input.bool(defval=true, title="Enable TD Sequential Buy Alert", group=P_GP_1)
+bool p_inp_b       =      input.bool(defval=true, title="Enable TD Sequential Sell Alert", group=P_GP_1)
+bool p_inp_c       =      input.bool(defval=true, title="Enable EMA Buy Alert", group=P_GP_1)
+bool p_inp_d       =      input.bool(defval=true, title="Enable EMA Sell Alert", group=P_GP_1)
+
+
+//#endregion ———————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Price Data
+
+
+
+//#endregion ———————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Indicators
+
+[p_ind_1_supertrend, p_ind_1_direction]                                       =      ta.supertrend(p_inp_1, p_inp_2) // Supertrend
+[p_ind_1_buySignal, p_ind_1_sellSignal]                                       =      p_ta_supertrend_expand(p_ind_1_direction)
+[p_ind_2_middle, p_ind_2_upper, p_ind_2_lower, p_ind_2_bbw, p_ind_2_bbr]      =      p_ta_bb(p_inp_3, "SMA", close, 2) // BB
+[p_ind_3_buySignal, p_ind_3_sellSignal]                                       =      p_ta_sequential_candles(p_inp_4) // TD Sequential
+[p_ind_4_fast, p_ind_4_slow]                                                  =      p_ta_qqe(close, p_inp_5, 5) // QQE
+[p_ind_4_buySignal, p_ind_4_sellSignal]                                       =      p_ta_qqe_expand(p_ind_4_fast, p_ind_4_slow)
+p_ind_5                                                                       =      ta.ema(close, p_inp_7) // Slow EMA
+p_ind_6                                                                       =      ta.ema(close, p_inp_6) // Fast EMA
+[p_ind_7_middle, p_ind_7_upper, p_ind_7_lower, p_ind_7_bbw, p_ind_7_bbr]      =      p_ta_bb(20, "SMA", close, 2) // BB
+[p_ind_8_supertrend, p_ind_8_direction]                                       =      ta.supertrend(3, 10) // Supertrend
+[p_ind_8_buySignal, p_ind_8_sellSignal]                                       =      p_ta_supertrend_expand(p_ind_8_direction)
+
+
+//#endregion ———————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Conditions
+
+p_cond_1      =      ta.crossover(p_ind_6, p_ind_5)
+p_cond_2      =      (p_cond_1)
+p_cond_3      =      ta.crossunder(p_ind_6, p_ind_5)
+p_cond_4      =      (p_cond_3)
+
+
+//#endregion ———————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Indicator Plots
+
+// BB
+plot(p_ind_2_middle, "BB - Middle", color.rgb(255, 152, 0, 60), 1)
+p_ind_2_upper_plot = plot(p_ind_2_upper, "BB - Upper", color.rgb(33, 150, 243, 60), 1)
+p_ind_2_lower_plot = plot(p_ind_2_lower, "BB - Lower", color.rgb(33, 150, 243, 60), 1)
+fill(p_ind_2_upper_plot, p_ind_2_lower_plot, title = "BB - Band", color=color.rgb(33, 150, 243, 90))
+
+// TD Sequential
+if p_ind_3_buySignal
+    label.new(x=bar_index, y=0, yloc=yloc.belowbar, style=label.style_label_up, text=str.tostring(p_inp_4), textcolor=color.rgb(255, 255, 255, 0), color=color.rgb(56, 142, 60, 20), size=size.tiny, text_font_family=font.family_monospace)
+if p_ind_3_sellSignal
+    label.new(x=bar_index, y=0, yloc=yloc.abovebar, style=label.style_label_down, text=str.tostring(p_inp_4), textcolor=color.rgb(255, 255, 255, 0), color=color.rgb(247, 82, 95, 20), size=size.tiny, text_font_family=font.family_monospace)
+
+// Supertrend
+p_ind_1_supertrend_value = barstate.isfirst ? na : p_ind_1_supertrend
+p_ind_1_supertrend_middle = plot(barstate.isfirst ? na : (open + close) / 2, "Supertrend - Middle", display=display.none)
+p_ind_1_supertrend_up = plot(p_ind_1_direction < 0 ? p_ind_1_supertrend_value : na, "Supertrend - Up Trend", color=color.rgb(76, 175, 80, 0), style=plot.style_linebr, linewidth=2)
+p_ind_1_supertrend_down = plot(p_ind_1_direction < 0 ? na : p_ind_1_supertrend_value, "Supertrend - Down Trend", color=color.rgb(255, 82, 82, 0), style=plot.style_linebr, linewidth=2)
+fill(p_ind_1_supertrend_middle, p_ind_1_supertrend_up, title="Supertrend - Up Trend Background", color=color.rgb(76, 175, 80, 100), fillgaps=false)
+fill(p_ind_1_supertrend_middle, p_ind_1_supertrend_down, title="Supertrend - Down Trend Background", color=color.rgb(255, 82, 82, 100), fillgaps=false)
+
+// BB
+plot(p_ind_7_middle, "BB - Middle", color.rgb(255, 152, 0, 0), 1)
+p_ind_7_upper_plot = plot(p_ind_7_upper, "BB - Upper", color.rgb(41, 98, 255, 0), 1)
+p_ind_7_lower_plot = plot(p_ind_7_lower, "BB - Lower", color.rgb(41, 98, 255, 0), 1)
+fill(p_ind_7_upper_plot, p_ind_7_lower_plot, title = "BB - Band", color=color.rgb(33, 150, 243, 95))
+
+// Supertrend
+p_ind_8_supertrend_value = barstate.isfirst ? na : p_ind_8_supertrend
+p_ind_8_supertrend_middle = plot(barstate.isfirst ? na : (open + close) / 2, "Supertrend - Middle", display=display.none)
+p_ind_8_supertrend_up = plot(p_ind_8_direction < 0 ? p_ind_8_supertrend_value : na, "Supertrend - Up Trend", color=color.rgb(76, 175, 80, 0), style=plot.style_linebr, linewidth=1)
+p_ind_8_supertrend_down = plot(p_ind_8_direction < 0 ? na : p_ind_8_supertrend_value, "Supertrend - Down Trend", color=color.rgb(242, 54, 69, 0), style=plot.style_linebr, linewidth=1)
+fill(p_ind_8_supertrend_middle, p_ind_8_supertrend_up, title="Supertrend - Up Trend Background", color=color.rgb(76, 175, 80, 85), fillgaps=false)
+fill(p_ind_8_supertrend_middle, p_ind_8_supertrend_down, title="Supertrend - Down Trend Background", color=color.rgb(242, 54, 69, 85), fillgaps=false)
+
+//#endregion ————————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Custom Plots
+
+// QQE Buy Signal
+plotchar(series=p_ind_4_buySignal, title="QQE Buy Signal", char="▲", location=location.belowbar, color=color.rgb(0, 230, 118, 0), offset=0, text="QQE", textcolor=color.rgb(255, 255, 255, 0), size=size.tiny, display=display.all)
+
+// QQE Sell Signal
+plotchar(series=p_ind_4_sellSignal, title="QQE Sell Signal", char="▼", location=location.abovebar, color=color.rgb(255, 82, 82, 0), offset=0, text="QQE", textcolor=color.rgb(255, 255, 255, 0), size=size.tiny, display=display.all)
+
+//#endregion —————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Alert
+
+if p_ind_1_buySignal and p_inp_8
+    string message = "Supertrend Buy Alert\n\nTicker: " + syminfo.ticker + "\nBar start time: " + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone) + "\n"
+    alert(message=message, freq=alert.freq_once_per_bar_close)
+
+if p_ind_1_sellSignal and p_inp_9
+    string message = "Supertrend Sell Alert\n\nTicker: " + syminfo.ticker + "\nBar start time: " + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone) + "\n"
+    alert(message=message, freq=alert.freq_once_per_bar_close)
+
+if p_cond_2 and p_inp_c
+    string message = "EMA Buy Alert\n\nTicker: " + syminfo.ticker + "\nBar start time: " + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone) + "\n"
+    alert(message=message, freq=alert.freq_once_per_bar_close)
+
+if p_cond_4 and p_inp_d
+    string message = "EMA Sell Alert\n\nTicker: " + syminfo.ticker + "\nBar start time: " + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone) + "\n"
+    alert(message=message, freq=alert.freq_once_per_bar_close)
+
+//#endregion ——————————————————————————————————————————————————————
+
+

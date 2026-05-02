@@ -1,0 +1,156 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Raj4625
+
+//@version=5
+indicator("MARKET TREND",overlay = false)
+// Position and size inputs
+meter_pos = input.string("right", "Trend Meter Position", options=["left", "right"])  // New meter position input
+pos_y = input.string("bottom", "Vertical Position", options=["top", "bottom"])
+table_pos = input.string("right", "Table Position", options=["left", "right"])
+label_size = input.string("normal", "Label Size", options=["tiny", "small", "normal", "large", "huge"])
+
+// Moving Average inputs
+fast_length = input.int(9, "Fast MA Length")
+med_length = input.int(21, "Medium MA Length")
+slow_length = input.int(50, "Slow MA Length")
+ma_type = input.string("EMA", "MA Type", options=["SMA", "EMA", "HMA"])
+
+offset = 2  
+radius = 10  
+y_axis = 0.00  
+y_scale = 100  
+
+var float pi = 2 * math.asin(1)
+
+// Calculate Moving Averages based on selected type
+f_get_ma(src, length, ma_type) =>
+    float result = 0.0
+    if ma_type == "SMA"
+        result := ta.sma(src, length)
+    else if ma_type == "EMA"
+        result := ta.ema(src, length)
+    else if ma_type == "HMA"
+        result := ta.hma(src, length)
+    result
+
+fast_ma = f_get_ma(close, fast_length, ma_type)
+med_ma = f_get_ma(close, med_length, ma_type)
+slow_ma = f_get_ma(close, slow_length, ma_type)
+
+// Calculate x-axis positions based on meter position
+bar_width = time[1] - time[0]
+chart_right_edge = time + bar_width * 5
+chart_left_edge = time - bar_width * 25
+
+x_axis = array.new_int(radius * 2, 0)
+if meter_pos == "right"
+    for i = offset to offset + 2 * radius - 1 by 1
+        array.set(x_axis, i - offset, chart_right_edge - bar_width * (2 * radius - i))
+else
+    for i = offset to offset + 2 * radius - 1 by 1
+        array.set(x_axis, i - offset, chart_left_edge + bar_width * i)
+
+one_bar = int(ta.change(time))
+right_side = array.get(x_axis, 2 * radius - 1)
+left_side = array.get(x_axis, 0)
+x_center = array.get(x_axis, radius - 1)
+
+
+
+f_draw_sector(_sector_num, _total_sectors, _line_limit, _radius, _y_axis, _y_scale, _line_color, _line_width) =>
+    _segments_per_sector = math.floor(_line_limit / _total_sectors)
+    _total_segments = _segments_per_sector * _total_sectors
+    _radians_per_segment = pi / _total_segments
+    _radians_per_sector = pi / _total_sectors
+    _start_of_sector = _radians_per_sector * (_sector_num - 1)
+    for _i = 0 to _segments_per_sector - 1 by 1
+        _segment_line = line.new(x1=array.get(x_axis, int(math.round(math.cos(_start_of_sector + _radians_per_segment * _i) * (_radius - 1) + radius - 1))), y1=_y_axis + math.sin(_start_of_sector + _radians_per_segment * _i) * _y_scale, x2=array.get(x_axis, int(math.round(math.cos(_start_of_sector + _radians_per_segment * (_i + 1)) * (_radius - 1) + radius - 1))), y2=_y_axis + math.sin(_start_of_sector + _radians_per_segment * (_i + 1)) * _y_scale, xloc=xloc.bar_time, color=_line_color, width=_line_width)
+        line.delete(_segment_line[1])
+
+f_draw_base_line(_left, _right, _y_axis, _color, _width) =>
+    _base_line = line.new(x1=_left, y1=_y_axis, x2=_right, y2=_y_axis, xloc=xloc.bar_time, color=_color, width=_width)
+    line.delete(_base_line[1])
+
+f_draw_needle(_val, _x_center, _radius, _y_axis, _y_scale, _color, _width) =>
+    _needle = line.new(x1=array.get(x_axis, int(math.round(math.cos(pi / 100 * _val) * (_radius - 1) + radius - 1))), y1=_y_axis + math.sin(pi / 100 * _val) * _y_scale, x2=_x_center, y2=_y_axis, xloc=xloc.bar_time, color=_color, width=_width)
+    line.delete(_needle[1])
+
+f_draw_tick(_num, _divisions, _radius_perc, _x_center, _radius, _y_axis, _y_scale, _color, _width) =>
+    _pos = pi / _divisions * _num
+    _tick = line.new(x1=array.get(x_axis, int(math.round(math.cos(_pos) * (_radius - 1) + radius - 1))), y1=_y_axis + math.sin(_pos) * _y_scale, x2=array.get(x_axis, int(math.round(math.cos(_pos) * (_radius - 1) * (1 - _radius_perc / 100) + _radius - 1))), y2=_y_axis + math.sin(_pos) * _y_scale * (1 - _radius_perc / 100), xloc=xloc.bar_time, color=_color, width=_width)
+    line.delete(_tick[1])
+
+f_draw_sector_label(_num, _divisions, _radius, _y_axis, _y_scale, _color, _txtcolor, _text) =>
+    _pos = pi / _divisions * _num
+    _x_coord = array.get(x_axis, int(math.round(math.cos(_pos) * (_radius - 1)) + _radius - 1))
+    _y_coord = _y_axis + math.sin(_pos) * _y_scale
+    _sector_label = label.new(x=_x_coord, y=_y_coord, xloc=xloc.bar_time, color=_color, textcolor=_txtcolor, style=_pos <= pi / 6 ? label.style_label_right : _pos < pi / 6 * 2 ? label.style_label_lower_right : _pos <= pi / 6 * 4 ? label.style_label_down : _pos <= pi / 6 * 5 ? label.style_label_lower_left : label.style_label_left, text=_text, size=label_size)
+    label.delete(_sector_label[1])
+
+f_draw_title_label(_radius_perc, _x_center, _y_axis, _y_scale, _color, _txtcolor, _text, _pos_y, _size) =>
+    _y = _y_axis
+    _style = label.style_label_center
+    
+    if _pos_y == "top"
+        _y := _y_axis + _y_scale * 1.2
+        _style := label.style_label_down
+    else
+        _y := _y_axis - _radius_perc / 100 * _y_scale
+        _style := label.style_label_up
+
+    _title_label = label.new(x=_x_center, y=_y, xloc=xloc.bar_time, color=_color, textcolor=_txtcolor, style=_style, text=_text, size=_size)
+    label.delete(_title_label[1])
+
+// Draw base components
+f_draw_base_line(left_side, right_side, y_axis, color.white, 5)
+
+// Plot sectors with modified colors for MA trends
+f_draw_sector(1, 5, 20, radius, y_axis, y_scale, color.red, 10)
+f_draw_sector(1, 5, 20, radius, y_axis, y_scale, color.white, 1)
+
+f_draw_sector(2, 5, 20, radius, y_axis, y_scale, color.orange, 10)
+f_draw_sector(2, 5, 20, radius, y_axis, y_scale, color.white, 1)
+
+f_draw_sector(3, 5, 20, radius, y_axis, y_scale, color.yellow, 10)
+f_draw_sector(3, 5, 20, radius, y_axis, y_scale, color.white, 1)
+
+f_draw_sector(4, 5, 20, radius, y_axis, y_scale, color.lime, 10)
+f_draw_sector(4, 5, 20, radius, y_axis, y_scale, color.white, 1)
+
+f_draw_sector(5, 5, 20, radius, y_axis, y_scale, color.green, 10)
+f_draw_sector(5, 5, 20, radius, y_axis, y_scale, color.white, 1)
+
+// Draw ticks
+f_draw_tick(1, 5, 8, x_center, radius, y_axis, y_scale, color.white, 5)
+f_draw_tick(2, 5, 8, x_center, radius, y_axis, y_scale, color.white, 5)
+f_draw_tick(3, 5, 8, x_center, radius, y_axis, y_scale, color.white, 5)
+f_draw_tick(4, 5, 8, x_center, radius, y_axis, y_scale, color.white, 5)
+
+f_draw_tick(1, 10, 6, x_center, radius, y_axis, y_scale, color.white, 5)
+f_draw_tick(3, 10, 6, x_center, radius, y_axis, y_scale, color.white, 5)
+f_draw_tick(5, 10, 6, x_center, radius, y_axis, y_scale, color.white, 5)
+f_draw_tick(7, 10, 6, x_center, radius, y_axis, y_scale, color.white, 5)
+f_draw_tick(9, 10, 6, x_center, radius, y_axis, y_scale, color.white, 5)
+
+// Draw sector labels with MA-specific terminology
+f_draw_sector_label(1, 10, radius, y_axis, y_scale, color.red, color.white, 'Strong Down')
+f_draw_sector_label(3, 10, radius, y_axis, y_scale, color.orange, color.black, 'Down')
+f_draw_sector_label(5, 10, radius, y_axis, y_scale, color.yellow, color.black, 'Neutral')
+f_draw_sector_label(7, 10, radius, y_axis, y_scale, color.lime, color.black, 'Up')
+f_draw_sector_label(9, 10, radius, y_axis, y_scale, color.green, color.white, 'Strong Up')
+
+// Calculate MA trend strength (0-100)
+ma_trend = 50.0
+
+if fast_ma > med_ma and med_ma > slow_ma
+    ma_trend := 75 + (math.min(math.abs((fast_ma - slow_ma) / slow_ma * 100), 25))
+else if fast_ma < med_ma and med_ma < slow_ma
+    ma_trend := 25 - (math.min(math.abs((fast_ma - slow_ma) / slow_ma * 100), 25))
+else if fast_ma > slow_ma
+    ma_trend := 60 + (math.min(math.abs((fast_ma - slow_ma) / slow_ma * 100), 15))
+else if fast_ma < slow_ma
+    ma_trend := 40 - (math.min(math.abs((fast_ma - slow_ma) / slow_ma * 100), 15))
+
+// Draw the needle and title
+f_draw_needle(ma_trend, x_center, radius, y_axis, y_scale, color.blue, 3)
+f_draw_title_label(5, x_center, y_axis, y_scale, color.blue, color.black, ma_type + ' TREND', pos_y, label_size)

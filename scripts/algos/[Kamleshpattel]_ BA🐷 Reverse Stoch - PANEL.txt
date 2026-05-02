@@ -1,0 +1,368 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+// First off, want to give massive credit to Motgench, Balipour and Wugamlo for this script. This script is all of their good work. 
+//
+// This script is basically just the non-on chart version which I've slightly tweaked off their script. This can be useful to reduce the clutter on the chart itself.
+
+//@author = Motgench, balipour and Wugamlo (modified by TraderHalai)
+
+//@version=5
+indicator('[Kamleshpattel]_ BA🐷 Reverse Stoch - PANEL 🎄', overlay=false, precision=2)
+
+len = input.int(14, 'K', minval=2)
+D = input.int(3, 'D', minval=1)
+E = input.string('Forecasted KD', 'KD Estimation', options=['Current Dynamic KD', 'Current Static KD', 'Forecasted KD'])
+smooth = input.int(6, 'Smooth', minval=1)
+ures = input(true, 'Use Multi Time Frame')
+reso = input.string('Chart', '  Multi Time Frame Resolution 🕐', options=['Chart', '5 min', '10 min', '15 min', '30 min', '45 min', '1 hour', '2 hours', '3 hours', '4 hours', '6 hours', '8 hours', '10 hours', '12 hours', '1 day', '2 days', '3 days', '1 week', '1 month'])
+p = input(true, 'Show Stoch Cross Value Panel📋')
+bs = input(false, 'Show OverBought OverSold Panel📜')
+BL = input.string('Line Levels', '▼▼▼ Overbought Oversold Style ▼▼▼', options=['Line Levels', 'Bands'])
+plb = input(false, 'Plot OverBought Price')
+ob = input.float(80, '  OverBought Level', minval=50, maxval=100)
+pls = input(false, 'Plot Oversold Price')
+os = input.float(20, '  OverSold Level', minval=0, maxval=50)
+sm = input(false, '======     Stoch Cross Smoothing     ======')
+slen = input(8, '  Smoothing Length')
+ib = input(true, 'Dark Background ⬛')
+dec = input.int(1, 'Decimals🔢', minval=0, maxval=10)
+
+ss(Series, Period) =>  // Super Smoother Function
+    // period = input(8, "Super Smoother Period", input.float, minval=2.0, step=0.5)
+    var PI = 2.0 * math.asin(1.0)
+    var SQRT2 = math.sqrt(2.0)
+    lambda = PI * SQRT2 / Period
+    a1 = math.exp(-lambda)
+    coeff2 = 2.0 * a1 * math.cos(lambda)
+    coeff3 = -math.pow(a1, 2.0)
+    coeff1 = 1.0 - coeff2 - coeff3
+    filt1 = 0.0
+    filt1 := coeff1 * (Series + nz(Series[1])) * 0.5 + coeff2 * nz(filt1[1]) + coeff3 * nz(filt1[2])
+    filt1
+
+getRez(intval) =>
+    iff_1 = intval == '1 month' ? 'M' : 'D'
+    iff_2 = intval == '1 week' ? 'W' : iff_1
+    iff_3 = intval == '3 days' ? '3D' : iff_2
+    iff_4 = intval == '2 days' ? '2D' : iff_3
+    iff_5 = intval == '1 day' ? 'D' : iff_4
+    iff_6 = intval == '12 hours' ? '720' : iff_5
+    iff_7 = intval == '10 hours' ? '600' : iff_6
+    iff_8 = intval == '8 hours' ? '480' : iff_7
+    iff_9 = intval == '6 hours' ? '360' : iff_8
+    iff_10 = intval == '4 hours' ? '240' : iff_9
+    iff_11 = intval == '3 hours' ? '180' : iff_10
+    iff_12 = intval == '2 hours' ? '120' : iff_11
+    iff_13 = intval == '1 hour' ? '60' : iff_12
+    iff_14 = intval == '45 min' ? '45' : iff_13
+    iff_15 = intval == '30 min' ? '30' : iff_14
+    iff_16 = intval == '15 min' ? '15' : iff_15
+    iff_17 = intval == '10 min' ? '10' : iff_16
+    int_1 = intval == '5 min' ? '5' : iff_17
+    int_0 = intval == 'Chart' ? '' : iff_1
+    int_0
+
+
+
+res = ures ? getRez(reso) : timeframe.period
+
+f_resInMinutes() =>
+    _resInMinutes = timeframe.multiplier * (timeframe.isseconds ? 1. / 60 : timeframe.isminutes ? 1. : timeframe.isdaily ? 60. * 24 : timeframe.isweekly ? 60. * 24 * 7 : timeframe.ismonthly ? 60. * 24 * 30.4375 : na)
+    _resInMinutes
+// ————— Returns the float minutes value of the string _res.
+f_tfResInMinutes(_res) =>
+    // _res: resolution of any TF (in "timeframe.period" string format).
+    // Dependency: f_resInMinutes().
+    request.security(syminfo.tickerid, _res, f_resInMinutes())
+
+// —————————— Determine if current timeframe is smaller that higher timeframe selected in Inputs.
+// Get higher timeframe in minutes.
+higherTfInMinutes = f_tfResInMinutes(res)
+// Get current timeframe in minutes.
+currentTfInMinutes = f_resInMinutes()
+// Compare current TF to higher TF to make sure it is smaller, otherwise our plots don't make sense.
+chartOnLowerTf = currentTfInMinutes <= higherTfInMinutes
+
+mtf(data) =>
+    chartOnLowerTf ? request.security(syminfo.tickerid, res, data) : data
+
+
+st(len) =>
+    (close - ta.lowest(low, len)) / (ta.highest(high, len) - ta.lowest(low, len))
+
+x = ta.stoch(close, high, low, len) * 0.01
+x2 = ta.sma(x, smooth)
+x3 = ta.sma(x2, D)
+
+
+C(level, len, smooth) =>
+    if smooth == 1
+        C = (ta.highest(high, len) - ta.lowest(low, len)) * level + ta.lowest(low, len)
+        C
+    else
+        sum = 0.0
+        for i = 1 to smooth - 1 by 1
+            sum := x[i] + sum
+            sum
+        a = smooth * level - sum
+        C = a * (ta.highest(high, len) - ta.lowest(low, len)) + ta.lowest(low, len)
+        C
+
+C2(len, smooth) =>
+    float sumK = 0
+    for i = 1 to smooth - 1 by 1
+        sumK += x[i]
+        sumK
+    float sumKS = 0
+    for i = 1 to D - 1 by 1
+        sumKS += x2[i]
+        sumKS
+    C2 = (sumKS * smooth + sumK - sumK * D) * (ta.highest(high, len) - ta.lowest(low, len)) / (D - 1) + ta.lowest(low, len)
+    C2
+
+
+Cf(level, len, smooth) =>
+    if smooth == 1
+        Cf = (ta.highest(high, len) - ta.lowest(low, len)) * level + ta.lowest(low, len)
+        Cf
+    else
+        sum = 0.0
+        for i = 0 to smooth - 2 by 1
+            sum := x[i] + sum
+            sum
+        a = smooth * level - sum
+        Cf = a * (ta.highest(high, len - 1) - ta.lowest(low, len - 1)) + ta.lowest(low, len - 1)
+        Cf
+
+
+stp(len) =>
+    (close - ta.lowest(low, len - 1)) / (ta.highest(high, len - 1) - ta.lowest(low, len - 1))
+
+kk = ta.stoch(close, high, low, len) * 0.01
+
+X = stp(len)
+xk = 100 * ta.sma(kk, smooth)
+
+k1(len) =>
+    sum = 0.0
+    for i = 0 to len - 2 by 1
+        sum := kk[i] + sum
+        mean = (sum + X) / len
+        mean
+
+X2 = 100 * k1(smooth)
+
+
+d1(len) =>
+    sum = 0.0
+    for i = 0 to len - 2 by 1
+        sum := xk[i] + sum
+        sum
+    mean = (sum + X2) / len
+    mean
+
+
+x3p = d1(D) * 0.01
+
+
+
+ccks = mtf(ss(C(x3, len, smooth), slen))
+cck = mtf(C(x3, len, smooth))
+ccks2 = mtf(ss(C2(len, smooth), slen))
+cck2 = mtf(C2(len, smooth))
+cfks = mtf(ss(Cf(x3p, len, smooth), slen))
+cfk = mtf(Cf(x3p, len, smooth))
+
+stochk = mtf(x)
+stochks = mtf(x2)
+stochd = mtf(x3)
+highmtf = mtf(ta.highest(high, len))
+lowmtf = mtf(ta.lowest(low, len))
+
+//Highest and Lowest K you can get on current Bar
+sumk = 0.0
+for i = 1 to smooth - 1 by 1
+    sumk := stochk[i] + sumk
+    sumk
+hk = (1 + sumk) / smooth
+lk = sumk / smooth
+
+//Highest D and Lowest D you can get on current Bar
+sumd = 0.0
+for i = 1 to D - 1 by 1
+    sumd := stochks[i] + sumd
+    sumd
+hd = (hk + sumd) / D
+ld = (lk + sumd) / D
+
+
+//Impossible Cross Situation
+ip = stochks < stochd and cck2 > highmtf and hd > hk or stochks > stochd and cck2 < lowmtf and hd < hk ? 1 : 0
+
+float Cross = na
+if E == 'Current Dynamic KD'  // Close one day ago
+    Cross := sm ? ccks : cck
+    Cross
+if E == 'Current Static KD'
+    Cross := sm ? ccks2 : cck2
+    Cross
+if E == 'Forecasted KD'
+    Cross := sm ? cfks : cfk
+    Cross
+
+
+Round(_val, _decimals) =>
+    // Rounds _val to _decimals places.
+    _p = math.pow(10, _decimals)
+    math.round(math.abs(_val) * _p) / _p * math.sign(_val)
+
+
+cob = mtf(C(0.01 * ob, len, smooth))
+fob = mtf(Cf(0.01 * ob, len, smooth))
+
+cos = mtf(C(0.01 * os, len, smooth))
+fos = mtf(Cf(0.01 * os, len, smooth))
+float obp = na
+if E == 'Current Dynamic KD' or E == 'Current Static KD'
+    obp := cob
+    obp
+if E == 'Forecasted KD'
+    obp := fob
+    obp
+
+float osp = na
+if E == 'Current Dynamic KD' or E == 'Current Static KD'
+    osp := cos
+    osp
+if E == 'Forecasted KD'
+    osp := fos
+    osp
+
+
+
+Co = close[1] > Cross[1] ? color.aqua : color.fuchsia
+
+
+US = close > Cross and close[1] < Cross[1] ? Cross : na
+UD = close < Cross and close[1] > Cross[1] ? Cross : na
+
+
+lable(P, T, s, color_PnL) =>  // show_panel
+    label PnL_Label = na
+    PnL_Label := label.new(bar_index, 50, text=T, color=color_PnL, textcolor=color.white, style=s, yloc=yloc.price, xloc=xloc.bar_index, size=size.small)
+    PnL_Label
+
+
+lable1(P, T, s, color_PnL) =>  // show_panel
+    label PnL_Label = na
+    PnL_Label := label.new(bar_index, 50, text=T, color=color_PnL, textcolor=color.white, style=s, yloc=yloc.price, xloc=xloc.bar_index, size=size.normal)
+    label.delete(PnL_Label[1])
+
+
+
+ab = Cross > close
+
+
+
+labelstyle = label.style_label_left
+
+
+
+lbg = ib ? color.new(#000000, 45) : color.new(#000000, 99)
+
+ud() =>
+    if mtf(x3) > mtf(x2)
+        'UP'
+    else
+        'DOWN'
+
+
+bslabel() =>
+    bs ? '\n' + '\n' + 'OverBought : ' + str.tostring(Round(obp, dec)) + '\n' + '\n' + 'OverSold : ' + str.tostring(Round(osp, dec)) : na
+
+
+
+
+float obl = na
+if BL == 'Line Levels'
+    obl := obp
+    obl
+else
+    na
+
+float osl = na
+if BL == 'Line Levels'
+    osl := osp
+    osl
+else
+    na
+
+float obb = na
+if BL == 'Bands'
+    obb := obp
+    obb
+else
+    na
+
+float osb = na
+if BL == 'Bands'
+    osb := osp
+    osb
+else
+    na
+
+lb() =>
+    float lb = na
+    if barstate.islast
+        lb := obl
+        lb
+    else
+        na
+
+ls() =>
+    float ls = na
+    if barstate.islast
+        ls := osl
+        ls
+    else
+        na
+
+
+tf() =>
+    if not ures or not chartOnLowerTf
+        ''
+    else
+
+        reso
+
+
+if p
+    lable1(Cross, tf() + ' Stoch Crossing ' + ud() + ' Price: ' + str.tostring(Round(Cross, dec)) + bslabel(), labelstyle, lbg)
+
+
+
+if plb and BL == 'Line Levels'
+    B = line.new(nz(bar_index[1], 0), obl, bar_index, obl, extend=extend.both, width=1, color=color.new(#00C0FFff, 0), style=line.style_dotted)
+    line.delete(B[1])
+
+if pls and BL == 'Line Levels'
+    S = line.new(nz(bar_index[1], 0), osl, bar_index, osl, extend=extend.both, width=1, color=color.new(#FF0080ff, 0), style=line.style_dotted)
+    line.delete(S[1])
+
+
+k = ta.sma(ta.stoch(mtf(close), mtf(high), mtf(low), len), smooth)
+d = ta.sma(k, D)
+plot(k, title='%K', color=color.new(#2962FF, 0))
+plot(d, title='%D', color=color.new(#FF6D00, 0))
+h0 = hline(80, 'Upper Band', color=#787B86)
+h1 = hline(20, 'Lower Band', color=#787B86)
+fill(h0, h1, color=color.rgb(33, 150, 243, 90), title='Background')
+
+
+// indicator(title='STOCH_HVP(Balipour)', shorttitle='ST_HVP', format=format.price, precision=2, timeframe='')
+length = input.int(30, minval=1)
+annual = 365
+per = timeframe.isintraday or timeframe.isdaily and timeframe.multiplier == 1 ? 1 : 7
+hv = 100 * ta.stdev(math.log(close / close[1]), length) * math.sqrt(annual / per)
+hvp = ta.percentrank(hv, 100)
+plot(hvp, color=color.new(color.white, 90), style=plot.style_area)

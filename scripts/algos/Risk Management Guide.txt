@@ -1,0 +1,126 @@
+Understanding Risk
+Before we can explore the basics of risk management, we must first understand what risk is. Risk is not your position size, it is not your current drawdown, and it is not your liquidation level—risk is the amount of capital you stand to lose on a per-trade basis if you exit a position at a loss.  
+Example 1: 
+You purchase 4 LINK at a price of $25 per unit. You believe price will soon move to $35 / unit, but you intend to close your position at a loss if it falls below $20 / unit because you consider that to be a strong daily support level. Your total risk for this trade is $20—the amount of money you stand to lose if your plan is invalidated.  
+Example 2:
+The price of ETH is currently $2200 but is rapidly falling. You believe there is strong support at the $2000 level. You submit a limit order to purchase 1 ETH at $2000 paired with a stop loss order at $1900. You believe a fall to $1900 would indicate that the support level has failed to hold. Your total risk for this trade is $100. 
+In both above examples, your risk is managed because there is a designated point at which you plan to close the trade for a loss. Suppose the trader in Example 2 does not have a stop loss order in place because he is confident that the $2000 level will hold. Then suppose he is wrong, as we all often are. Price keeps falling—it rips through the $1900 level and plummets to $1700. The trader cannot absorb further losses, so he closes the trade for a $300 loss. 
+Accept when you are wrong and take your lumps. The $1900 stop loss order in Example 2 was not the cause of that trader's $100 loss—an incorrect trade was the cause. The stop loss was the thing that protected him from further downside.  
+Learning how to lose will help you win. Examine the following table: 
+￼
+This illustrates the likelihood (based on system win rate) of a trader encountering a sustained losing streak. If you fail to manage your risk appropriately, losings streaks (which, as you see, are statistically likely for most traders) will deplete your capital to such a degree that you can no longer effectively operate.  
+Consider a trader that has built his account balance up to $10,000 with a 55% win rate. Subsequently, he has a bad week and loses the next 5 trades—a statistically likely outcome. How does risk per trade affect his drawdown? 
+	•	Risking 2%: Loss of $960.49—Requires 10.63% gain to recover.
+	•	Risking 5%: Loss of $2262.20—Requires 29.24% gain to recover
+	•	Risking 10%: Loss of $4095.10—Requires 69.36% gain to recover.
+Logic dictates that the trader operating with more aggressive risk stands to benefit more when he wins, but he will be trading at a disadvantage following a sizable drawdown. Understanding the significance of risk and how best to manage it allows the savvy trader to be properly positioned when it is time to bet big.  
+
+You have no direct control over the profits you realize. You cannot control which way the market will turn. 
+Your risk is the one and only factor in every trade that is completely within your control.  
+Control it. 
+
+
+The standard practice when discussing risk is to define it on a per unit basis. When we enter a position with a planned stop in place, our initial risk per unit is referred to as R and our profits are described as multiples of that R.  
+Recall Example 1 from our previous lesson. The trader's total risk is $20 but his R—the initial risk per unit—is $5. That trader will either exit the position when price rises by $10 per unit or falls by $5 per unit. His or her potential profit would be described as 2R because, on a per unit basis, the potential profit is twice the potential risk.  
+Understanding R-Multiples
+All your profits and losses should be considered as they relate to your initial risk. Suppose the trader in Example 2 from the previous lesson was fearful that price would reach his stop loss, so he moved it down to $1800. When he or she is stopped out at that new level it will be considered a 2R loss as it was twice the initial risk.  
+You always want to limit your losses to 1R or less. 
+Similarly, you want to target profits greater than 1R. Suppose you purchase an asset at $6 and intend to exit at a loss if price drops below $4. Your initial risk per unit is $2 (1R). Price climbs to $24 and you close your position for a profit of $18 per unit. Because your profit ($18) is 9 times your initial risk ($2), we would describe this as a 9R profit.  
+Oftentimes it can be complex to track risk and profit on a per unit bases. Additionally, there are transaction costs (taker fees, funding fees, etc...) that likely won't be included in your initial calculations. An easier way to determine the R-Multiple distribution of your trades is to use your total initial risk and total profit (or loss) after fee deductions.  
+Example:
+You have a $100,000 account balance and you would like to limit your total risk per position to 1% of that—$1,000. 
+You market buy an asset at $40 with a stop loss at $36. Your position quantity is 250 units which, at a risk of $4 per unit, exposes you to a total initial risk of $1,000. While the platform is undergoing maintenance, price falls to $32 per unit without triggering your stop loss and you close the position manually (via a market sell order) as soon as you are able. Your loss per unit is $8. Additionally, you paid $8 in taker fees bringing your total loss to $2,008. This trade would be described as a -2.008R loss.   
+An analysis of a trader's average R-Multiple over an adequate distribution of trades will yield the expectancy of his or her trading system. Expectancy is the average profit or loss of a system per trade. There are multiple accepted methods for calculating a system's expectancy, but I believe average R-multiple to be a sufficient representation of this—after all, position size and profit are both a function of risk.  
+
+What Is A Stop Loss?
+You may recall our brief coverage of the stop loss order from our course on the basics: 
+A stop loss order executes a market buy or sell once the price of an asset (e.g., ETH) touches a designated price, known as the stop price. This allows you to cap your losses or secure your profits on a position. 
+On many exchanges, your stop loss order is not directly attached to an existing position but is rather an independent order. If you exit a position by any other means the stop loss must be manually cancelled. 
+As the order name suggests, the primary purpose of the stop loss order is to protect a trader's capital if a trade idea is proven incorrect. Though a stop loss can also be used to enter a position we will be focusing on the first and primary use case.  
+While there are many tools a trader can utilize to mitigate risk—a hedge, a portfolio rebalance, diversification, and so on—the stop loss order is the single most valuable tool for a new trader to understand. Proper implementation will save you a tremendous amount of money overall, but incorrect stop placement can turn a potentially strong trade into a loser.  
+Stop Placement
+Never enter a trade without first constructing a plan. Know precisely where your entry, stop loss, and profit targets will be located. Proper execution and trade management require a degree of emotional detachment that can be difficult to achieve—if you are trading without an established plan your decision-making abilities are more likely to be compromised by insignificant market fluctuations. 
+First, understand that the market is indifferent to your plan. 
+Construct your trade setup around levels and movements that are technically significant. Your stop loss is in place to protect you when your idea is wrong—it would not make sense to place it anywhere other than a level of technical invalidation. If you are unfamiliar with the concept of technical invalidation, it will be covered in detail when we get to our Technical Analysis course.  
+The following are common stop loss placement techniques.  
+Thrust Candle Stop:
+When using thrust candle stop placement, a trader places his or stop loss slightly above (if short) or below (if long) the most recent candle to break the traded level. This is an aggressive form of stop placement and one that should be primarily reserved for markets that are directionally trending.  
+Consider the following chart:
+￼
+The above illustrates a swing failure pattern—a trade setup that will be covered in our Technical Analysis course. We will explore topics such as liquidity raids and stop hunts, but for now let us focus on the chart. Price breaks above resistance but fails to hold that level and closes below it, causing traders that entered long positions at that price to become trapped. Sell pressure would be generated by the closure of these trapped long positions and price would be expected to go down.  
+A trader entering a short position and utilizing thrust candle stop placement would place his or her stop loss slightly above the circled wick. This is not because it is a fixed dollar value away from his or her entry but because the trade idea would be invalidated if price returned to that level—the long positions at that level would no longer be trapped. 
+￼
+This trade idea proceeded as planned, but if it had not the trader would have only incurred a minimal loss. This is referred to as tight invalidation. 
+Furthest Deviation Stop:
+A more conservative method of stop placement utilizes the furthest price deviation from the technical level. Although this does not optimize for maximum R-Multiple profit like the tight invalidation of a thrust candle stop, it can offer the trader some protection against "scam wicks"—impulsive counter-trend movements engineered to trigger the stop loss orders of risk-averse or overly-leveraged traders. 
+Examine the following chart:
+￼
+Suppose a trader enters a long position after a successful reclaim and retest of the resistance level (circled in red). There is an impulsive break through resistance and the subsequent red candle retraces down to test the broken level. For many traders, this type of reclaim and retest would qualify as a valid entry trigger—something that will be discussed further in our Technical Analysis course. You can see that a trader utilizing a thrust candle stop would have closed the position at a loss, whereas a trader utilizing a more conservative stop loss would be able to tolerate temporary drawdown and remain in a winning position (shown below). 
+￼
+The knowledge of which method is appropriate in any given situation comes with experience, but a chart will usually provide helpful clues. Compare the relative size of our breakout candle to those around it. Was this a sizable impulse? Is it significantly larger than surrounding candles? No, not really.
+If price does not react with violence to a particular level, there is a good likelihood that it will be retested again. Is it sensible to place a stop loss at a level that price is likely to revisit? No.  
+In this scenario, we would utilize a wider stop loss because a return to our entry would not invalidate the trade idea or break the market structure.   
+
+Ralph Vince did an experiment with forty PhDs. He ruled out doctors with a background in statistics or trading. All other PhDs were qualified. They were given a computer game to trade. They started with $10,000 and were given 100 trials in a game in which they would win 60% of the time. When they won, they won the amount of money they risked in that trial (1R). When they lost, they lost the amount of money they risked for that trial (-1R). 
+This is a much better game than you'll ever find in Las Vegas. Yet guess how many of the PhDs had made money at the end of 100 trials. When the results were tabulated, only two of them made money. The other 38 lost money. Imagine That! 95% of them lost money playing a game in which the odds of winning were better than any game in Las Vegas. Why? The reason they lost was their adoption of the gambler's fallacy and the resulting poor position sizing.  
+Let's say you started the game risking $1,000. In fact, you do that three times in a row and you lose all three times—a distinct possibility in this game. Now you are down to $7,000 and you think, "I've had three losses in a row, so I'm really due to win now."  That's the gambler's fallacy because your chances of winning are still just 60%. Anyway, you decide to bet $3,000 because you are so sure you will win. However, you again lose and now you only have $4,000. Your chances of making money in the game are slim now, because you must make 150% just to break even. Although the chances of four consecutive losses are slim—0.256—it still is quite likely to occur in a 100 trial game. 
+Here's another way they could have gone broke. Let's say they started out betting $2,500. They have three losses in a row betting $2,500 and are now down to only one more risk of $2,500. They now must make 300% just to get back to even and they probably won't be able to do that before they go broke. 
+In either case, the failure to profit in this easy game occurred because the person risked too much money. The excessive risk occurred for psychological reasons: greed, the failure to understand the odds, and, in some cases, even the desire to fail. However, mathematically their losses occurred because they were risking too much money. 
+Van K. Tharp, Ph.D. 
+
+Position sizing is quite likely the single most important component of any risk management strategy. The quality of your trade setups and the fundamentals of a project are completely irrelevant if your position size does not allow you to absorb the worst possible occurrence in the short term. You must be able to endure this to realize the long-term positive expectancy. If you risk excessive capital on any one trade, you are at risk of potentially depleting your funds to such a degree that you can no longer trade effectively.  
+Consider the following:
+Drawdown	Required Gain to Recover
+5%	5.3%
+10%	11.1%
+15%	17.6%
+20%	25%
+25%	33%
+30%	42.9%
+40%	66.7%
+50%	100%
+60%	150%
+75%	300%
+90%	900%
+If we fail to effectively manage our risk—even on just one trade—we are making it vastly more difficult to realize long term success. Even the best traders suffer the occasional losing streak, but those that manage risk and position size correctly are able to recoup their losses with relative ease. We know that position sizing dictates how much we risk and gain, but how do we size our positions correctly? 
+Risk Equity Models
+Core Equity Method:
+When opening a new position, you determine how much capital you would allocate to that position based on your available unallocated capital. If you have $10,000 in your account but $3,000 of that is supplied as margin to your already-open positions, you will calculate your position size for $7,000.  
+Total Equity Method:
+Using the Total Equity Method, you calculate your position size based on the cash value of your account plus the value of all open positions. If you have $7,000 in your account, $3,000 supplied as margin, and $2,000 in unrealized profits you would then size new positions for $12,000 of equity. 
+Reduced Total Equity Method:
+This method calculates your position size according to the unallocated cash value of your account plus any unrealized profits that have been guaranteed by a stop loss. Assume you have $7,000 of unallocated capital in your account, $3,000 supplied as margin, $2,000 in unrealized profits, and $1500 of that $2,000 secured by a stop loss placed in profits. You would then size your position for $8,500. 
+The CPR Model for Position Sizing
+Many of the common position sizing systems control position size as a function of risk. The CPR model considers three things: Capital (C), position size (P), and risk (R). If you are going to risk 2% of a $5,000 account, your C for the trade would be $100. We have already established in a previous lesson that R is your risk per unit. Given both C and R, you can easily determine P using the following formula: P = C / R 
+Suppose you have a $10,000 account and you want to open a long ETH position at $2000 / ETH. Suppose, also, that your system or the trade setup dictates that your idea is invalidated below $1900. Your risk per unit would then be $100 (R). Now, let's say your total allowable risk is 2.5%, or $250 (C). You would then divide your total allowable risk by your risk per unit and size your position accordingly—2.5 ETH (P).   
+
+What Is Prospect Theory?
+Prospect Theory, developed by Nobel Prize winners Daniel Kahneman and Amos Tversky, serves as a descriptive model of decision making under risk. They describe this model below: 
+People underweight outcomes that are merely probable in comparison with outcomes that are obtained with certainty. This tendency, called the certainty effect, contributes to risk aversion in choices involving sure gains and to risk seeking in choices involving sure losses. In addition, people generally discard components that are shared by all prospects under consideration. This tendency, called the isolation effect, leads to inconsistent preferences when the same choice is presented in different forms. 
+The value function is normally concave for gains, commonly convex for losses, and is generally steeper for losses than for gains. Decision weights are generally lower than the corresponding probabilities, except in the range of low probabilities. Overweighting low probabilities may contribute to the attractiveness of both insurance and gambling. 
+Understanding Prospect Theory
+Prospect Theory was proposed primarily as a critique of Expected Utility Theory which states that the utilities of outcomes are weighted by their probabilities. In their rebuttal, Kahneman and Tversky show that people assign a disproportionately high value to outcomes that are considered certain.   
+Example:
+A group was faced with the following choice problem. They could choose between two options—one with rewards weighted by probably and one with certain rewards. 
+Option 1:
+$2,500 profit with .33 probability
+$2,400 profit with .66 probability
+$0 profit with .01 probability
+Option 2:
+$2,400 profit guaranteed
+Take a moment to consider which option you would choose and think about how this applies to your trading. Most of you likely chose option 2—as did 82% of the group that was surveyed—despite option 1 providing a mathematically larger reward over a statistically significant sample size. 
+In profit-seeking ventures, it is our natural tendency to select certainty (when it is available) over optimization. 
+Do we approach problems similarly if the outcomes are losses rather than profits? Kahneman and Tversky claim that we do not, and they refer to this shift as the reflection effect.  
+Consider the following:
+￼
+In each of the four problems, the preference between negative prospects (losses) contradicts the expressed preference for positive prospects (profits). This indicates that risk aversion in the positive domain is accompanied by risk seeking in the negative domain.  
+If you are unsure of how to interpret the above data, please examine the following example. 
+Example:
+For Problem 3, when faced with positive prospects, respondents preferred a guaranteed $3000 profit to an 80% chance of a $4000 profit. This illustrates risk aversion in the positive domain. When faced with negative prospects, however, respondents preferred an 80% chance of a $4000 loss to a guaranteed $3000 loss. This illustrates risk seeking in the negative domain.  
+In both instances, the majority of the respondents failed to optimize for expected value.  
+Application
+Though we have only scratched the surface of Prospect Theory, what we have seen has shown us that there is a tremendous likelihood that we make the incorrect choice when deciding how we take our profits and losses. I would like to focus on the latter scenario. We prefer to risk greater losses than those we would incur if we closed our trades at a specified point regardless of expected value.  
+Our instinct is to lose more money than we must.  
+Consider a trader that averages a 50% win rate—better than most market participants by a fair margin, as we have already learned from Bolic. Suppose he approaches his prospects in the statistically-likely fashion—risk averse in the positive domain and risk seeking in the negative. Over an adequately long period of time, assuming targets of +/-1R, that trader will reduce his account to $0.   
+Be aware of what you are statistically inclined to do and make a deliberate effort to seek out the correct choice. 
+

@@ -1,0 +1,739 @@
+//@version=5
+//2024
+strategy('MM ALGO PREMIUM', overlay=true)
+
+
+var bool showtagstrategy = true
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//Main Algo Settings
+colors = input.string(title='Color Scheme', defval='DARK', options=['DARK', 'LIGHT'] , group = "Color Scheme")
+bullcolor = colors == 'DARK' ? #00DBFF : color.rgb(0, 255, 8) 
+bearcolor = colors == 'DARK' ? #E91E63 : color.rgb(255, 0, 0)
+bullcolorlight = colors == 'DARK' ? #00DBFF80 : color.rgb(0, 255, 8,60) 
+bearcolorlight = colors == 'DARK' ? #E91E6380 : color.rgb(255, 0, 0,60)
+
+Show_Signals   = input.bool(true, title="Show Signal", tooltip="Show Long & Short Signals" , group = "Signal's Settings")
+var int length = input(title='Period', defval=1 , group = "Signal's Settings")
+var float mult = input.float(title='TBSensitivity', step=0.1, defval=15 , group = "Signal's Settings") //default 10
+var float SFilter = input.float(title='Signal Filter', step=0.1, defval=1.0 , group = "Signal's Settings")
+
+//////////////////////////////////////////////////////////////////////////////////////////
+
+t_type = input.string("Scalping","Strategy",options = ["Default","Scalping","Intraday","Swing"] , group = "Signal's Settings")
+
+if t_type == "Default"
+    
+    length := length
+    mult := mult
+    SFilter := SFilter
+
+if t_type == "Scalping"
+    length := 10
+    mult := 10
+    SFilter := 0.5
+
+if t_type == "Intraday"
+    length := 2
+    mult := 15
+    SFilter := 0.5
+
+if t_type == "Swing"
+    length := 10
+    mult := 5
+    SFilter := 1.2
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// Color Scheme
+
+//Trend Cloud / Theme
+ma2On = input.bool(true, title="Vortex Cloud", group = "Cloud")
+TBSENSIII = input.int(2, title="Vortex Cloud Sensitivity",group = "Cloud")
+
+
+
+plotRibsw = input(title='Show Trend Ribbon', defval=true , inline = "RIBBON" , group = "Chart Features")
+xfixtf = input(title='MTF', defval=false , inline = "RIBBON", group = "Chart Features")
+labelSwitch = input(title='Table', defval=false, inline = "RIBBON", group = "Chart Features")
+plotRibbonPos = input.string(title='Ribbon Position', options=['Top', 'Bottom'], defval='Bottom', group = "Chart Features")
+xtf = input.timeframe(title='Select MTF Ribbon', defval='D', group = "Chart Features")
+
+
+
+//SMC
+color CLEAR = color.rgb(0,0,0,100)
+showSMC = input.bool(true, 'Show Smart Money Concepts', tooltip='Show Market Structure', group='Market Structure')
+showSwing = input.bool(false, 'Show Swing Points', tooltip='Show or hide HH, LH, HL, LL' , group="Market Structure")
+swingSize = input.int(10, 'Swing Length', tooltip='The number of left and right bars checked when searching for a swing point. Higher value = less swing points plotted and lower value = more swing points plotted.' , group="Market Structure")
+bosConfType = input.string('Candle Close', 'BOS/CHoCH Confirmation', ['Candle Close', 'Wicks'], tooltip='Choose whether candle close/wick above previous swing point counts as a BOS/CHoCH.' , group="Market Structure")
+choch = true
+bosStyle = input.string('Solid', 'Line Style', ['Solid', 'Dashed', 'Dotted'], group="Market Structure")
+bosWidth = input.int(1, 'Width', minval=1, group="Market Structure")
+
+
+Show_PR   = input.bool(true, title="Show Top/Bottom", tooltip="Show's Top/Bottem - 'Don't Buy' = Green/Blue Cross | 'Don't Sell' = Red/Pink Cross " , group = "Top / Bottom")
+TBSensi   = input.int(5, title="Top/Bottom Sensitivity", tooltip="The Greater The Value The Stronger The Top/Bottom" , group = "Top / Bottom")
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+//colorSup   = input(#00DBFF, "Support Color", group="SR")
+//colorRes   = input(#E91E63, "Resistance Color", group="SR")
+//algo
+atr = mult * ta.atr(length)
+longStop = hl2 - atr * SFilter
+longStopPrev = nz(longStop[1], longStop)
+longStop := close[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStop = hl2 + atr * SFilter
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop := close[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+dir = 1
+dir := nz(dir[1], dir)
+dir := dir == -1 and close > shortStopPrev ? 1 : dir == 1 and close < longStopPrev ? -1 : dir
+
+
+longColor = color.blue
+shortColor = color.blue
+
+
+
+
+barcolor(dir == 1 ? bullcolor : bearcolor)
+
+
+///Direccion entrada y salida long
+
+bull = dir == 1 and dir[1] == -1 and Show_Signals ? longStop : na
+bear = dir == -1 and dir[1] == 1 and Show_Signals ? shortStop : na
+
+var int direction = 0
+
+
+// Reglas de entrada y salida
+
+// Trade Time 
+daysback = input(30, title='Backtest Days, For Defining Best TF, Max: 60 Days') 
+millisecondinxdays = 1000 * 60 * 60 * 24 * daysback 
+leftbar = timenow - time < millisecondinxdays 
+backtest = leftbar 
+dpa = 8 
+//
+
+
+// Reglas de entrada y salida
+if bull and backtest
+    strategy.entry('Buy', direction=strategy.long, comment='LONG')
+    direction := 1
+if bear and backtest
+    strategy.entry('Sell', direction=strategy.short, comment='SHORT')
+    direction := -1
+
+// Update dir when entering a position
+
+y1 = low - (ta.atr(30) * 2.5)
+y2 = high + (ta.atr(30) * 2.5)
+
+
+buylabel  = bull ? label.new(bar_index, y1, "BUY 🚀", xloc.bar_index, yloc.price, bullcolor, label.style_label_up, color.rgb(0, 0, 0), size.normal) : na
+selllabel = bear ? label.new(bar_index, y2, "SELL🐻️", xloc.bar_index, yloc.price,   bearcolor, label.style_label_down, color.rgb(255, 255, 255), size.normal) : na
+
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//SMC v2
+/////////////////////////////////////////////////////////////////////////////////////////
+
+// Functions
+lineStyle(x) =>
+    switch x
+        'Solid' => line.style_solid
+        'Dashed' => line.style_dashed
+        'Dotted' => line.style_dotted
+
+
+// Calculations
+
+//Finding high and low pivots
+pivHi = ta.pivothigh(high, swingSize, swingSize)
+pivLo = ta.pivotlow(low, swingSize, swingSize)
+
+
+//Tracking the previous swing levels to determine hh lh hl ll
+var float prevHigh = na
+var float prevLow = na
+var int prevHighIndex = na
+var int prevLowIndex = na
+
+//Tracking whether previous levels have been breached
+var bool highActive = false
+var bool lowActive = false
+
+bool hh = false
+bool lh = false
+bool hl = false
+bool ll = false
+
+//Variable to track the previous swing type, used later on to draw 0.5 Retracement Levels (HH = 2, LH = 1, HL = -1, LL = -2)
+var int prevSwing = 0
+
+if not na(pivHi)
+    if pivHi >= prevHigh
+        hh := true
+        prevSwing := 2
+    else
+        lh := true
+        prevSwing := 1
+    prevHigh := pivHi
+    highActive := true
+    prevHighIndex := bar_index - swingSize
+
+if not na(pivLo)
+    if pivLo >= prevLow
+        hl := true
+        prevSwing := -1
+    else
+        ll := true
+        prevSwing := -2
+    prevLow := pivLo
+    lowActive := true
+    prevLowIndex := bar_index - swingSize
+
+//Generating the breakout signals
+bool highBroken = false
+bool lowBroken = false
+
+//Tracking prev breakout
+var int prevBreakoutDir = 0
+
+float highSrc = bosConfType == 'Candle Close' ? close : high
+float lowSrc = bosConfType == 'Candle Close' ? close : low
+
+if highSrc > prevHigh and highActive
+    highBroken := true
+    highActive := false
+if lowSrc < prevLow and lowActive
+    lowBroken := true
+    lowActive := false
+
+
+// Visual Output
+
+//Swing level labels
+if hh and showSwing
+    label.new(bar_index - swingSize, pivHi, 'HH', color=CLEAR, style=label.style_label_down, textcolor=chart.fg_color)
+if lh and showSwing
+    label.new(bar_index - swingSize, pivHi, 'LH', color=CLEAR, style=label.style_label_down, textcolor=chart.fg_color)
+if hl and showSwing
+    label.new(bar_index - swingSize, pivLo, 'HL', color=CLEAR, style=label.style_label_up, textcolor=chart.fg_color)
+if ll and showSwing
+    label.new(bar_index - swingSize, pivLo, 'LL', color=CLEAR, style=label.style_label_up, textcolor=chart.fg_color)
+ 
+
+//Generating the BOS/CHoCH Lines
+if highBroken and showSMC
+    line.new(prevHighIndex, prevHigh, bar_index, prevHigh, color= bullcolor, style=lineStyle(bosStyle), width=bosWidth)
+    label.new(math.floor(bar_index - (bar_index - prevHighIndex) / 2), prevHigh, prevBreakoutDir == -1 and choch ? 'CHoCH' : 'BOS', color=CLEAR, textcolor=bullcolor, size=size.tiny)
+    prevBreakoutDir := 1
+
+if lowBroken and showSMC
+    line.new(prevLowIndex, prevLow, bar_index, prevLow, color=bearcolor, style=lineStyle(bosStyle), width=bosWidth)
+    label.new(math.floor(bar_index - (bar_index - prevLowIndex) / 2), prevLow, prevBreakoutDir == 1 and choch ? 'CHoCH' : 'BOS', color=CLEAR, textcolor=bearcolor, style=label.style_label_up, size=size.tiny)
+    prevBreakoutDir := -1
+
+////////////////////////////////////////////////////////////////////////////////////////////
+//Trend Cloud
+///////////////////////////////////////////////////////////////////////////////////////////
+length2 = 10*(TBSENSIII / 2)
+source2 = close
+aboveColor2 = color.rgb(70, 219, 255, 100)
+belowColor2 = color.rgb(233, 30, 99, 100)
+
+ma3On = true
+length3 = 40*(TBSENSIII / 2)
+source3 = close
+aboveColor3 = color.rgb(70, 219, 255, 100)
+belowColor3 = color.rgb(233, 30, 99, 100)
+
+//Combined Moving Averages Calculations
+
+sma2 = ta.sma(source2, length2)
+ema2 = ta.ema(source2, length2)
+wma2 = ta.wma(source2, length2)
+vwma2 = ta.vwma(source2, length2)
+hma2 = ta.hma(source2, length2)
+rma2 = ta.rma(source2, length2)
+
+ma2 = (sma2 + ema2 + wma2 + vwma2 + hma2 + rma2) / 6
+
+sma3 = ta.sma(source3, length3)
+ema3 = ta.ema(source3, length3)
+wma3 = ta.wma(source3, length3)
+vwma3 = ta.vwma(source3, length3)
+hma3 = ta.hma(source3, length3)
+rma3 = ta.rma(source3, length3)
+
+ma3 = (sma3 + ema3 + wma3 + vwma3 + hma3 + rma3) / 6
+
+//Volume Spike Signals
+volumeMedian = ta.median(volume, 10)
+volumeBuy  = false
+highVolumeBuy = false
+
+if volume > volumeMedian and volume < volumeMedian*2
+    volumeBuy := true
+if volume > volumeMedian*2
+    highVolumeBuy := true
+
+//Line & Cloud Colors
+redCloud = false
+greenCloud = false
+
+if ma2 > ma3
+    greenCloud := true
+else
+    redCloud := true
+
+ma50 = plot(ma2On ? ma2 : na, title="Moving Average #2", color=greenCloud ? aboveColor2 : belowColor2, style=plot.style_line, linewidth=1 , editable = false)
+ma100 = plot(ma3On ? ma3 : na, title="Moving Average #3", color=greenCloud ? aboveColor3 : belowColor3, style=plot.style_line, linewidth=1 , editable = false)
+
+fill(ma50, ma100, color=greenCloud and highVolumeBuy ? color.new(bullcolor , 10) : greenCloud and volumeBuy ? color.new(bullcolor , 50) : greenCloud ? color.new(bullcolor , 80) : redCloud and highVolumeBuy ? color.new(bearcolor , 10) : redCloud and volumeBuy ? color.new(bearcolor , 50) : redCloud ? color.new(bearcolor , 80) : na)
+
+
+/////////////////////////////////////////////////////////
+//  Trap Detector
+////////////////////////////////////////////////////////
+// Functions
+wavetrend(src, chlLen, avgLen) =>
+    esa = ta.ema(src, chlLen)
+    d = ta.ema(math.abs(src - esa), chlLen)
+    ci = (src - esa) / (0.015 * d)
+    wt1 = ta.ema(ci, avgLen)
+    wt2 = ta.sma(wt1, 3)
+    [wt1, wt2]
+f_top_fractal(src) => src[4] < src[2] and src[3] < src[2] and src[2] > src[1] and src[2] > src[0]
+f_bot_fractal(src) => src[4] > src[2] and src[3] > src[2] and src[2] < src[1] and src[2] < src[0]
+f_fractalize (src) => f_top_fractal(src) ? 1 : f_bot_fractal(src) ? -1 : 0
+f_findDivs(src, topLimit, botLimit) =>
+    fractalTop = f_fractalize(src) > 0 and src[2] >= topLimit ? src[2] : na
+    fractalBot = f_fractalize(src) < 0 and src[2] <= botLimit ? src[2] : na
+    highPrev = ta.valuewhen(fractalTop, src[2], 0)[2]
+    highPrice = ta.valuewhen(fractalTop, high[2], 0)[2]
+    lowPrev = ta.valuewhen(fractalBot, src[2], 0)[2]
+    lowPrice = ta.valuewhen(fractalBot, low[2], 0)[2]
+    bearSignal = fractalTop and high[1] > highPrice and src[1] < highPrev
+    bullSignal = fractalBot and low[1] < lowPrice and src[1] > lowPrev
+    [bearSignal, bullSignal]
+
+// Get components
+[wt1, wt2] = wavetrend(close, 5*TBSensi, 10*TBSensi)
+[wtDivBear1, wtDivBull1] = f_findDivs(wt2, 15, -40)
+[wtDivBear2, wtDivBull2] = f_findDivs(wt2, 45, -65)
+wtDivBull = wtDivBull1 or wtDivBull2
+wtDivBear = wtDivBear1 or wtDivBear2
+
+plotshape(ta.crossover(wt1, wt2) and Show_PR and wt2 <= -53, "Don't Sell/Bottom" , shape.xcross, location.belowbar, color(bullcolor), size=size.tiny)
+plotshape(ta.crossunder(wt1, wt2) and Show_PR and wt2 >= 53, "Don't Buy/Top", shape.xcross, location.abovebar, color(bearcolor), size=size.tiny)
+
+
+
+
+
+tst(x)=> str.tostring(x)
+var int dec = str.length(str.tostring(syminfo.mintick))-2
+trc(number) =>
+    factor = math.pow(10, dec)
+    int(number * factor) / factor
+trc_(number) =>
+    factor = math.pow(10, 0)
+    int(number * factor) / factor
+
+
+
+
+xsrc = close
+xprd1 = 12
+xsrc2 = close
+xprd2 = 26
+xsmooth = 1
+
+xPrice = ta.ema(xsrc, xsmooth)
+FastMA = xfixtf ? ta.ema(request.security(syminfo.tickerid, xtf, ta.ema(xsrc, xprd1)), xsmooth) : ta.ema(xPrice, xprd1)
+xPrice2 = ta.ema(xsrc2, xsmooth)
+SlowMA = xfixtf ? ta.ema(request.security(syminfo.tickerid, xtf, ta.ema(xsrc2, xprd2)), xsmooth) : ta.ema(xPrice2, xprd2)
+BullTribbon = FastMA > SlowMA
+Tribbon = FastMA < SlowMA
+
+//****************************************************************************//
+// Define Color Zones
+
+Green = BullTribbon and xPrice > FastMA  // Buy
+Blue = Tribbon and xPrice > FastMA and xPrice > SlowMA  //Pre Buy 2 (Strong dip) Consider adding long position
+LBlue = Tribbon and xPrice > FastMA and xPrice < SlowMA  //Pre Buy 1 (Weak Dip)
+
+Red = Tribbon and xPrice < FastMA  // Sell
+Orange = BullTribbon and xPrice < FastMA and xPrice < SlowMA  // Pre Sell 2 (Strong Rally) Consider adding short position
+Yellow = BullTribbon and xPrice < FastMA and xPrice > SlowMA  // Pre Sell 1 (Weak Rally)
+
+
+//****************************************************************************//
+// Define Buy and Sell condition
+// This is only for thebasic usage of CDC Actionzone (EMA Crossover) 
+// ie. Buy on first green bar and sell on first red bar
+
+buycond = Green and Green[1] == 0
+sellcond = Red and Red[1] == 0
+
+bullTribbonish = ta.barssince(buycond) < ta.barssince(sellcond)
+Tribbonish = ta.barssince(sellcond) < ta.barssince(buycond)
+
+
+bColor_BullTribbonTribbon = bullTribbonish ? bullcolor : Tribbonish ? bearcolor : na
+
+
+plotshape(plotRibsw ? plotRibbonPos == 'Top' ? close : na : na, style=shape.square, title='Buy/Sell Ribbon', location=location.top, color=bColor_BullTribbonTribbon , editable = false)
+plotshape(plotRibsw ? plotRibbonPos == 'Bottom' ? close : na : na, style=shape.square, title='Buy/Sell Ribbon', location=location.bottom, color=bColor_BullTribbonTribbon , editable = false)
+
+
+
+
+len2 = 20  //input(20, minval=1, title="Smooth")
+src = close
+out = ta.vwma(src, len2)
+
+
+buy = Tribbonish[1] and buycond
+sell = bullTribbonish[1] and sellcond
+
+
+//****************************************************************************//
+// Label
+
+//labelstyle = label.style_label_lower_left
+labelstyle = close > SlowMA ? label.style_label_down : label.style_label_up
+labelyloc = close > SlowMA ? yloc.abovebar : yloc.belowbar
+labeltcolor = buy ? color.gray : sell ? color.white : close > close[1] ? bullcolor : bearcolor 
+labelbgcolor = buy ? bullcolor  : sell ? bearcolor : color.silver
+labeltext = buy ? 'Long on next bar\n' : sell ? 'Short on next bar\n' : ' '
+trendText = bullTribbonish ? 'Bullish' : Tribbonish ? 'Bearish' : 'Sideways'
+
+
+l1 = label.new(bar_index, na, text=labeltext + syminfo.ticker + ' ' + str.tostring(close) + ' ' + syminfo.currency + '\n Currently in a ' + trendText + ' Trend \n', color=labelbgcolor, textcolor=labeltcolor, yloc=labelyloc, style=labelstyle)
+
+label.delete(labelSwitch ? l1[1] : l1)
+
+
+
+bool changeCond = na(direction) ? na : bull  or bear
+
+
+
+// Module  - Signals - SL - TPS by @comgunner
+//-----------------------------------------
+//*********************************************************
+//*                     Module                            *
+//*              Signals - SL - TPSEND                    *
+//*********************************************************
+// Cálculos
+
+groupEnTpSl = "======= Module - Signals ======="
+plot(na)
+
+levels_tip = "Habilita etiquetas compra/venta /SL"
+atrLen_tip = "Atr para el Calculo de Stoploss y TakeProfit"
+atrRisk_tip = " ATR Risk Multiplier: Recommended 1.5 or 1.9 / Multiplicador de Riesgo ATR: Recomendado 1.5 o 1.9"
+tpLen_tip = "Distance in percentage between TakeProfits / Distancia en porcentaje entre TakeProfits"
+tpSL_tip = "Distance in percentage for SL / Distancia en porcentaje para SL"
+
+numTP_tip = " Number of Take Profit Levels, min 1 max 10 / Número de niveles de toma de ganancias, mínimo 1 máximo 10 "
+numTP = input.int(10, "Number of Take Profit Levels 💪", minval=1, maxval=10,tooltip =numTP_tip ,group=groupEnTpSl)
+
+PercentOrATR_tip="Select the calculation method for TakeProfits / Selecciona el metodo de calculo para los TakeProfits" 
+
+var string PercentOrATR = input.string("PREDICTUM", "Calculation method for TakeProfit (% or ATR)", options=["ATR", "PERCENTAGE","PREDICTUM"], inline="TPS", group=groupEnTpSl,tooltip=PercentOrATR_tip)
+
+levels = input(title='Show Entry Labels/SL/TP /Mostrar Etiquetas de Entrada/SL/TP', defval=true, group=groupEnTpSl, tooltip=levels_tip) 
+
+atrLen   = input.int(10, "ATR Length TP / SL ", group=groupEnTpSl, tooltip=atrLen_tip)
+atrRisk  = input.float(1.0, "ATR Risk TP / SL", group=groupEnTpSl,tooltip=atrRisk_tip )
+tpLen = input.float(2.0, "TP [%] 💪", step=0.1, group=groupEnTpSl, tooltip=tpLen_tip)
+tpLenpre_tip = "Initial TP for Predictum type calculation / TP inicial para el cálculo del tipo Predictum"
+tpLenpre = input.float(0.5, "TP Initial Predictum [%] 💪", minval=0.3, step=0.1, group=groupEnTpSl, tooltip=tpLenpre_tip)
+tpSL = input.float(5, "SL [%] 💀️", step=0.1, group=groupEnTpSl, tooltip=tpSL_tip)
+
+lvlLines    = input.bool(true, "Show TP/SL lines ? / Mostart Lineas TP/SL? ", inline="levels2",group=groupEnTpSl)
+linesStyle  = input.string("SOLID", "", ["SOLID", "DASHED", "DOTTED"], inline="levels2",group=groupEnTpSl)
+lvlDistance = input.int(1, "Distance / Distancia", 1, inline="levels2",group=groupEnTpSl)
+stylelvl = linesStyle == "SOLID" ? line.style_solid : linesStyle == "DASHED" ? line.style_dashed : line.style_dotted
+lvlLinesw = input.int(title=' TP/SL Line Thickness / Grosor de línea TP/SL', defval=2, minval=1,inline="levels2",group=groupEnTpSl)
+
+
+
+trigger = bull  ? 1 : 0
+atrBand = ta.atr(atrLen) * atrRisk
+atrStop = trigger == 1 ? low - atrBand : high + atrBand
+
+
+
+
+
+
+lastTrade(src) => ta.valuewhen(changeCond, src, 0 )
+
+//Nuevo, distancia de TP's
+
+DistanceTp =  close * tpLen / 100 
+Distance_CTp = trigger == 1 ? close - DistanceTp : close + DistanceTp
+
+
+DistanceSL =  close * tpSL / 100 
+Distance_CSL = trigger == 1 ? low - DistanceSL : high + DistanceSL
+
+DistanceTppre =  close * tpLenpre / 100 
+Distance_CTpre = trigger == 1 ? close - DistanceTppre : close + DistanceTppre
+
+
+
+var float atrSL = na
+
+if PercentOrATR == "ATR"
+    atrStop := atrStop
+    atrSL := atrStop
+else
+    // Lógica para las opciones "PERCENTAGE" y "PREDICTUM"
+    if PercentOrATR == "PERCENTAGE"
+        atrStop := Distance_CTp
+        atrSL := Distance_CSL
+    else if PercentOrATR == "PREDICTUM"
+        atrStop := Distance_CTpre  // Ajusta según tu lógica específica para "PREDICTUM"
+        atrSL := Distance_CSL
+        //numTP := 8
+
+//CONTADOR DE VELAS, APARTIR E LA ULTIMA ENTRADA trigger o changeCondPNL = nz(alertLongPNL, false) != nz(alertShortPNL, false)
+
+var int countOfCandles = 0
+
+if trigger
+    countOfCandles := 0
+else
+    countOfCandles := na(countOfCandles) ? 0 : countOfCandles + 1
+
+
+//ENTRADA
+entry = levels ? label.new(time, close, "ENTRY " + str.tostring(lastTrade(close), "#.#####"), xloc.bar_time, yloc.price,color.gray, label.style_label_left,  #000000, size.normal) : na
+label.set_y(entry, lastTrade(close))
+label.delete(entry[1])
+stop_y = lastTrade(atrSL)
+
+lineEntry = levels and lvlLines ? line.new(bar_index - countOfCandles, lastTrade(close), bar_index + lvlDistance ,lastTrade(close), xloc.bar_index, extend.none,color.gray,stylelvl, width=lvlLinesw ) : na
+line.delete(lineEntry[1])
+
+//STOPLOSS
+
+stop  = levels ? label.new(time, close, "STOP LOSS💀️" + str.tostring(stop_y, "#.#####"), xloc.bar_time, yloc.price, bearcolor, label.style_label_left, color.rgb(255, 252, 252), size.normal) : na
+label.set_y(stop, stop_y)
+label.delete(stop[1])
+
+linestop = levels and lvlLines ? line.new(bar_index - countOfCandles, lastTrade(atrSL), bar_index  ,lastTrade(atrSL), xloc.bar_index, extend.none, bearcolor,stylelvl, width=lvlLinesw ) : na
+line.delete(linestop[1])
+
+
+
+
+
+// Array para almacenar las etiquetas y líneas
+var label[] tpLabels = array.new_label(0)
+var line[] tpLines = array.new_line(0)
+
+//################################################################
+
+MovingTarget_tip = "Strategy to move StopLoss (BE), when it reaches a TP / Estrategia para mover StopLoss (BE), cuando alcanza un TP "
+showLabel_tip = "Show SIGNAL GENERATOR label / Mostrar etiqueta SIGNAL GENERATOR"
+MovingTarget = input.int(1, title="Moving Target (BE)", minval=1,group=groupEnTpSl,inline="SignalG",tooltip=MovingTarget_tip)
+showLabel = input(false, title="Showlabel Signal Generator",group=groupEnTpSl,inline="SignalG",tooltip=showLabel_tip)
+
+tf = timeframe.period
+miSimbolo = ticker.standard(syminfo.tickerid)
+
+
+
+
+
+//========================================================================
+
+buy_label = ' =====SIGNAL GENERATOR======\n'
+buy_label := buy_label + '=========KAKUPAKAT=========\n' 
+
+buy_label := buy_label + ' \n' 
+
+buy_label := buy_label + 'COIN 🪙 : ' + '' + str.tostring(miSimbolo)+ '\n'
+buy_label := buy_label + 'TIMEFRAME ⏰ : ' + '' + str.tostring(tf)+ '\n'
+buy_label := buy_label + ' \n' 
+buy_label := buy_label + 'Dir 🔃: ' + '' + (stop_y < lastTrade(close) ? 'LONG' : 'SHORT') + '\n'
+buy_label := buy_label + 'Entry 🚀: ' + '' + str.tostring(lastTrade(close), "#.#####") +'\n'
+
+
+//*********************************************************
+// Función para crear TP y líneas by CoMgUnNeR 
+// ¡Codigo mas simplificado da creditos al autor! me costo bastante.
+//*********************************************************
+
+// Función para crear TP y líneas
+// Función para calcular potencias
+pow(base, exponent) =>
+    var float result = 1.0
+    for i = 1 to exponent
+        result := result * base
+    result
+
+var float[] tpValues = array.new_float(0)
+
+// Función para crear TP y líneas
+createTP(level) =>
+    if levels
+        var float tp_y = na
+        var string emoji = na
+        var color textColor = na
+        var color lineColor = na
+        
+        if PercentOrATR == "PREDICTUM"
+            if level == 1
+                tp_y := (lastTrade(close) - lastTrade(atrStop)) * level + lastTrade(close)
+            else
+                tp_y := tp_y + (tp_y - lastTrade(close)) * 0.618  
+            
+            emoji := level == numTP ? "🤲💎" : "💪"
+            textColor := #000000
+            lineColor := bullcolor
+        else
+            tp_y := (lastTrade(close) - lastTrade(atrStop)) * level + lastTrade(close)
+            emoji := level == numTP ? "🤲💎" : "💪"
+            textColor := #000000
+            lineColor := bullcolor
+
+        tp = label.new(time, tp_y, "TP " + str.tostring(level) + " " + emoji + " " + str.tostring(tp_y, "#.#####"), xloc.bar_time, yloc.price, color=lineColor, style=label.style_label_left, textcolor=textColor, size=size.normal)
+
+        array.push(tpLabels, tp)
+
+        if lvlLines
+            tpLine = line.new(bar_index - countOfCandles, tp_y, bar_index + lvlDistance, tp_y, xloc.bar_index, extend.none, lineColor, stylelvl, width=lvlLinesw)
+            array.push(tpLines, tpLine)
+            if array.size(tpLines) > numTP
+                line.delete(array.get(tpLines, 0))
+                array.shift(tpLines)
+
+        if array.size(tpLabels) > numTP
+            label.delete(array.get(tpLabels, 0))
+            array.shift(tpLabels)
+        tp_y
+
+
+// Crear TP y líneas basado en el input del usuario
+if (bar_index > 10) // Asegurarse de que hay suficientes barras para calcular
+    for i = 1 to numTP
+        createTP(i)
+
+
+        
+
+// Función para crear TP y líneas
+createTP2(level_info) =>
+    if showLabel
+        var float tp_y2 = na
+        var string emoji = na
+
+        if PercentOrATR == "PREDICTUM"
+            if level_info == 1
+                tp_y2 := (lastTrade(close) - lastTrade(atrStop)) * level_info + lastTrade(close)
+            else
+                tp_y2 := tp_y2 + (tp_y2 - lastTrade(close)) * 0.618  
+            
+            emoji := level_info == numTP ? "🤲💎" : "💪"
+        else
+            tp_y2 := (lastTrade(close) - lastTrade(atrStop)) * level_info + lastTrade(close)
+            emoji := level_info == numTP ? "🤲💎" : "💪"
+
+        // Agregar el resultado al texto de la etiqueta
+        'TP ' + str.tostring(level_info) + ': ' + emoji + str.tostring(tp_y2, "#.#####") + '\n'
+
+if (bar_index > 10)
+    for i = 1 to numTP
+        // Llamar a la función y agregar el resultado a buy_label
+        buy_label := buy_label + createTP2(i)
+
+
+
+buy_label := buy_label + 'StopLoss 🛑: ' + '' + str.tostring(stop_y, "#.#####") +'\n'
+buy_label := buy_label + ' \n' 
+
+buy_label := buy_label + '=====Strategy======\n'
+buy_label := buy_label + ' \n' 
+buy_label := buy_label + 'Stop: Moving Target -\n'
+buy_label := buy_label + '  Trigger: Target  ' + str.tostring((MovingTarget))+ '\n'
+
+lab_buy = label.new(bar_index - 15, showLabel ? close : na, buy_label, color=color.new(color.gray, 40), textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar, textalign=text.align_left)
+
+// Mueve la etiqueta fuera del gráfico cuando no se muestra
+//label.set_x(lab_buy, bar_index - 500)
+if not showLabel
+    label.delete(lab_buy)
+
+label.delete(lab_buy[1])
+
+
+//################################################################
+
+
+        
+//*********************************************************
+// Función para crear TP y líneas by CoMgUnNeR 
+// ¡Codigo mas simplificado da creditos al autor! me costo bastante.
+
+
+//################################################################
+// Define variables for strategy exit
+// Define variables for strategy exit
+var int qty_percent = na
+var int limit_price = na
+var int exit_message = na
+
+// Variable de script para qtytps
+var int qtytps = na
+
+// Calcular qtytps fuera de la función
+qtytps := na(qtytps) ? (numTP == 1 ? 100 : 100 / (numTP - 1 + (numTP == 1 ? 1 : 0))) : qtytps
+
+createTP3(level_stg) =>
+    if bar_index > 10
+        var float tp_y3 = na
+        var string emoji = na
+
+        if PercentOrATR == "PREDICTUM"
+            if level_stg == 1
+                tp_y3 := (lastTrade(close) - lastTrade(atrStop)) * level_stg + lastTrade(close)
+            else
+                tp_y3 := tp_y3 + (tp_y3 - lastTrade(close)) * 0.618  
+
+            emoji := level_stg == numTP ? "🤲💎" : "💪"
+        else
+            tp_y3 := (lastTrade(close) - lastTrade(atrStop)) * level_stg + lastTrade(close)
+            
+            emoji := level_stg == numTP ? "🤲💎" : "💪"
+
+        if  showtagstrategy
+            strategy.exit('TP ' + str.tostring(level_stg), limit=tp_y3, comment='TP ' + str.tostring(level_stg) + ' Close: ' + str.tostring(close), alert_message='Take Profit ' + str.tostring(level_stg), qty_percent=qtytps)
+        //strategy.exit('TP' + str.tostring(level_stg), 'Buy', qty_percent=qtytps, limit=tp_y3)
+
+
+// Usar la función sin verificar showLabel
+for i = 1 to numTP
+    createTP3(i)
+

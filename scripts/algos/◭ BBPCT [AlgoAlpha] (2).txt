@@ -1,0 +1,67 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Algoalpha X © Sushiboi77
+
+//@version=5
+indicator(shorttitle="◭ BBPCT% [AlgoAlpha]", title="◭ Bollinger Bands Percent", overlay=false)
+
+//Symmetrical Standard Deviation Channels
+neon = input.bool(title = 'Neon Color Theme', defval = true)
+upper1 = close + 0.05 * close
+lower1 = close - 0.05 * close
+stdL = close > lower1
+stdS = close < upper1
+
+
+//BBPCT
+length = input.int(20, minval=1, group='Bollinger Band')
+src = input(close, title="Source", group='Bollinger Band')
+mult = input.float(2.0, minval=0.001, maxval=50, title="Multiplier", group='Bollinger Band')
+lookback = 750
+
+showStdev    = input.bool(false, title='Show Bollinger Band Stdev %', group='Settings')
+
+var stdevArray = array.new_float(lookback,0.0)
+
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+positionBetweenBands = 100 * (src - lower)/(upper - lower)
+
+array.push(stdevArray, dev/close)
+if array.size(stdevArray)>=lookback
+    array.remove(stdevArray, 0)
+
+rank = array.percentrank(stdevArray, lookback-1)
+hist = 100*dev/close
+
+bullcolor = neon ? #00ffbb : #00b712
+bearcolor = neon ? #ff1100 : #c30010
+
+
+//PLOTS
+plot1 = plot(positionBetweenBands, color = color.new(color.white, 100))
+obupper = plot(130, color = color.new(bearcolor, 0), display = display.none)
+oblower = plot(110, color = color.new(bearcolor, 0), display = display.none)
+obmid = plot(95, display = display.none)
+osupper = plot(10, color = color.new(bullcolor, 30), display = display.none)
+oslower = plot(-10, color = color.new(bullcolor, 30), display = display.none)
+osmid = plot(25, color = color.new(bullcolor, 70), display = display.none)
+hline(50)
+z = plot(positionBetweenBands, "Z", positionBetweenBands > 50 ? bullcolor : bearcolor)
+mid = plot(50, display = display.none, editable = false)
+
+fill(z, mid, positionBetweenBands > 50 ? positionBetweenBands : 50, positionBetweenBands > 50 ? 50 : positionBetweenBands, positionBetweenBands > 50 ? bullcolor : #00000000, positionBetweenBands > 50 ? #00000000 : bearcolor)
+fill(obupper, oblower, color.new(bearcolor, 80))
+fill (oblower, obmid, color.new(bearcolor, 87))
+fill(osupper, oslower, color.new(bullcolor, 87))
+fill(osupper, osmid, color.new(bullcolor, 93))
+plotshape(ta.crossover(positionBetweenBands,-8) and stdL, style = shape.triangleup, color = bullcolor, location = location.bottom, size = size.tiny)
+plotshape(ta.crossunder(positionBetweenBands,108) and stdS, style = shape.triangledown, color = bearcolor, location = location.top, size = size.tiny)
+plot(showStdev ? hist : na, style=plot.style_columns, color=(hist[1] < hist ? #26A69A : #B2DFDB) , title='Stdev %')
+
+//Alerts
+alertcondition(ta.crossover(positionBetweenBands,-10), title="Bullish Reversal", message="Bullish Reversal {{exchange}}:{{ticker}}")
+alertcondition(ta.crossunder(positionBetweenBands,110), title="Bearish Reversal", message="Bearish Reversal {{exchange}}:{{ticker}}")
+alertcondition(ta.crossover(positionBetweenBands,50), title="Bullish Trend", message="Bullish Trend {{exchange}}:{{ticker}}")
+alertcondition(ta.crossunder(positionBetweenBands,50), title="Bearish Trend", message="Bearish Trend {{exchange}}:{{ticker}}")

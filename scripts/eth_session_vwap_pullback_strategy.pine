@@ -1,0 +1,222 @@
+//@version=6
+strategy(
+    title                   = "ETH Session VWAP Trend Pullback RR+",
+    shorttitle              = "ETHSVT",
+    overlay                 = true,
+    pyramiding              = 0,
+    initial_capital         = 10000,
+    default_qty_type        = strategy.percent_of_equity,
+    default_qty_value       = 10,
+    commission_type         = strategy.commission.percent,
+    commission_value        = 0.06,
+    slippage                = 2,
+    calc_on_every_tick      = false,
+    process_orders_on_close = false,
+    max_bars_back           = 3000
+)
+
+// Recommended chart: BINANCE:ETHUSDT on 5m.
+// Strategy family: higher-timeframe trend + daily-open bias, then trade
+// the first confirmed VWAP / fast-EMA reclaim after an intraday pullback.
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+grp_time = "Sessions"
+i_trade_session = input.session("0700-1700", "Trade session (UTC)", group = grp_time)
+i_one_trade_per_day = input.bool(true, "Max one trade per day", group = grp_time)
+i_flat_after_session = input.bool(true, "Flat after trade session", group = grp_time)
+i_flat_new_day = input.bool(true, "Flat on new day", group = grp_time)
+i_cooldown_bars = input.int(12, "Cooldown bars after exit", minval = 0, maxval = 200, group = grp_time)
+
+grp_bias = "Bias"
+i_htf = input.timeframe("60", "HTF bias timeframe", group = grp_bias)
+i_htf_ema_len = input.int(200, "HTF EMA length", minval = 50, maxval = 400, group = grp_bias)
+i_htf_rsi_len = input.int(14, "HTF RSI length", minval = 2, maxval = 50, group = grp_bias)
+i_htf_rsi_bull = input.int(55, "HTF RSI bull threshold", minval = 45, maxval = 70, group = grp_bias)
+i_htf_rsi_bear = input.int(45, "HTF RSI bear threshold", minval = 30, maxval = 55, group = grp_bias)
+i_use_daily_open = input.bool(true, "Require daily-open bias", group = grp_bias)
+
+grp_filter = "Filters"
+i_fast_ema_len = input.int(20, "Fast EMA", minval = 5, maxval = 100, group = grp_filter)
+i_slow_ema_len = input.int(50, "Slow EMA", minval = 20, maxval = 200, group = grp_filter)
+i_rsi_len = input.int(14, "Signal RSI length", minval = 2, maxval = 50, group = grp_filter)
+i_pullback_rsi_long = input.int(48, "Long pullback RSI max", minval = 35, maxval = 55, group = grp_filter)
+i_pullback_rsi_short = input.int(52, "Short pullback RSI min", minval = 45, maxval = 65, group = grp_filter)
+i_rsi_reclaim_long = input.int(52, "Long RSI reclaim threshold", minval = 45, maxval = 70, group = grp_filter)
+i_rsi_reclaim_short = input.int(48, "Short RSI reclaim threshold", minval = 30, maxval = 55, group = grp_filter)
+i_adx_len = input.int(14, "ADX length", minval = 5, maxval = 50, group = grp_filter)
+i_adx_min = input.float(20.0, "Min ADX", minval = 5.0, step = 0.5, group = grp_filter)
+i_vol_len = input.int(20, "Volume SMA length", minval = 5, maxval = 100, group = grp_filter)
+i_vol_mult = input.float(1.0, "Signal volume / SMA", minval = 0.5, step = 0.05, group = grp_filter)
+i_pullback_window = input.int(6, "Bars from pullback to reclaim", minval = 1, maxval = 30, group = grp_filter)
+i_confirm_lookback = input.int(3, "Breakout confirm lookback", minval = 2, maxval = 10, group = grp_filter)
+i_retest_atr = input.float(0.20, "Max pullback depth ATR beyond slow EMA", minval = 0.05, step = 0.05, group = grp_filter)
+i_stop_lookback = input.int(5, "Stop lookback bars", minval = 2, maxval = 20, group = grp_filter)
+
+grp_risk = "Risk"
+i_rr = input.float(1.5, "Target RR", minval = 1.5, step = 0.1, group = grp_risk)
+i_stop_atr = input.float(0.35, "Stop ATR buffer", minval = 0.05, step = 0.05, group = grp_risk)
+i_max_hold_bars = input.int(36, "Max bars in trade", minval = 1, maxval = 300, group = grp_risk)
+
+//------------------------------------------------------------------------------
+// Core calculations
+//------------------------------------------------------------------------------
+atr = ta.atr(14)
+ema_fast = ta.ema(close, i_fast_ema_len)
+ema_slow = ta.ema(close, i_slow_ema_len)
+vwap_val = ta.vwap(hlc3)
+rsi = ta.rsi(close, i_rsi_len)
+vol_sma = ta.sma(volume, i_vol_len)
+[_, _, adx] = ta.dmi(i_adx_len, i_adx_len)
+
+in_trade = not na(time(timeframe.period, i_trade_session, "UTC"))
+trade_session_ended = not in_trade and in_trade[1]
+new_day = ta.change(time("D")) != 0
+
+var float day_open = na
+if new_day
+    day_open := open
+else if na(day_open)
+    day_open := open
+
+// Use only completed higher-timeframe bars.
+htf_close = request.security(syminfo.tickerid, i_htf, close[1], lookahead = barmerge.lookahead_off)
+htf_ema = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_htf_ema_len)[1], lookahead = barmerge.lookahead_off)
+htf_ema_prev = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_htf_ema_len)[2], lookahead = barmerge.lookahead_off)
+htf_rsi = request.security(syminfo.tickerid, i_htf, ta.rsi(close, i_htf_rsi_len)[1], lookahead = barmerge.lookahead_off)
+
+htf_up = htf_ema > htf_ema_prev
+htf_down = htf_ema < htf_ema_prev
+
+bias_bull = htf_close > htf_ema and htf_rsi >= i_htf_rsi_bull and htf_up
+bias_bear = htf_close < htf_ema and htf_rsi <= i_htf_rsi_bear and htf_down
+
+daily_bull_ok = not i_use_daily_open or close > day_open
+daily_bear_ok = not i_use_daily_open or close < day_open
+vol_ok = volume >= vol_sma * i_vol_mult
+trend_ok = adx >= i_adx_min
+
+local_bull = bias_bull and daily_bull_ok and close > ema_slow and ema_fast > ema_slow and close > vwap_val and trend_ok
+local_bear = bias_bear and daily_bear_ok and close < ema_slow and ema_fast < ema_slow and close < vwap_val and trend_ok
+
+//------------------------------------------------------------------------------
+// Pullback state
+//------------------------------------------------------------------------------
+pullback_floor = ema_slow - atr * i_retest_atr
+pullback_ceiling = ema_slow + atr * i_retest_atr
+
+long_touch = in_trade and bias_bull and daily_bull_ok and ema_fast > ema_slow and low <= math.max(ema_fast, vwap_val) and low >= pullback_floor and close <= open and rsi <= i_pullback_rsi_long
+short_touch = in_trade and bias_bear and daily_bear_ok and ema_fast < ema_slow and high >= math.min(ema_fast, vwap_val) and high <= pullback_ceiling and close >= open and rsi >= i_pullback_rsi_short
+
+bars_since_long_touch = ta.barssince(long_touch)
+bars_since_short_touch = ta.barssince(short_touch)
+
+recent_long_touch = not na(bars_since_long_touch) and bars_since_long_touch > 0 and bars_since_long_touch <= i_pullback_window
+recent_short_touch = not na(bars_since_short_touch) and bars_since_short_touch > 0 and bars_since_short_touch <= i_pullback_window
+
+long_stop_base = ta.lowest(low, i_stop_lookback)
+short_stop_base = ta.highest(high, i_stop_lookback)
+long_confirm_level = ta.highest(high, i_confirm_lookback)[1]
+short_confirm_level = ta.lowest(low, i_confirm_lookback)[1]
+candle_range = math.max(high - low, syminfo.mintick)
+long_close_strength = close >= high - candle_range * 0.25
+short_close_strength = close <= low + candle_range * 0.25
+
+//------------------------------------------------------------------------------
+// Trade state
+//------------------------------------------------------------------------------
+var bool trade_taken_today = false
+var int last_exit_bar = na
+
+var float pending_stop = na
+var float active_stop = na
+var float active_target = na
+var int active_entry_bar = na
+
+if new_day
+    trade_taken_today := false
+
+if new_day and i_flat_new_day and strategy.position_size != 0
+    strategy.close_all(comment = "NewDay")
+
+cooldown_ok = na(last_exit_bar) or (bar_index - last_exit_bar) > i_cooldown_bars
+can_trade_today = not i_one_trade_per_day or not trade_taken_today
+
+//------------------------------------------------------------------------------
+// Entry logic
+//------------------------------------------------------------------------------
+long_signal = barstate.isconfirmed and in_trade and strategy.position_size == 0 and can_trade_today and cooldown_ok and recent_long_touch and local_bull and close > long_confirm_level and close > ema_fast and close > vwap_val and close > open and long_close_strength and rsi >= i_rsi_reclaim_long and vol_ok
+short_signal = barstate.isconfirmed and in_trade and strategy.position_size == 0 and can_trade_today and cooldown_ok and recent_short_touch and local_bear and close < short_confirm_level and close < ema_fast and close < vwap_val and close < open and short_close_strength and rsi <= i_rsi_reclaim_short and vol_ok
+
+if long_signal
+    stop_candidate = long_stop_base - atr * i_stop_atr
+    if close - stop_candidate > syminfo.mintick * 4
+        pending_stop := stop_candidate
+        strategy.entry("Long", strategy.long)
+        trade_taken_today := true
+
+if short_signal
+    stop_candidate = short_stop_base + atr * i_stop_atr
+    if stop_candidate - close > syminfo.mintick * 4
+        pending_stop := stop_candidate
+        strategy.entry("Short", strategy.short)
+        trade_taken_today := true
+
+new_long_fill = strategy.position_size > 0 and strategy.position_size[1] <= 0
+new_short_fill = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+if new_long_fill
+    active_stop := math.min(pending_stop, strategy.position_avg_price - syminfo.mintick)
+    risk = strategy.position_avg_price - active_stop
+    active_target := strategy.position_avg_price + risk * i_rr
+    active_entry_bar := bar_index
+    pending_stop := na
+
+if new_short_fill
+    active_stop := math.max(pending_stop, strategy.position_avg_price + syminfo.mintick)
+    risk = active_stop - strategy.position_avg_price
+    active_target := strategy.position_avg_price - risk * i_rr
+    active_entry_bar := bar_index
+    pending_stop := na
+
+if strategy.position_size > 0 and not na(active_stop) and not na(active_target)
+    strategy.exit("Long-X", "Long", stop = active_stop, limit = active_target)
+
+if strategy.position_size < 0 and not na(active_stop) and not na(active_target)
+    strategy.exit("Short-X", "Short", stop = active_stop, limit = active_target)
+
+bars_in_trade = strategy.position_size != 0 and not na(active_entry_bar) ? bar_index - active_entry_bar : 0
+
+if strategy.position_size > 0 and bars_in_trade >= i_max_hold_bars
+    strategy.close("Long", comment = "TimeStop")
+
+if strategy.position_size < 0 and bars_in_trade >= i_max_hold_bars
+    strategy.close("Short", comment = "TimeStop")
+
+if i_flat_after_session and strategy.position_size > 0 and trade_session_ended
+    strategy.close("Long", comment = "SessionFlat")
+
+if i_flat_after_session and strategy.position_size < 0 and trade_session_ended
+    strategy.close("Short", comment = "SessionFlat")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    active_stop := na
+    active_target := na
+    active_entry_bar := na
+    last_exit_bar := bar_index
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+plot(ema_fast, "EMA Fast", color = color.new(color.orange, 0))
+plot(ema_slow, "EMA Slow", color = color.new(color.red, 10))
+plot(vwap_val, "VWAP", color = color.new(color.blue, 0))
+plot(day_open, "Daily Open", color = color.new(color.yellow, 20), style = plot.style_linebr)
+
+plotshape(long_touch, title = "Long Pullback", style = shape.circle, location = location.belowbar, color = color.new(color.orange, 0), size = size.tiny)
+plotshape(short_touch, title = "Short Pullback", style = shape.circle, location = location.abovebar, color = color.new(color.orange, 0), size = size.tiny)
+plotshape(long_signal, title = "Long Entry", style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny, text = "L")
+plotshape(short_signal, title = "Short Entry", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny, text = "S")
+
+bgcolor(in_trade ? color.new(color.aqua, 94) : na, title = "Trade Session")

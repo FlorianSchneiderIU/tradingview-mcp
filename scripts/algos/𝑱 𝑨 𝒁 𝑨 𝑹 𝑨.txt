@@ -1,0 +1,871 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © hancina
+
+//@version=5
+indicator("𝑱 𝑨 𝒁 𝑨 𝑹 𝑨", overlay=true)
+///
+import alexis-caelum/METRICA/2 
+import alexis-caelum/x/11 as x
+///
+initial_capital = 10000.0
+/////// ᴅᴀᴛᴇ ʀᴀɴɢᴇ ///////
+useDateFilter = input.bool(true, title="𝘙𝘈𝘕𝘎𝘌 𝘉𝘈𝘊𝘒𝘛𝘌𝘚𝘛",group="⨌ 𝐁𝐀𝐂𝐊𝐓𝐄𝐒𝐓")
+backtestStartDate = input.time(timestamp("1 Jan 2018"), title="𝘚𝘛𝘈𝘙𝘛 𝘋𝘈𝘛𝘌", group="⨌ 𝐁𝐀𝐂𝐊𝐓𝐄𝐒𝐓")
+
+/////// ʀᴀɴɢᴇ ᴄᴏɴᴅɪᴛɪᴏɴꜱ ///////
+inDateRange = not useDateFilter or (time >= backtestStartDate)
+date = input.time(title = "Forward Test",defval = timestamp("2018-01-01"))
+
+/////// 𝘛 𝘏 𝘌 𝘔 𝘌 𝘚 ///////
+RATEOFCHANGE = true//input.bool(true,"𝗥𝗔𝗧𝗘 𝗢𝗙 𝗖𝗛𝗔𝗡𝗚𝗘",group = "𝐓𝐀𝐁𝐋𝐄")
+PLOT = input.bool(false,"𝗠𝗔'𝗦",group= "𝐏𝐋𝐎𝐓")
+PLOT_TPI = input.bool(true,"𝗕𝗔𝗥𝗦",group= "𝐏𝐋𝐎𝐓")
+TABLE_time = input.int(1,"𝗟𝗢𝗢𝗞𝗕𝗔𝗖𝗞𝗦",[0,1,2],group= "𝐏𝐋𝐎𝐓")
+// INPUTS
+THEME = input.string("DARK","THEME",["LIGHT","DARK"])
+startYear = input.int(2018,"START YEAR")
+startMonth = input.int(1,"START MONTH")
+limit_opt_lev = input.bool(true, "Limit Optimal Leverage", inline = "opt-lev-cap")
+max_lev = input.float(5, "", minval=1, inline = "opt-lev-cap", step=0.01)
+////////////
+
+bg_theme(THEME)=>
+    if THEME == "𝘋𝘈𝘙𝘒"
+        color.rgb(0,0,0,100)
+    else if THEME == "𝘓𝘐𝘎𝘏𝘛"
+        color.rgb(255, 255, 255,100)
+
+on_theme(THEME)=>
+    if THEME == "𝘋𝘈𝘙𝘒"
+        color.rgb(255,255,255)
+    else if THEME == "𝘓𝘐𝘎𝘏𝘛"
+        color.rgb(0,0,0)
+//}
+
+/////// ᴄᴏʙʀᴀ ᴛᴀʙʟᴇ ///////
+
+disp_ind = input.string ("None" , title = "Display Curve" , tooltip = "Choose which data you would like to display", options=["Strategy", "Equity", "Open Profit", "Gross Profit", "Net Profit", "None"], group = "ᴍᴇᴛʀiᴄᴀ")
+pos_table = input.string("Top Right", "Table Position", options = ["Top Left", "Middle Left", "Bottom Left", "Top Right", "Middle Right", "Bottom Right", "Top Center", "Bottom Center"], group = "ᴍᴇᴛʀiᴄᴀ")
+type_table = input.string("𝘍𝘜𝘓𝘓", "Table Type", options = ["𝘍𝘜𝘓𝘓", "𝘚𝘐𝘔𝘗𝘓𝘌", "𝘕𝘖𝘕𝘌"], group = "ᴍᴇᴛʀiᴄᴀ")
+
+/// Start Price
+startPrice1 = request.security("","D", close, lookahead=barmerge.lookahead_on)
+
+// Thresholds for LONG or CLOSE
+
+longthreshold = input.float(0, "Long Threshold", step=0.05, group="Thresholds")
+shortthreshold = input.float(0.2, "Short Threshold", step=0.05, group="Thresholds")
+
+// Thresholds for all the ratios
+
+longthresholdratio = input.float(0, "Ratio Long Threshold", step=0.05, group="Thresholds")
+shortthresholdratio = input.float(0.2, "Ratio Short Threshold", step=0.05, group="Thresholds")
+
+/////// 𝘓 𝘐 𝘉 𝘙 𝘈 𝘙 𝘐 𝘌 𝘚 ///////
+import alexis-caelum/CAE/4
+import hancina/RATIO_TPI/1 as ratio
+import hancina/BTC_LVG_TOKENS_TPI/1 as ratio1
+longthreshold0 = input.float(0.20)
+shortthreshold0 = input.float(-0.20)
+
+import TradingView/ta/7 as ta
+import hancina/BTCTPIARI/1 as btchan
+import alexis-caelum/ETH_TPI_2/1 as ethpurna
+import hancina/SOL_NEW_UNI/1 as soluni
+import hancina/PURNARI/1
+
+
+//
+// Get the timeframe to daily since all indicators are daily
+f_resInMinutes() => 
+    _resInMinutes = timeframe.multiplier * (
+      timeframe.isseconds ? 1. / 60             :
+      timeframe.isminutes ? 1.                  :
+      timeframe.isdaily   ? 60. * 24            :
+      timeframe.isweekly  ? 60. * 24 * 7        :
+      timeframe.ismonthly ? 60. * 24 * 30.4375  : na)
+
+f_resInDays() => f_resInMinutes() / 60 / 24 
+timeframe_divisor = f_resInDays()  // Use when doing moving averages
+// Query
+btc_close = request.security("BTCUSD", "D", close, gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)
+btc_supply = request.security("GLASSNODE:BTC_SUPPLY", "D", close)
+
+// Calc end of day supply for last bar assuming same increase as previous day (will miscalculate on halving days)
+btc_supply := barstate.islast ? 2 * btc_supply[1] - btc_supply[2] : btc_supply
+miningRevenue0000 = (btc_supply - btc_supply[1]) * btc_close
+
+//miningRevenue = request.security("GLASSNODE:BTC_", "D", close)
+ma3650000 = ta.sma(miningRevenue0000, math.round(365/timeframe_divisor))
+
+// Calculate PUELL multiple
+PUELL = miningRevenue0000 / ma3650000
+PUELL := ta.sma(PUELL, math.round(14/timeframe_divisor))
+// TPI
+//unum thresholds
+longthresh0ld = input.float(0.20)
+shortthresh0ld = input.float(-0.20)
+//rocheur thresholds
+positiveThreshold = input.float(0.15)
+negativeThreshold = input.float(-0.15)
+[RATIO1] = request.security("BINANCE:SOLETH", "", [ratio.x(longthresh0ld, shortthresh0ld)], barmerge.gaps_off,barmerge.lookahead_on)
+[RATIO2] = request.security("BINANCE:SOLBTC", "", [ratio.x(longthresh0ld, shortthresh0ld)], barmerge.gaps_off,barmerge.lookahead_on)
+[RATIO3] = request.security("BINANCE:ETHBTC", "", [ratio1.tpi(longthresh0ld, shortthresh0ld,positiveThreshold,negativeThreshold)], barmerge.gaps_off,barmerge.lookahead_on)
+[AYAN] = request.security("CRYPTO:SOLUSD", "1D", [soluni.tpi(longthresh0ld, shortthresh0ld)], barmerge.gaps_off,barmerge.lookahead_on)
+[ETHPURNATPI] = request.security("INDEX:ETHUSD", "1D", [ethpurna.tpi(miningRevenue0000,ma3650000)], barmerge.gaps_off,barmerge.lookahead_on)
+[BTCnoora] = request.security("" , "", [PURNARI.tpi(miningRevenue0000, ma3650000)], barmerge.gaps_off, barmerge.lookahead_on)
+
+//TPI = RATIO
+TPIBTCHAN = BTCnoora
+TPIETHPURNA = ETHPURNATPI
+
+// Define the assets
+ASSET1 = "BINANCE:SOLETH"
+ASSET2 = "BINANCE:SOLBTC"
+ASSET3 = "BINANCE:ETHBTC"
+ASSET4 = "CRYPTO:SOLUSD"
+ASSET5 = "INDEX:ETHUSD"
+ASSET6 = "INDEX:BTCUSD"
+
+// ETHBTC --> due to noisy chart on 1D TF
+timeframe_ethbtc = input.timeframe("2D", "Timeframe ETHBTC") 
+
+///𝘍𝘜𝘕𝘊𝘛𝘐𝘖𝘕𝘚///
+tracking() =>
+    [tpi_SOLETH, price_SOLETH] = request.security(ASSET1, "D", [RATIO1, close], barmerge.gaps_off, barmerge.lookahead_off)
+    [tpi_SOLBTC, price_SOLBTC] = request.security(ASSET2, "D", [RATIO2, close], barmerge.gaps_off, barmerge.lookahead_off)
+    [tpi_ETHBTC, price_ETHBTC] = request.security(ASSET3, timeframe_ethbtc, [RATIO3, close], barmerge.gaps_off, barmerge.lookahead_off)
+    [tpi_SOLUSDT, price_SOLUSDT] = request.security(ASSET4, "D", [AYAN, close], barmerge.gaps_off, barmerge.lookahead_off)
+    [tpi_ETHUSDT, price_ETHUSDT] = request.security(ASSET5, "D", [TPIETHPURNA, close], barmerge.gaps_off, barmerge.lookahead_off)
+    [tpi_BTCUSDT, price_BTCUSDT] = request.security(ASSET6, "D", [TPIBTCHAN, close], barmerge.gaps_off, barmerge.lookahead_off)
+    tpilong_SOLETH = tpi_SOLETH > longthresholdratio
+    tpishort_SOLETH = tpi_SOLETH < shortthreshold
+    var trend_SOLETH = 0
+    if tpilong_SOLETH
+        trend_SOLETH := 1
+    if tpishort_SOLETH
+        trend_SOLETH := -1 
+
+    tpilong_SOLBTC = tpi_SOLBTC > longthresholdratio
+    tpishort_SOLBTC = tpi_SOLBTC < shortthresholdratio
+    var trend_SOLBTC = 0
+    if tpilong_SOLBTC
+        trend_SOLBTC := 1
+    if tpishort_SOLBTC
+        trend_SOLBTC := -1 
+
+    tpilong_ETHBTC = tpi_ETHBTC > longthresholdratio
+    tpishort_ETHBTC = tpi_ETHBTC < shortthresholdratio
+    var trend_ETHBTC = 0
+    if tpilong_ETHBTC
+        trend_ETHBTC := 1
+    if tpishort_ETHBTC
+        trend_ETHBTC := -1 
+
+    tpilong_SOLUSDT = tpi_SOLUSDT > longthreshold
+    tpishort_SOLUSDT = tpi_SOLUSDT < shortthreshold
+    var trend_SOLUSDT = 0
+    if tpilong_SOLUSDT
+        trend_SOLUSDT := 1
+    if tpishort_SOLUSDT
+        trend_SOLUSDT := -1 
+
+    tpilong_ETHUSDT = tpi_ETHUSDT > longthreshold
+    tpishort_ETHUSDT = tpi_ETHUSDT < shortthreshold
+    var trend_ETHUSDT = 0
+    if tpilong_ETHUSDT
+        trend_ETHUSDT := 1
+    if tpishort_ETHUSDT
+        trend_ETHUSDT := -1 
+
+    tpilong_BTCUSDT = tpi_BTCUSDT > longthreshold
+    tpishort_BTCUSDT = tpi_BTCUSDT < shortthreshold
+    var trend_BTCUSDT = 0
+    if tpilong_BTCUSDT
+        trend_BTCUSDT := 1
+    if tpishort_BTCUSDT
+        trend_BTCUSDT := -1 
+    [price_SOLETH, tpi_SOLETH, trend_SOLETH, price_SOLBTC, tpi_SOLBTC, trend_SOLBTC, price_ETHBTC, tpi_ETHBTC, trend_ETHBTC, price_SOLUSDT, tpi_SOLUSDT, trend_SOLUSDT, price_ETHUSDT, tpi_ETHUSDT, trend_ETHUSDT, price_BTCUSDT, tpi_BTCUSDT, trend_BTCUSDT]
+
+// Get the prices and trends for each asset
+[SOLETHprice, tpi_SOLETH, SOLETHtrend, SOLBTCprice, tpi_SOLBTC, SOLBTCtrend, ETHBTCprice, tpi_ETHBTC, ETHBTCtrend, SOLUSDTprice, tpi_SOLUSDT, SOLUSDTtrend, ETHUSDTprice, tpi_ETHUSDT, ETHUSDTtrend, BTCUSDTprice, tpi_BTCUSDT, BTCUSDTtrend] = tracking()
+
+
+optimal_lev(src) =>
+    // Fixed lookback period and annual periods
+    lookback = input.int(55, "Opt Lev Lookback")
+    annual_periods = 30
+    // Calculate daily returns
+    returns = (src - src[1]) / src[1]
+    // Calculate mean daily return and volatility
+    mean_return = ta.sma(returns, lookback)
+    volatility = ta.stdev(returns, lookback)
+    // Calculate annualized return and volatility based on 30 periods
+    annualized_return = math.pow(1 + mean_return, annual_periods) - 1
+    annualized_volatility = volatility * math.sqrt(annual_periods)
+    // Calculate optimal leverage
+    optimal_leverage = na(annualized_volatility) or annualized_volatility == 0 ? 1 : annualized_return / math.pow(annualized_volatility, 2)
+    // Ensure leverage in the range -1 to 1 becomes 1
+    optimal_leverage := (optimal_leverage <= 1 and optimal_leverage >= -1) ? 1 : math.abs(optimal_leverage)
+    // Rounding the result for better readability
+    optimal_leverage := math.round(optimal_leverage, 1)
+    // Capping Optimal leverage
+    optimal_leverage := limit_opt_lev ? (optimal_leverage > max_lev ? max_lev : optimal_leverage) : optimal_leverage
+
+    optimal_leverage
+
+opt_lev_BTC = optimal_lev(BTCUSDTprice)
+opt_lev_ETH = optimal_lev(ETHUSDTprice)
+opt_lev_SOL = optimal_lev(SOLUSDTprice)
+
+
+
+///𝘔𝘈𝘐𝘕 𝘌𝘘𝘜𝘐𝘛𝘠𝘚///
+// Determine the dominant, mid, and weak assets based on trends
+var string dominantAsset = ""
+var string midAsset = ""
+var string weakAsset = ""
+
+if (SOLETHtrend == 1 and SOLBTCtrend == 1)
+    dominantAsset := "SOL"
+if (SOLETHtrend == -1 and SOLBTCtrend == -1)
+    weakAsset := "SOL"
+if (SOLETHtrend == 1 and SOLBTCtrend == -1)
+    midAsset := "SOL"
+if (SOLETHtrend == -1 and SOLBTCtrend == 1)
+    midAsset := "SOL"
+
+if (ETHBTCtrend == 1 and SOLETHtrend == -1)
+    dominantAsset := "ETH"
+if (ETHBTCtrend == -1 and SOLETHtrend == 1)
+    weakAsset := "ETH"
+if (ETHBTCtrend == 1 and SOLETHtrend == 1)
+    midAsset := "ETH"
+if (ETHBTCtrend == -1 and SOLETHtrend == -1)
+    midAsset := "ETH"
+
+if (ETHBTCtrend == -1 and SOLBTCtrend == -1)
+    dominantAsset := "BTC"
+if (ETHBTCtrend == 1 and SOLBTCtrend == 1)
+    weakAsset := "BTC"
+if (ETHBTCtrend == 1 and SOLBTCtrend == -1)
+    midAsset := "BTC"
+if (ETHBTCtrend == -1 and SOLBTCtrend == 1)
+    midAsset := "BTC"
+
+
+
+// split weighting
+
+split_weighting = input.float(1, "Split Weightings", step= 0.05, group="Options")
+
+
+// System Equity calculation
+
+// Store the winner in a series variable to access previous values
+var string winner_series = na
+winner_series := dominantAsset
+
+// Equity Curve Calculation
+
+// Initialize variables
+var float equityCurve = initial_capital
+var float last_equity = initial_capital
+var float prev_price_long = na
+var float current_price_long = na
+var bool in_position = false
+var string current_asset = na
+float position_return = 0.0
+
+getTpiScore(assetName) =>
+     assetName == "SOL" ? tpi_SOLUSDT :
+     assetName == "ETH" ? tpi_ETHUSDT :
+     assetName == "BTC" ? tpi_BTCUSDT : na
+
+getClosePrice(assetName) =>
+     assetName == "SOL" ? SOLUSDTprice :
+     assetName == "ETH" ? ETHUSDTprice :
+     assetName == "BTC" ? BTCUSDTprice : na
+
+getColor(assetName) =>
+     assetName == "SOL" ? color.rgb(198, 3, 251) :
+     assetName == "ETH" ? color.rgb(0, 135, 225) :
+     assetName == "BTC" ? color.rgb(251, 138, 0) : na    
+
+getOptLev(assetName) =>
+     assetName == "SOL" ? opt_lev_SOL :
+     assetName == "ETH" ? opt_lev_ETH :
+     assetName == "BTC" ? opt_lev_BTC : na
+
+//plot(getClosePrice(winner_series), "D", color.red)
+//plot(getTpiScore(winner_series), "D", color.red)
+// Calculate the RSI trend for the winner outside the condition
+trend_winner = getTpiScore(winner_series)
+
+if inDateRange
+    // Check if the winner has changed
+    new_winner = winner_series != current_asset
+
+    // Determine the long condition using the extracted trend value
+    long_condition = trend_winner >= 0
+
+    // Position management: Only execute if long_condition is true
+    if long_condition
+        // Check if there's a new winner or the current asset is not in position
+        if new_winner or not in_position
+
+            // Exit the previous position if already in position
+            if in_position
+                current_price_long := getClosePrice(current_asset)
+                position_return := nz((current_price_long / prev_price_long) - 1)
+                position_return := math.max(-1, position_return*getOptLev(current_asset))
+                equityCurve := last_equity * (1 + nz(position_return))
+                last_equity := equityCurve
+                
+            // Enter the new position
+            in_position := true
+            current_asset := winner_series
+            prev_price_long := getClosePrice(current_asset)
+            position_return := 0.0 // Reset return tracking for the new asset
+            // Plot buy signal
+            //plotshape(in_position, title="Buy", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny)
+
+        else if in_position
+            // Update equity while in the same position
+            current_price_long := getClosePrice(current_asset)
+            position_return := nz((current_price_long / prev_price_long) - 1)
+            position_return := math.max(-1, position_return*getOptLev(current_asset))
+            equityCurve := last_equity * (1 + nz(position_return))
+            last_equity := equityCurve
+            prev_price_long := current_price_long // Update previous price
+            position_return := 0.0 // Reset position return
+
+    else if in_position and not long_condition
+        // Exit the current position if the long condition is no longer true
+        current_price_long := getClosePrice(current_asset)
+        position_return := nz((current_price_long / prev_price_long) - 1)
+        position_return := math.max(-1, position_return*getOptLev(current_asset))
+        equityCurve := last_equity * (1 + nz(position_return))
+        last_equity := equityCurve
+        in_position := false
+        current_asset := na
+        prev_price_long := na
+        // Plot sell signal
+        //plotshape(not in_position, title="Sell", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+        position_return := 0.0 // Reset position return after sell
+
+    else
+        // Not in position and long_condition is false, just maintain equity curve
+        equityCurve := last_equity
+
+
+
+/// 𝘊𝘖𝘓𝘖𝘙𝘚 & 𝘗𝘓𝘖𝘛𝘚 ///color_plot_strat IS THE COLOR OF DOMINANT TICKER
+
+
+
+// Colors for equity curve (HODL)
+
+
+color_equity = getTpiScore(winner_series) >= 0 ? getColor(winner_series) : #ffffff
+
+
+
+/// 𝘊𝘖𝘓𝘖𝘙𝘚 & 𝘗𝘓𝘖𝘛𝘚 ///color_plot_strat IS THE COLOR OF DOMINANT TICKER
+
+// Colors for equity curve (SYSTEM)
+color color_plot_strat = na
+if (dominantAsset == "SOL" and SOLUSDTtrend == 1)
+    color_plot_strat := color.rgb(198, 3, 251)
+else if (dominantAsset == "ETH" and ETHUSDTtrend == 1)
+    color_plot_strat := color.rgb(0, 135, 225)
+else if (dominantAsset == "BTC" and BTCUSDTtrend == 1)
+    color_plot_strat := color.rgb(251, 138, 0)
+else
+    color_plot_strat := color.silver
+
+
+
+// plot the equity curves
+
+plot(equityCurve, title="𝘞𝘦𝘪𝘨𝘩𝘵𝘦𝘥 𝘌𝘲𝘶𝘪𝘵𝘺 𝘊𝘶𝘳𝘷𝘦", color=color_plot_strat, linewidth=2)
+
+//plot(SOLETH_Equity, title="ASSET1 Equity Curve", color=color.purple, linewidth=2)
+//plot(SOLBTC_Equity, title="ASSET2 Equity Curve", color=#ffcb3b, linewidth=2)
+//plot(ETHBTC_Equity, title="ASSET3 Equity Curve", color=color.red, linewidth=2)
+
+
+// Function to get the symbol name without the exchange, if you want to plot ratio equity curvces
+getSymbolName(asset) =>
+    parts = str.split(asset, ":")
+    array.size(parts) > 1 ? array.get(parts, 1) : asset
+
+// Add labels to each equity curve at the last bar
+if (bar_index == last_bar_index)
+    //label.new(bar_index, SOLETH_Equity, text=getSymbolName(ASSET1), color=color.purple, textcolor=color.white, style=label.style_label_left, size=size.small)
+    //label.new(bar_index, SOLBTC_Equity, text=getSymbolName(ASSET2), color=#ffcb3b, textcolor=color.white, style=label.style_label_left, size=size.small)
+    //label.new(bar_index, ETHBTC_Equity, text=getSymbolName(ASSET3), color=color.red, textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(bar_index, equityCurve, text="𝘚𝘗𝘖𝘛 𝘚𝘠𝘚𝘛𝘌𝘔", color=color_plot_strat, textcolor=color.white, style=label.style_label_left, size=size.normal)
+
+
+
+
+
+
+/// 𝘊𝘈𝘓𝘊𝘜𝘓𝘈𝘛𝘌 𝘗𝘌𝘙𝘍𝘖𝘙𝘔𝘈𝘕𝘊𝘌 𝘙𝘈𝘛𝘐𝘖𝘚 ///
+// Daily return calculation
+float daily_return = na(equityCurve[1]) ? na : equityCurve / equityCurve[1] - 1
+
+// Initialize arrays to store returns
+var returns_array = array.new_float(0)
+var negative_returns_array = array.new_float(0)
+var positive_returns_array = array.new_float(0)
+
+// Collect returns into arrays
+if (time >= backtestStartDate)
+    array.unshift(returns_array, daily_return)
+    if daily_return <= 0.0
+        array.unshift(negative_returns_array, daily_return)
+    else
+        array.unshift(positive_returns_array, daily_return)
+
+// Calculate metrics
+standard_deviation = array.stdev(returns_array)
+negative_returns_standard_deviation = array.stdev(negative_returns_array)
+mean = array.avg(returns_array)
+positive_area = array.sum(positive_returns_array)
+negative_area = array.sum(negative_returns_array) * (-1)
+
+// Timeframe factor for annualizing
+timeframe_factor = switch timeframe.period
+    "M" => 365 / 30
+    "10D" => 365 / 10
+    "9D" => 365 / 9
+    "8D" => 365 / 8
+    "W" => 365 / 7
+    "6D" => 365 / 6
+    "5D" => 365 / 5
+    "4D" => 365 / 4
+    "3D" => 365 / 3
+    "2D" => 365 / 2
+    "D" => 365
+    "720" => 365 * 2
+    "480" => 365 * 3
+    "240" => 365 * 6
+    "60" => 365 * 24
+    => 365
+
+sharpe = mean != 0 and standard_deviation != 0 ? math.round(mean / standard_deviation * math.sqrt(timeframe_factor), 2) : na
+sortino = mean != 0 and negative_returns_standard_deviation != 0 ? math.round(mean / negative_returns_standard_deviation * math.sqrt(timeframe_factor), 2) : na
+omega = positive_area != 0 and negative_area != 0 ? math.round(positive_area / negative_area, 2) : na
+
+// Calculate max equity and drawdown
+var float max_equity = na
+var float max_drawdown = na
+
+max_equity := na(max_equity) ? equityCurve : math.max(max_equity, equityCurve)
+max_drawdown := na(max_drawdown) ? 0 : math.min(max_drawdown, equityCurve / max_equity - 1)
+
+// Calculate net profit
+net_profit = (equityCurve - initial_capital) / initial_capital * 100
+// Plot metrics
+//plot(sharpe, title="Sharpe Ratio", color=color.blue, linewidth=2)
+//plot(sortino, title="Sortino Ratio", color=color.red, linewidth=2)
+//plot(omega, title="Omega Ratio", color=color.green, linewidth=2)
+
+/// Backtest Performance of TPIs
+[equityDrawdown1 , intradeDrawdown1 , sharpe1 , sortino1 , omega1 , totalTrades1 , winRate1 , profitFactor1 , maxConsecutiveWins1 , maxConsecutiveLosses1 , netProfit1 , equity1 ,score1 ,price1 ] = request.security("INDEX:BTCUSD","",           x.EQ(TPIBTCHAN,close,startYear,startMonth),barmerge.gaps_off,barmerge.lookahead_off)
+[equityDrawdown2 , intradeDrawdown2 , sharpe2 , sortino2 , omega2 , totalTrades2 , winRate2 , profitFactor2 , maxConsecutiveWins2 , maxConsecutiveLosses2 , netProfit2 , equity2 ,score2 ,price2 ] = request.security("INDEX:ETHUSD","",           x.EQ(TPIETHPURNA,close,startYear,startMonth),barmerge.gaps_off,barmerge.lookahead_off)
+[equityDrawdown3 , intradeDrawdown3 , sharpe3 , sortino3 , omega3 , totalTrades3 , winRate3 , profitFactor3 , maxConsecutiveWins3 , maxConsecutiveLosses3 , netProfit3 , equity3 ,score3 ,price3 ] = request.security("BINANCE:SOLUSDT","",          x.EQ(AYAN,close,startYear,startMonth),barmerge.gaps_off,barmerge.lookahead_off)
+
+//Performance Table
+
+var table Buy_Hold = table.new(position = position.bottom_left, columns = 6, rows = 6, bgcolor =  color.rgb(0, 0, 0, 100) , frame_color = color.rgb(198, 3, 251), border_color = color.rgb(198, 3, 251), border_width = 0, frame_width = 3)
+table.cell(Buy_Hold,0,0,"𝘙𝘢𝘵𝘪𝘰 𝘛𝘗𝘐 𝘔𝘦𝘵𝘳𝘪𝘤𝘴:", text_color =x.theme(THEME,0))
+table.merge_cells(Buy_Hold,0,0,2,0)
+table.cell(Buy_Hold,0,1, "𝘕𝘦𝘵 𝘗𝘳𝘰𝘧𝘪𝘵 %:", text_color = x.theme(THEME,0), bgcolor =color.new(#000000, 100))
+table.cell(Buy_Hold,1,1, text = str.tostring(math.round(net_profit,2)) + "%", text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,0,2, text = "𝘌𝘲𝘶𝘪𝘵𝘺 𝘔𝘢𝘹 𝘋𝘋:", text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,1,2, text = str.tostring(math.round(max_drawdown*100,2)) + "%", text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,0,3, text = "𝘚𝘩𝘢𝘳𝘱𝘦:", text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,1,3, text = str.tostring(math.round(sharpe,2)), text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,0,4, text = "𝘚𝘰𝘳𝘵𝘪𝘯𝘰:", text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,1,4, text = str.tostring(math.round(sortino,2)), text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,0,5, text = "𝘖𝘮𝘦𝘨𝘢:", text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+table.cell(Buy_Hold,1,5, text = str.tostring(math.round(omega,2)), text_color = x.theme(THEME,0), bgcolor = color.new(#000000, 100))
+
+///𝘔𝘈𝘐𝘕 𝘛𝘈𝘉𝘓𝘌 ///
+
+var table AllocationTPI = table.new(position = position.middle_right, columns = 10, rows = 20, bgcolor =  color.rgb(54, 58, 69, 100))
+table.set_border_width(AllocationTPI, 0)
+table.set_frame_width(AllocationTPI, 4)
+table.set_frame_color(AllocationTPI, color.rgb(0, 0, 0))
+table.set_border_color(AllocationTPI, color.rgb(70, 65, 65))
+
+table.cell(AllocationTPI,0,0,"𝘔𝘈𝘑𝘖𝘙𝘚 𝘙𝘚𝘗𝘚",text_color = color.rgb(0, 0, 0),bgcolor = color.rgb(252, 252, 252),text_size = size.large)
+table.merge_cells(AllocationTPI,0,0,5,0)
+table.cell(AllocationTPI,0,2 ,"𝘉𝘛𝘊",text_color=color.rgb(0, 0, 0), bgcolor=color.rgb(251, 138, 0))
+table.cell(AllocationTPI,0,3 ,"𝘌𝘛𝘏",text_color=color.rgb(0, 0, 0), bgcolor=color.rgb(0, 135, 225))
+table.cell(AllocationTPI,0,4 ,"𝘚𝘖𝘓",text_color=color.rgb(0, 0, 0), bgcolor=color.rgb(198, 3, 251))
+table.cell(AllocationTPI,0,5 ,"𝘛𝘖𝘛𝘈𝘓",text_color=x.theme(THEME,0), bgcolor=color.rgb(197, 3, 251, 100))
+table.cell(AllocationTPI,0,6 ,"𝘓𝘌𝘝",text_color=x.theme(THEME,0), bgcolor=color.rgb(197, 3, 251, 100))
+
+
+table.cell(AllocationTPI,0,8, "𝘚𝘠𝘚𝘛𝘌𝘔:",text_color=x.theme(THEME,0), bgcolor= color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI,0,9, "𝘏𝘖𝘋𝘓:",text_color=x.theme(THEME,0), bgcolor= color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI,0,11, "𝘚𝘐𝘎𝘕𝘈𝘓:",text_color=x.theme(THEME,0), bgcolor= color.rgb(0, 0, 0, 100))
+//table.merge_cells(AllocationTPI,0,6,5,6)
+table.merge_cells(AllocationTPI,0,7,5,7)
+table.merge_cells(AllocationTPI,0,10,5,10)
+
+///
+table.cell(AllocationTPI,0,1 ,"𝘛𝘪𝘤𝘬𝘦𝘳𝘴:",text_color = x.theme(THEME,0))
+table.cell(AllocationTPI,1,1,"𝘞𝘦𝘪𝘨𝘩𝘵𝘪𝘯𝘨𝘴:",text_color = x.theme(THEME,0))
+table.cell(AllocationTPI,2,1 ,"𝘚𝘰𝘳𝘵𝘪𝘯𝘰:",text_color = x.theme(THEME,0))
+table.cell(AllocationTPI,3,1 ,"𝘚𝘩𝘢𝘳𝘱𝘦:",text_color = x.theme(THEME,0))
+table.cell(AllocationTPI,4,1 ,"𝘖𝘮𝘦𝘨𝘢:",text_color = x.theme(THEME,0))
+table.cell(AllocationTPI,5,1 ,"𝘔𝘢𝘹 𝘋𝘳𝘢𝘸𝘥𝘰𝘸𝘯%:",text_color = x.theme(THEME,0))
+
+///
+table.cell(AllocationTPI, 2,8,str.tostring(sortino,"#.##"),text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 3,8,str.tostring(sharpe,"#.##"),text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 4,8,str.tostring(omega,"#.##"),text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 5,8,str.tostring(math.round(max_drawdown*100,2)) + "%",text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+
+table.cell(AllocationTPI, 2,9,str.tostring(sortino,"#.##"),text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 3,9,str.tostring(sharpe,"#.##"),text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 4,9,str.tostring(omega,"#.##"),text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 5,9,str.tostring(math.round(max_drawdown*100,2)) + "%",text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+
+///
+table.cell(AllocationTPI, 2,2,str.tostring(sortino ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 3,2,str.tostring(sharpe ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 4,2,str.tostring(omega ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 5,2,str.tostring(intradeDrawdown1 ,"#.##") + "%",text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+
+table.cell(AllocationTPI, 2,3,str.tostring(sortino ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 3,3,str.tostring(sharpe ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 4,3,str.tostring(omega ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 5,3,str.tostring(intradeDrawdown2,"#.##") + "%",text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+
+table.cell(AllocationTPI, 2,4,str.tostring(sortino ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 3,4,str.tostring(sharpe ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 4,4,str.tostring(omega ,"#.##"),text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 5,4,str.tostring(intradeDrawdown3 ,"#.##") + "%",text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+
+///
+SOLallocation = dominantAsset == "SOL" ? (split_weighting * 100) : midAsset == "SOL" ? ((1 - split_weighting) * 100) : 0
+ETHERallocation = dominantAsset == "ETH" ? (split_weighting * 100) : midAsset == "ETH" ? ((1 - split_weighting) * 100) : 0
+BTCallocation = dominantAsset == "BTC" ? (split_weighting * 100) : midAsset == "BTC" ? ((1 - split_weighting) * 100) : 0
+
+totalw = SOLallocation + ETHERallocation + BTCallocation 
+Cash = 100- totalw
+
+///
+table.cell(AllocationTPI, 1, 2, str.tostring(BTCallocation, "#.#") + "%", text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 1, 3, str.tostring(ETHERallocation, "#.#") + "%", text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 1, 4, str.tostring(SOLallocation, "#.#") + "%", text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 1, 5, str.tostring(Cash, "#.#") + "%", text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+table.cell(AllocationTPI, 1, 6, str.tostring(getOptLev(current_asset), "#.##") + "x", text_color=color_plot_strat, text_size = size.normal, bgcolor = color.rgb(0, 0, 0, 100))
+////
+string signal_table = na
+if (dominantAsset == "SOL" and SOLUSDTtrend == 1)
+    signal_table := "𝘚𝘖𝘓𝘈𝘕𝘈"
+else if (dominantAsset == "ETH" and ETHUSDTtrend == 1)
+    signal_table := "𝘌𝘛𝘏𝘌𝘙𝘌𝘜𝘔"
+else if (dominantAsset == "BTC" and BTCUSDTtrend == 1)
+    signal_table := "𝘉𝘐𝘛𝘊𝘖𝘐𝘕"
+else
+    signal_table := "𝘊𝘈𝘚𝘏"
+
+table.merge_cells(AllocationTPI,0,11,5,11)
+table.merge_cells(AllocationTPI,0,12,5,12)
+table.cell(AllocationTPI, 0, 12, signal_table, text_color=x.theme(THEME,0), text_size = size.normal, bgcolor = color_plot_strat)
+
+/// <Mean Reverting & Trending Market> //
+bgcoloron = input.bool(true, title = "activate background color for sell areas?(BTC ONLY)")
+bardanger = input.bool(false, title = "activate barcolor for sell areas?(BTC ONLY)")
+trendrevsmooth = 3
+// Source
+trendrevSRC = hlc3
+
+// Sampling Period
+per = 225
+// Visualization Mode
+vmode = 2
+
+//Deviations
+dev1 = ta.dev(trendrevSRC, per)
+dev2 = ta.dev(trendrevSRC, per / 2)
+dev4 = ta.dev(trendrevSRC, per / 4)
+dev8 = ta.dev(trendrevSRC, per / 8)
+dev16 = ta.dev(trendrevSRC, per / 16)
+
+//Deviation Accumulation
+c1 = math.sum(dev1, per)
+c2 = math.sum(dev2, per / 2)
+c4 = math.sum(dev4, per / 4)
+c8 = math.sum(dev8, per / 8)
+c16 = math.sum(dev16, per / 16)
+
+//Max Values
+cmax1 = c1 >= c2 and c1 >= c4 and c1 >= c8 and c1 >= c16 ? 1 : 0
+cmax2 = c2 >= c1 and c2 >= c4 and c2 >= c8 and c2 >= c16 ? 1 : 0
+cmax4 = c4 >= c1 and c4 >= c2 and c4 >= c8 and c4 >= c16 ? 1 : 0
+cmax8 = c8 >= c1 and c8 >= c2 and c8 >= c4 and c8 >= c16 ? 1 : 0
+cmax16 = c16 >= c1 and c16 >= c2 and c16 >= c4 and c16 >= c8 ? 1 : 0
+max = cmax1 ? c1 : cmax2 ? c2 : cmax4 ? c4 : cmax8 ? c8 : cmax16 ? c16 : 0
+
+//Min Values
+cmin1 = c1 <= c2 and c1 <= c4 and c1 <= c8 and c1 <= c16 ? c1 : 0
+cmin2 = c2 <= c1 and c2 <= c4 and c2 <= c8 and c2 <= c16 ? c2 : 0
+cmin4 = c4 <= c1 and c4 <= c2 and c4 <= c8 and c4 <= c16 ? c4 : 0
+cmin8 = c8 <= c1 and c8 <= c2 and c8 <= c4 and c8 <= c16 ? c8 : 0
+cmin16 = c16 <= c1 and c16 <= c2 and c16 <= c4 and c16 <= c8 ? c16 : 0
+min = cmin1 ? c1 : cmin2 ? c2 : cmin4 ? c4 : cmin8 ? c8 : cmin16 ? c16 : 0
+
+//Widest Spread
+spr = max - min
+
+//Rescaled Range
+rs = spr / ta.stdev(trendrevSRC, per)
+
+//Hurst Exponent Estimate
+h = math.log(rs) / math.log(bar_index)
+he = vmode == 2 ? h : na
+
+//Threshold
+th = 0.5
+
+//Signals
+stabilizing = h > th and h > h[1] ? 1 : 0
+destabilizing = h > th and h < h[1] ? 1 : 0
+chaos_increase = h < th and h < h[1] ? 1 : 0
+chaos_decrease = h < th and h > h[1] ? 1 : 0
+
+var int Hemp = na
+
+if stabilizing
+    Hemp :=1
+else if destabilizing
+    Hemp :=-1
+
+trendrevSRC_adf   = close 
+lookback  = 30
+nLag      = 0     
+conf      = "90%" 
+
+matrix_get(A, i, j, nrows) =>
+    array.get(A, i + nrows * j)
+
+matrix_set(A, value, i, j, nrows) =>
+    array.set(A, i + nrows * j, value)
+    A
+
+transpose(A, nrows, ncolumns) =>
+    float[]  AT = array.new_float(nrows * ncolumns, 0)
+    for i = 0 to nrows - 1
+        for j = 0 to ncolumns - 1
+            matrix_set(AT, matrix_get(A, i, j, nrows), j, i, ncolumns)
+    AT
+
+multiply(A, B, nrowsA, ncolumnsA, ncolumnsB) =>
+    float[]      C = array.new_float(nrowsA * ncolumnsB, 0)
+    int     nrowsB = ncolumnsA
+    float elementC = 0.0
+    for i = 0 to nrowsA - 1
+        for j = 0 to ncolumnsB - 1
+            elementC := 0
+            for k = 0 to ncolumnsA - 1
+                elementC += matrix_get(A, i, k, nrowsA) * matrix_get(B, k, j, nrowsB)
+            matrix_set(C, elementC, i, j, nrowsA)
+    C
+
+vnorm(X) =>
+    int   n    = array.size(X)
+    float norm = 0.0
+    for i = 0 to n - 1
+        norm += math.pow(array.get(X, i), 2)
+    math.sqrt(norm)
+
+qr_diag(A, nrows, ncolumns) =>
+    float[] Q = array.new_float(nrows * ncolumns, 0)
+    float[] R = array.new_float(ncolumns * ncolumns, 0)
+    float[] a = array.new_float(nrows, 0)
+    float[] q = array.new_float(nrows, 0)
+    float   r = 0.0
+    float aux = 0.0
+
+    for i = 0 to nrows - 1
+        array.set(a, i, matrix_get(A, i, 0, nrows))
+    r := vnorm(a)
+
+    matrix_set(R, r, 0, 0, ncolumns)
+    for i = 0 to nrows - 1
+        matrix_set(Q, array.get(a, i) / r, i, 0, nrows)
+    if ncolumns != 1
+
+        for k = 1 to ncolumns - 1
+            for i = 0 to nrows - 1
+                array.set(a, i, matrix_get(A, i, k, nrows))
+            for j = 0 to k - 1 by 1
+
+                r := 0
+                for i = 0 to nrows - 1
+                    r += matrix_get(Q, i, j, nrows) * array.get(a, i)
+                matrix_set(R, r, j, k, ncolumns)
+
+                for i = 0 to nrows - 1
+                    aux := array.get(a, i) - r * matrix_get(Q, i, j, nrows)
+                    array.set(a, i, aux)
+
+            r := vnorm(a)
+            matrix_set(R, r, k, k, ncolumns)
+            for i = 0 to nrows - 1
+                matrix_set(Q, array.get(a, i) / r, i, k, nrows)
+    [Q, R]
+
+pinv(A, nrows, ncolumns) =>
+    [Q, R]     = qr_diag(A, nrows, ncolumns)
+    float[] QT = transpose(Q, nrows, ncolumns)
+
+    var   Rinv = array.new_float(ncolumns * ncolumns, 0)
+    float    r = 0.0
+    matrix_set(Rinv, 1 / matrix_get(R, 0, 0, ncolumns), 0, 0, ncolumns)
+    if ncolumns != 1
+        for j = 1 to ncolumns - 1
+            for i = 0 to j - 1
+                r := 0.0
+                for k = i to j - 1
+                    r += matrix_get(Rinv, i, k, ncolumns) * matrix_get(R, k, j, ncolumns)
+                matrix_set(Rinv, r, i, j, ncolumns)
+            for k = 0 to j - 1
+                matrix_set(Rinv, -matrix_get(Rinv, k, j, ncolumns) / matrix_get(R, j, j, ncolumns), k, j, ncolumns)
+            matrix_set(Rinv, 1 / matrix_get(R, j, j, ncolumns), j, j, ncolumns)
+
+    float[] Ainv = multiply(Rinv, QT, ncolumns, ncolumns, nrows)
+    Ainv
+
+adftest(a, nLag, conf) =>
+    if nLag >= array.size(a)/2 - 2
+        runtime.error("ADF: Maximum lag must be less than (Length/2 - 2)")
+    int   nobs = array.size(a)-nLag-1
+
+    float[]  y = array.new_float(na)
+    float[]  x = array.new_float(na)
+    float[] x0 = array.new_float(na)
+
+    for i = 0 to nobs-1
+        array.push( y, array.get(a,i)-array.get(a,i+1))           
+        array.push( x, array.get(a,i+1))                          
+        array.push(x0, 1.0)                                       
+
+    float[] X = array.copy(x)
+    int     M = 2
+    X := array.concat(X, x0)
+
+
+    if nLag > 0
+        for n = 1 to nLag
+            float[] xl = array.new_float(na)
+            for i = 0 to nobs-1
+                array.push(xl, array.get(a,i+n)-array.get(a,i+n+1))  
+            X   := array.concat(X, xl)
+            M   += 1
+
+    float[] c      = pinv(X, nobs, M)
+    float[] coeff  = multiply(c, y, M, nobs, 1)
+
+    float[] Yhat   = multiply(X,coeff,nobs,M,1)
+    float   meanX  = array.avg(x)
+    float   sum1   = 0.0            
+    float   sum2   = 0.0            
+    for i = 0 to nobs-1
+        sum1  += math.pow(array.get(y,i) - array.get(Yhat,i), 2)/(nobs-M)
+        sum2  += math.pow(array.get(x,i) - meanX, 2)
+    float   SE = math.sqrt(sum1/sum2)
+
+    float  adf = array.get(coeff,0) /SE
+ 
+    float crit  = switch
+        conf == "90%" => -2.56677 - 1.5384/nobs -  2.809/nobs/nobs
+        conf == "95%" => -2.86154 - 2.8903/nobs -  4.234/nobs/nobs - 40.040/nobs/nobs/nobs
+        conf == "99%" => -3.43035 - 6.5393/nobs - 16.786/nobs/nobs - 79.433/nobs/nobs/nobs
+
+    [adf, crit, nobs]
+
+float[] a = array.new_float(na)
+for i = 0 to lookback - 1
+    array.push(a, trendrevSRC_adf[i])
+
+[tauADF, crit, nobs] = adftest(a, nLag, conf)
+
+threshold = -2
+averageperiod = 16
+
+var int test = na
+if tauADF <= threshold
+    test := 1
+else if tauADF >= threshold
+    test := -1
+
+[p,m,q]=ta.dmi(14,14)
+var int state = na
+if q > 35.96
+    state := -1
+else if q < 35.96
+    state  := +1
+
+
+finalema = ta.ema(((Hemp + Hemp + test + test + state)/5), trendrevsmooth)
+
+initialhma = ta.hma(((Hemp + test + test) / 3), trendrevsmooth)
+
+// Clamping the value of final between -1 and 1
+finalhma = math.max(math.min(initialhma, 1), -1)
+
+finalfinal = ((finalhma + finalema + finalema)/3) * -1
+//int finalfinal = na
+//if kindafinalfinal > 0
+//    finalfinal := 1
+//else if kindafinalfinal < 0
+//    finalfinal := -1
+
+trendORrev =  finalfinal < 0 ? "𝘔𝘦𝘢𝘯 𝘙𝘦𝘷𝘦𝘳𝘵𝘪𝘯𝘨" : "𝘛𝘳𝘦𝘯𝘥𝘪𝘯𝘨"
+var color trendORrevCOL = na
+if trendORrev == "𝘛𝘳𝘦𝘯𝘥𝘪𝘯𝘨"
+    trendORrevCOL := color.rgb(0, 152, 212)
+else if trendORrev == "𝘔𝘦𝘢𝘯 𝘙𝘦𝘷𝘦𝘳𝘵𝘪𝘯𝘨" 
+    trendORrevCOL := color.rgb(251, 163, 0)
+if bgcoloron == true
+    if chaos_increase ==  true
+        trendORrev := "𝘗𝘦𝘢𝘬/𝘋𝘢𝘯𝘨𝘦𝘳"
+        if bardanger ? true : na
+            trendORrevCOL := color.red
+
+/// [Plots>
+bgcolor(trendORrev == "𝘔𝘦𝘢𝘯 𝘙𝘦𝘷𝘦𝘳𝘵𝘪𝘯𝘨" ?#fba3001a : na )
+bgcolor(trendORrev == "𝘛𝘳𝘦𝘯𝘥𝘪𝘯𝘨" ? #0098d41a : na )
+bgcolor(trendORrev == "𝘗𝘦𝘢𝘬/𝘋𝘢𝘯𝘨𝘦𝘳" ? color.rgb(255, 0, 0, 90) : na )
+
+///
+var table MRTR = table.new(position = position.top_center, columns = 20, rows = 30, bgcolor =  color.rgb(255, 255, 255))
+
+table.set_border_width(MRTR, 0)
+table.set_frame_width(MRTR, 3)
+table.set_frame_color(MRTR, color.rgb(0, 0, 0))
+table.set_border_color(MRTR, color.rgb(70, 65, 65))
+
+table.cell(MRTR,0,0,"𝘔𝘈𝘙𝘒𝘌𝘛 𝘚𝘛𝘈𝘛𝘌",text_color = color.black,bgcolor = color.rgb(255,255,255,100),text_size = size.normal)
+//>
+table.merge_cells(MRTR,0,0,3,0)
+table.cell(MRTR,0,1,"𝘊𝘶𝘳𝘳𝘦𝘯𝘵:",text_size = size.normal,text_color = color.black,width = 6)
+table.cell(MRTR,1,1,"1 𝘉𝘢𝘳𝘴:",  text_size = size.normal,text_color = color.black,width = 6)
+table.cell(MRTR,2,1,"2 𝘉𝘢𝘳𝘴:", text_size = size.normal,text_color = color.black,width = 6)
+table.cell(MRTR,3,1,"3 𝘉𝘢𝘳𝘴:", text_size = size.normal,text_color = color.black,width = 6)
+
+// MARKET STATE
+table.cell(table_id = MRTR, column = 0, row = 2, text = trendORrev[0], text_color=trendORrev[0] == "𝘛𝘳𝘦𝘯𝘥𝘪𝘯𝘨" ? color.rgb(0, 152, 212) :trendORrev[0] == "𝘔𝘦𝘢𝘯 𝘙𝘦𝘷𝘦𝘳𝘵𝘪𝘯𝘨" ? color.rgb(251, 163, 0): color.red, text_size = size.normal,text_halign=text.align_center)
+table.cell(table_id = MRTR, column = 1, row = 2, text = trendORrev[1], text_color=trendORrev[1] == "𝘛𝘳𝘦𝘯𝘥𝘪𝘯𝘨" ? color.rgb(0, 152, 212) :trendORrev[1] == "𝘔𝘦𝘢𝘯 𝘙𝘦𝘷𝘦𝘳𝘵𝘪𝘯𝘨" ? color.rgb(251, 163, 0): color.red, text_size = size.normal,text_halign=text.align_center)
+table.cell(table_id = MRTR, column = 2, row = 2, text = trendORrev[2], text_color=trendORrev[2] == "𝘛𝘳𝘦𝘯𝘥𝘪𝘯𝘨" ? color.rgb(0, 152, 212) :trendORrev[2] == "𝘔𝘦𝘢𝘯 𝘙𝘦𝘷𝘦𝘳𝘵𝘪𝘯𝘨" ? color.rgb(251, 163, 0): color.red, text_size = size.normal,text_halign=text.align_center)
+table.cell(table_id = MRTR, column = 3, row = 2, text = trendORrev[3], text_color=trendORrev[3] == "𝘛𝘳𝘦𝘯𝘥𝘪𝘯𝘨" ? color.rgb(0, 152, 212) :trendORrev[3] == "𝘔𝘦𝘢𝘯 𝘙𝘦𝘷𝘦𝘳𝘵𝘪𝘯𝘨" ? color.rgb(251, 163, 0): color.red, text_size = size.normal,text_halign=text.align_center)

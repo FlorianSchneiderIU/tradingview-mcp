@@ -1,0 +1,1027 @@
+//@version=6
+import TradingView/ta/12 as taLib
+
+strategy(
+    title                   = "Crypto Donchian Regime Strategy MajDiv",
+    shorttitle              = "CryDnMaj",
+    overlay                 = true,
+    pyramiding              = 0,
+    initial_capital         = 10000,
+    default_qty_type        = strategy.percent_of_equity,
+    default_qty_value       = 10,
+    commission_type         = strategy.commission.percent,
+    commission_value        = 0.06,
+    slippage                = 2,
+    calc_on_every_tick      = false,
+    process_orders_on_close = false,
+    max_bars_back           = 3000,
+    dynamic_requests        = true
+)
+
+grp_exec = "Execution"
+i_use_session = input.bool(false, "Use UTC session filter", group = grp_exec)
+i_session = input.session("0000-2359", "Session (UTC)", group = grp_exec)
+i_cooldown_bars = input.int(2, "Cooldown bars", minval = 0, maxval = 100, group = grp_exec)
+i_allow_longs = input.bool(true, "Enable longs", group = grp_exec)
+i_allow_shorts = input.bool(true, "Enable shorts", group = grp_exec)
+
+grp_regime = "Regime"
+i_use_htf = input.bool(true, "Use HTF regime", group = grp_regime)
+i_htf = input.timeframe("240", "HTF timeframe", group = grp_regime)
+i_htf_fast_len = input.int(50, "HTF fast EMA", minval = 10, maxval = 200, group = grp_regime)
+i_htf_slow_len = input.int(200, "HTF slow EMA", minval = 50, maxval = 400, group = grp_regime)
+i_fast_ema_len = input.int(20, "Chart fast EMA", minval = 5, maxval = 100, group = grp_regime)
+i_slow_ema_len = input.int(50, "Chart slow EMA", minval = 10, maxval = 200, group = grp_regime)
+i_use_adx = input.bool(true, "Use ADX filter", group = grp_regime)
+i_adx_len = input.int(14, "ADX length", minval = 5, maxval = 50, group = grp_regime)
+i_min_adx = input.float(20.0, "Min ADX", minval = 5.0, maxval = 50.0, step = 0.5, group = grp_regime)
+
+grp_macro = "Macro Confluence"
+i_use_macro = input.bool(false, "Use BTC.D / USDT.D / coin-BTC confluence", group = grp_macro)
+i_macro_tf = input.timeframe("240", "Macro timeframe", group = grp_macro)
+i_macro_fast_len = input.int(20, "Macro fast EMA", minval = 5, maxval = 100, group = grp_macro)
+i_macro_slow_len = input.int(50, "Macro slow EMA", minval = 10, maxval = 200, group = grp_macro)
+i_macro_min_score = input.int(2, "Minimum confluence score", minval = 1, maxval = 3, group = grp_macro)
+i_use_btc_d = input.bool(true, "Use BTC.D", group = grp_macro)
+i_btc_d_symbol = input.symbol("CRYPTOCAP:BTC.D", "BTC.D symbol", group = grp_macro)
+i_use_usdt_d = input.bool(true, "Use USDT.D", group = grp_macro)
+i_usdt_d_symbol = input.symbol("CRYPTOCAP:USDT.D", "USDT.D symbol", group = grp_macro)
+i_use_rel_strength = input.bool(true, "Use coin/BTC relative strength", group = grp_macro)
+i_rel_symbol_override = input.string("", "coin/BTC override (blank = auto)", group = grp_macro)
+
+grp_quality = "Trend Quality"
+i_use_chop_filter = input.bool(true, "Use CHOP filter", group = grp_quality)
+i_chop_len = input.int(18, "CHOP length", minval = 5, maxval = 100, group = grp_quality)
+i_max_chop = input.float(56.0, "Max CHOP", minval = 20.0, maxval = 70.0, step = 0.5, group = grp_quality)
+
+grp_channel = "HTF Swing Channel"
+i_use_htf_channel = input.bool(false, "Plot HTF swing channel", group = grp_channel)
+i_channel_htf = input.timeframe("240", "Channel timeframe", group = grp_channel)
+i_channel_left = input.int(2, "Pivot left bars", minval = 1, maxval = 10, group = grp_channel)
+i_channel_right = input.int(2, "Pivot right bars", minval = 1, maxval = 10, group = grp_channel)
+i_channel_signal_mode = input.string("Off", "Channel signal mode", options = ["Off", "Reject Only", "Combine", "Auto Regime"], group = grp_channel)
+i_plot_channel_mid = input.bool(true, "Plot channel midline", group = grp_channel)
+i_use_channel_slope_filter = input.bool(false, "Use channel slope filter", group = grp_channel)
+i_use_channel_mid_reclaim = input.bool(false, "Use channel midline reclaim filter", group = grp_channel)
+i_mid_reclaim_lookback = input.int(8, "Midline reclaim lookback", minval = 1, maxval = 50, group = grp_channel)
+i_mid_reclaim_touch_atr = input.float(0.25, "Midline touch tolerance (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_channel)
+i_channel_reject_touch_atr = input.float(0.20, "Boundary reject touch tolerance (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_channel)
+i_channel_reject_pierce_atr = input.float(0.35, "Boundary reject max pierce (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_channel)
+i_channel_reject_close_pos = input.float(0.60, "Boundary reject close position", minval = 0.50, maxval = 0.95, step = 0.05, group = grp_channel)
+i_channel_min_width_atr = input.float(2.0, "Min channel width (ATR)", minval = 0.0, maxval = 20.0, step = 0.25, group = grp_channel)
+i_channel_min_chop = input.float(58.0, "Channel reject min CHOP", minval = 20.0, maxval = 80.0, step = 0.5, group = grp_channel)
+i_channel_use_adx_filter = input.bool(false, "Use ADX filter for channel rejects", group = grp_channel)
+i_channel_confirm_break = input.bool(true, "Confirm reject by breaking reject candle", group = grp_channel)
+i_channel_confirm_bars = input.int(3, "Reject confirm valid bars", minval = 1, maxval = 10, group = grp_channel)
+i_use_channel_room_filter = input.bool(false, "Use channel room filter", group = grp_channel)
+i_min_channel_room_atr = input.float(1.0, "Min room to boundary (ATR)", minval = 0.0, maxval = 10.0, step = 0.25, group = grp_channel)
+
+grp_signal = "Signal"
+i_entry_mode = input.string("Immediate", "Entry mode", options = ["Immediate", "Retest", "Pullback Limit"], group = grp_signal)
+i_entry_len = input.int(30, "Entry channel length", minval = 5, maxval = 100, group = grp_signal)
+i_exit_len = input.int(15, "Exit channel length", minval = 3, maxval = 60, group = grp_signal)
+i_breakout_buffer_atr = input.float(0.05, "Breakout buffer (ATR)", minval = 0.0, maxval = 1.0, step = 0.01, group = grp_signal)
+i_close_pos_min = input.float(0.60, "Min close position", minval = 0.50, maxval = 0.95, step = 0.05, group = grp_signal)
+i_require_fast_side = input.bool(true, "Require close on fast EMA side", group = grp_signal)
+i_retest_valid_bars = input.int(6, "Retest valid bars", minval = 1, maxval = 30, group = grp_signal)
+i_retest_touch_atr = input.float(0.15, "Retest touch tolerance (ATR)", minval = 0.0, maxval = 1.0, step = 0.05, group = grp_signal)
+i_retest_pierce_atr = input.float(0.35, "Retest max pierce (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_signal)
+
+grp_risk = "Risk"
+i_initial_atr_stop = input.float(2.2, "Initial ATR stop", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_risk)
+i_trail_atr_stop = input.float(3.0, "Trailing ATR stop", minval = 0.5, maxval = 6.0, step = 0.1, group = grp_risk)
+i_max_hold_bars = input.int(120, "Max bars in trade", minval = 5, maxval = 300, group = grp_risk)
+
+grp_entropy = "Entropy Regime"
+i_use_entropy_regime = input.bool(true, "Use entropy in auto regime", group = grp_entropy)
+i_entropy_len = input.int(24, "Entropy length", minval = 5, maxval = 200, group = grp_entropy)
+i_breakout_max_entropy = input.float(0.95, "Breakout max entropy", minval = 0.0, maxval = 1.0, step = 0.01, group = grp_entropy)
+i_reject_min_entropy = input.float(0.98, "Reject min entropy", minval = 0.0, maxval = 1.0, step = 0.01, group = grp_entropy)
+
+grp_pdfib = "PD + Fibonacci"
+i_use_pd_fib_filter = input.bool(true, "Use premium/discount + fib confluence", group = grp_pdfib)
+i_pd_fib_apply_to = input.string("Reject Only", "Apply PD/Fib to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_pdfib)
+i_pd_tf1 = input.timeframe("60", "PD/Fib timeframe 1", group = grp_pdfib)
+i_pd_tf2 = input.timeframe("240", "PD/Fib timeframe 2", group = grp_pdfib)
+i_pd_left = input.int(2, "Pivot left bars", minval = 1, maxval = 10, group = grp_pdfib)
+i_pd_right = input.int(2, "Pivot right bars", minval = 1, maxval = 10, group = grp_pdfib)
+i_pd_discount_max = input.float(0.50, "Discount max position", minval = 0.05, maxval = 0.50, step = 0.01, group = grp_pdfib)
+i_pd_premium_min = input.float(0.50, "Premium min position", minval = 0.50, maxval = 0.95, step = 0.01, group = grp_pdfib)
+i_use_fib_price_zone = input.bool(true, "Use fib price zones", group = grp_pdfib)
+i_long_fib_min = input.float(0.21, "Long fib min position", minval = 0.0, maxval = 0.50, step = 0.01, group = grp_pdfib)
+i_long_fib_max = input.float(0.40, "Long fib max position", minval = 0.0, maxval = 0.60, step = 0.01, group = grp_pdfib)
+i_short_fib_min = input.float(0.60, "Short fib min position", minval = 0.40, maxval = 1.0, step = 0.01, group = grp_pdfib)
+i_short_fib_max = input.float(0.79, "Short fib max position", minval = 0.50, maxval = 1.0, step = 0.01, group = grp_pdfib)
+i_use_fib_time = input.bool(true, "Use fib swing timing", group = grp_pdfib)
+i_fib_time_tolerance = input.int(2, "Fib timing tolerance (HTF bars)", minval = 0, maxval = 10, group = grp_pdfib)
+i_pd_min_tf_align = input.int(2, "Min TF premium/discount alignments", minval = 1, maxval = 2, group = grp_pdfib)
+i_pd_min_total_score = input.int(4, "Min total PD/fib score", minval = 1, maxval = 6, group = grp_pdfib)
+i_plot_pd_tf1_eq = input.bool(false, "Plot TF1 equilibrium", group = grp_pdfib)
+
+grp_majdiv = "Majors Divergence"
+i_use_majors_div_filter = input.bool(false, "Use majors divergence filter", group = grp_majdiv)
+i_majors_div_apply_to = input.string("Breakout Only", "Apply majors divergence to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_majdiv)
+i_majors_div_tf = input.timeframe("60", "Majors divergence timeframe", group = grp_majdiv)
+i_majors_div_fast_len = input.int(20, "Peer fast EMA", minval = 5, maxval = 100, group = grp_majdiv)
+i_majors_div_slow_len = input.int(50, "Peer slow EMA", minval = 10, maxval = 200, group = grp_majdiv)
+i_majors_div_roc_len = input.int(3, "Peer ROC length", minval = 1, maxval = 50, group = grp_majdiv)
+i_majors_div_min_confirm = input.int(1, "Min aligned peers", minval = 1, maxval = 3, group = grp_majdiv)
+i_majors_div_max_opposition = input.int(1, "Max opposing peers", minval = 0, maxval = 3, group = grp_majdiv)
+i_peer_btc_symbol = input.symbol("BINANCE:BTCUSDT", "BTC peer", group = grp_majdiv)
+i_peer_eth_symbol = input.symbol("BINANCE:ETHUSDT", "ETH peer", group = grp_majdiv)
+i_peer_sol_symbol = input.symbol("BINANCE:SOLUSDT", "SOL peer", group = grp_majdiv)
+i_peer_bnb_symbol = input.symbol("BINANCE:BNBUSDT", "BNB peer", group = grp_majdiv)
+i_plot_majors_breadth = input.bool(false, "Plot peer breadth", group = grp_majdiv)
+
+grp_flow = "Flow Confirmation"
+i_use_flow_filter = input.bool(false, "Use volume/delta flow filter", group = grp_flow)
+i_flow_apply_to = input.string("Breakout Only", "Apply flow filter to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_flow)
+i_flow_ltf = input.timeframe("1", "Flow lower timeframe", group = grp_flow)
+i_flow_detect_mode = input.string("Volume OR Delta", "Flow detection mode", options = ["Volume Only", "Delta Only", "Volume + Delta", "Volume OR Delta"], group = grp_flow)
+i_flow_consensus = input.string("Majority", "Flow consensus", options = ["Any", "Majority", "All"], group = grp_flow)
+i_flow_min_cluster = input.string("Medium", "Min flow cluster", options = ["Small", "Medium", "Big"], group = grp_flow)
+i_flow_short_len = input.int(20, "Short percentile window", minval = 5, maxval = 200, group = grp_flow)
+i_flow_mid_len = input.int(50, "Mid percentile window", minval = 10, maxval = 300, group = grp_flow)
+i_flow_long_len = input.int(100, "Long percentile window", minval = 20, maxval = 500, group = grp_flow)
+i_require_flow_delta_side = input.bool(true, "Require delta side agreement", group = grp_flow)
+i_require_flow_candle_side = input.bool(false, "Require candle side agreement", group = grp_flow)
+i_plot_flow_cluster = input.bool(false, "Plot flow cluster", group = grp_flow)
+
+grp_cvd = "CVD Divergence"
+i_use_cvd_div_filter = input.bool(false, "Use CVD divergence filter", group = grp_cvd)
+i_cvd_div_apply_to = input.string("Reject Only", "Apply CVD divergence to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_cvd)
+i_cvd_div_left = input.int(3, "Price pivot left bars", minval = 1, maxval = 20, group = grp_cvd)
+i_cvd_div_right = input.int(3, "Price pivot right bars", minval = 1, maxval = 20, group = grp_cvd)
+i_cvd_div_valid_bars = input.int(20, "Divergence valid bars", minval = 1, maxval = 100, group = grp_cvd)
+i_plot_cvd_div = input.bool(false, "Plot CVD divergence markers", group = grp_cvd)
+
+grp_swing = "Swing Structure"
+i_use_swing_filter = input.bool(false, "Use swing room filter", group = grp_swing)
+i_swing_apply_to = input.string("All Signals", "Apply swing filter to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_swing)
+i_swing_left = input.int(3, "Pivot left bars", minval = 1, maxval = 20, group = grp_swing)
+i_swing_right = input.int(3, "Pivot right bars", minval = 1, maxval = 20, group = grp_swing)
+i_min_swing_room_atr = input.float(1.2, "Min room to nearest structure (ATR)", minval = 0.0, maxval = 10.0, step = 0.1, group = grp_swing)
+i_use_swing_target = input.bool(false, "Use nearest structure as target", group = grp_swing)
+i_plot_swing_levels = input.bool(false, "Plot nearest swing levels", group = grp_swing)
+
+grp_exhaust = "Exhaustion Guard"
+i_use_exhaust_filter = input.bool(false, "Use exhaustion guard", group = grp_exhaust)
+i_exhaust_apply_to = input.string("Breakout Only", "Apply exhaustion guard to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_exhaust)
+i_exhaust_rsi_len = input.int(22, "RSI length", minval = 5, maxval = 100, group = grp_exhaust)
+i_exhaust_long_level = input.float(70.0, "Bearish exhaustion level", minval = 50.0, maxval = 95.0, step = 1.0, group = grp_exhaust)
+i_exhaust_short_level = input.float(30.0, "Bullish exhaustion level", minval = 5.0, maxval = 50.0, step = 1.0, group = grp_exhaust)
+i_exhaust_valid_bars = input.int(4, "Exhaustion valid bars", minval = 1, maxval = 20, group = grp_exhaust)
+
+grp_vwap_ext = "VWAP Extension"
+i_use_vwap_ext_filter = input.bool(false, "Use VWAP extension filter", group = grp_vwap_ext)
+i_vwap_ext_apply_to = input.string("Breakout Only", "Apply VWAP extension filter to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_vwap_ext)
+i_vwap_long_max_stdev = input.float(2.0, "Max long extension (stdev)", minval = 0.25, maxval = 10.0, step = 0.25, group = grp_vwap_ext)
+i_vwap_short_max_stdev = input.float(2.0, "Max short extension (stdev)", minval = 0.25, maxval = 10.0, step = 0.25, group = grp_vwap_ext)
+i_plot_session_vwap = input.bool(false, "Plot session VWAP", group = grp_vwap_ext)
+
+grp_bbpct = "BB Percent Guard"
+i_use_bbpct_filter = input.bool(false, "Use BB percent guard", group = grp_bbpct)
+i_bbpct_apply_to = input.string("Breakout Only", "Apply BB percent guard to", options = ["All Signals", "Reject Only", "Breakout Only"], group = grp_bbpct)
+i_bbpct_len = input.int(20, "BB length", minval = 5, maxval = 200, group = grp_bbpct)
+i_bbpct_mult = input.float(2.0, "BB multiplier", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_bbpct)
+i_bbpct_long_max = input.float(95.0, "Max BB percent for longs", minval = 50.0, maxval = 120.0, step = 1.0, group = grp_bbpct)
+i_bbpct_short_min = input.float(5.0, "Min BB percent for shorts", minval = -20.0, maxval = 50.0, step = 1.0, group = grp_bbpct)
+i_plot_bbpct = input.bool(false, "Plot BB percent", group = grp_bbpct)
+
+grp_entry_quality = "Entry Quality"
+i_use_breakout_quality = input.bool(false, "Use breakout quality filter", group = grp_entry_quality)
+i_min_breakout_excess_long_atr = input.float(0.10, "Min long breakout excess (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_entry_quality)
+i_min_breakout_excess_short_atr = input.float(0.10, "Min short breakout excess (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_entry_quality)
+i_use_extension_veto = input.bool(true, "Use anti-chase extension veto", group = grp_entry_quality)
+i_long_extension_mode = input.string("Both", "Long extension trigger", options = ["VWAP", "BBPct", "Either", "Both"], group = grp_entry_quality)
+i_short_extension_mode = input.string("Both", "Short extension trigger", options = ["VWAP", "BBPct", "Either", "Both"], group = grp_entry_quality)
+i_long_extension_vwap = input.float(2.25, "Long max VWAP stdev", minval = 0.25, maxval = 10.0, step = 0.25, group = grp_entry_quality)
+i_short_extension_vwap = input.float(1.75, "Short max VWAP stdev", minval = 0.25, maxval = 10.0, step = 0.25, group = grp_entry_quality)
+i_long_extension_bbpct = input.float(97.0, "Long max BB percent", minval = 50.0, maxval = 120.0, step = 1.0, group = grp_entry_quality)
+i_short_extension_bbpct = input.float(3.0, "Short min BB percent", minval = -20.0, maxval = 50.0, step = 1.0, group = grp_entry_quality)
+
+grp_early = "Early Follow-Through"
+i_use_early_follow_through = input.bool(false, "Use early follow-through exit", group = grp_early)
+i_early_apply_to = input.string("Breakout Only", "Apply early exit to", options = ["All Trades", "Breakout Only", "Reject Only"], group = grp_early)
+i_early_review_bars = input.int(3, "Review bars", minval = 1, maxval = 20, group = grp_early)
+i_early_min_mfe_atr = input.float(0.75, "Min favorable excursion by review (ATR)", minval = 0.0, maxval = 5.0, step = 0.05, group = grp_early)
+i_early_exit_on_adverse_close1 = input.bool(false, "Exit if first close is adverse", group = grp_early)
+i_early_adverse_close_atr = input.float(0.0, "Adverse close threshold (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_early)
+
+grp_protect = "Protected Stop"
+i_use_be_protect = input.bool(false, "Use break-even / profit lock", group = grp_protect)
+i_be_apply_to = input.string("Breakout Only", "Apply protected stop to", options = ["All Trades", "Breakout Only", "Reject Only"], group = grp_protect)
+i_be_trigger_atr = input.float(1.0, "Break-even trigger (ATR)", minval = 0.0, maxval = 10.0, step = 0.1, group = grp_protect)
+i_be_offset_atr = input.float(0.0, "Break-even offset (ATR)", minval = -1.0, maxval = 5.0, step = 0.05, group = grp_protect)
+i_use_profit_lock = input.bool(false, "Lock profit after larger move", group = grp_protect)
+i_profit_lock_trigger_atr = input.float(2.0, "Profit-lock trigger (ATR)", minval = 0.0, maxval = 20.0, step = 0.1, group = grp_protect)
+i_profit_lock_atr = input.float(0.5, "Profit-lock amount (ATR)", minval = 0.0, maxval = 10.0, step = 0.05, group = grp_protect)
+
+grp_limit = "Pullback Limit"
+i_limit_pullback_frac = input.float(0.35, "Pullback fraction toward breakout", minval = 0.05, maxval = 0.95, step = 0.05, group = grp_limit)
+i_limit_valid_bars = input.int(3, "Limit valid bars", minval = 1, maxval = 20, group = grp_limit)
+
+f_clamp01(_value) =>
+    math.max(0.0, math.min(1.0, _value))
+
+f_range_pos(_low, _high, _price) =>
+    _range = _high - _low
+    _range > syminfo.mintick ? f_clamp01((_price - _low) / _range) : na
+
+f_tf_bars_between(_t1, _t2, _tf) =>
+    _seconds = timeframe.in_seconds(_tf)
+    not na(_t1) and not na(_t2) and _seconds > 0 ? math.abs(_t1 - _t2) / (_seconds * 1000.0) : na
+
+f_near_fib_count(_bars, _tol) =>
+    not na(_bars) and (
+         math.abs(_bars - 5.0) <= _tol or
+         math.abs(_bars - 8.0) <= _tol or
+         math.abs(_bars - 13.0) <= _tol or
+         math.abs(_bars - 21.0) <= _tol or
+         math.abs(_bars - 34.0) <= _tol or
+         math.abs(_bars - 55.0) <= _tol or
+         math.abs(_bars - 89.0) <= _tol or
+         math.abs(_bars - 144.0) <= _tol)
+
+f_consensus(bool _short_hit, bool _mid_hit, bool _long_hit, string _mode) =>
+    _hits = (_short_hit ? 1 : 0) + (_mid_hit ? 1 : 0) + (_long_hit ? 1 : 0)
+    _mode == "Any" ? _hits >= 1 : _mode == "All" ? _hits >= 3 : _hits >= 2
+
+f_detect_flow(bool _vol_hit, bool _delta_hit, string _mode) =>
+    _mode == "Volume Only" ? _vol_hit : _mode == "Delta Only" ? _delta_hit : _mode == "Volume + Delta" ? (_vol_hit and _delta_hit) : (_vol_hit or _delta_hit)
+
+f_mode_hit(bool _vwap_hit, bool _bb_hit, string _mode) =>
+    _mode == "VWAP" ? _vwap_hit : _mode == "BBPct" ? _bb_hit : _mode == "Either" ? (_vwap_hit or _bb_hit) : (_vwap_hit and _bb_hit)
+
+f_nearest_above(array<float> _levels, float _price) =>
+    float _nearest = na
+    _count = array.size(_levels)
+    if _count > 0
+        for i = 0 to _count - 1
+            _level = array.get(_levels, i)
+            if _level > _price and (na(_nearest) or _level < _nearest)
+                _nearest := _level
+    _nearest
+
+f_nearest_below(array<float> _levels, float _price) =>
+    float _nearest = na
+    _count = array.size(_levels)
+    if _count > 0
+        for i = 0 to _count - 1
+            _level = array.get(_levels, i)
+            if _level < _price and (na(_nearest) or _level > _nearest)
+                _nearest := _level
+    _nearest
+
+in_session = not i_use_session or not na(time(timeframe.period, i_session, "UTC"))
+atr = ta.atr(14)
+bar_range = math.max(high - low, syminfo.mintick)
+close_pos = (close - low) / bar_range
+ema_fast = ta.ema(close, i_fast_ema_len)
+ema_slow = ta.ema(close, i_slow_ema_len)
+entry_rsi = ta.rsi(close, i_exhaust_rsi_len)
+[_, _, adx] = ta.dmi(i_adx_len, i_adx_len)
+true_range = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+chop_range = math.max(ta.highest(high, i_chop_len) - ta.lowest(low, i_chop_len), syminfo.mintick)
+chop = 100.0 * math.log10(math.sum(true_range, i_chop_len) / chop_range) / math.log10(i_chop_len)
+up_bar = close > close[1] ? 1.0 : 0.0
+down_bar = close < close[1] ? 1.0 : 0.0
+up_prob = ta.sma(up_bar, i_entropy_len)
+down_prob = ta.sma(down_bar, i_entropy_len)
+dir_total = math.max(up_prob + down_prob, 1e-10)
+up_prob_norm = up_prob / dir_total
+down_prob_norm = down_prob / dir_total
+entropy_term_up = up_prob_norm > 0 ? -up_prob_norm * math.log(up_prob_norm) : 0.0
+entropy_term_down = down_prob_norm > 0 ? -down_prob_norm * math.log(down_prob_norm) : 0.0
+dir_entropy = (entropy_term_up + entropy_term_down) / math.log(2.0)
+session_vwap_anchor = timeframe.change("D")
+[session_vwap_raw, session_vwap_upper, _] = ta.vwap(hlc3, session_vwap_anchor, 1)
+session_vwap = session_vwap_raw
+session_vwap_stdev = not na(session_vwap_upper) and not na(session_vwap_raw) ? session_vwap_upper - session_vwap_raw : na
+session_vwap_dev = not na(session_vwap_stdev) and session_vwap_stdev > syminfo.mintick ? (close - session_vwap) / session_vwap_stdev : 0.0
+bb_basis = ta.sma(close, i_bbpct_len)
+bb_dev = i_bbpct_mult * ta.stdev(close, i_bbpct_len)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+bb_pct = bb_upper > bb_lower ? 100.0 * (close - bb_lower) / (bb_upper - bb_lower) : 50.0
+is_btc_chart = str.upper(syminfo.basecurrency) == "BTC"
+current_base = str.upper(syminfo.basecurrency)
+rel_symbol = str.length(i_rel_symbol_override) > 0 ? i_rel_symbol_override : (is_btc_chart ? "" : syminfo.prefix + ":" + syminfo.basecurrency + "BTC")
+
+// Completed HTF bars only.
+htf_close = request.security(syminfo.tickerid, i_htf, close[1], lookahead = barmerge.lookahead_off)
+htf_fast = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_htf_fast_len)[1], lookahead = barmerge.lookahead_off)
+htf_slow = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_htf_slow_len)[1], lookahead = barmerge.lookahead_off)
+
+// Completed macro bars only.
+btc_d_close = request.security(i_btc_d_symbol, i_macro_tf, close[1], lookahead = barmerge.lookahead_off)
+btc_d_fast = request.security(i_btc_d_symbol, i_macro_tf, ta.ema(close, i_macro_fast_len)[1], lookahead = barmerge.lookahead_off)
+btc_d_slow = request.security(i_btc_d_symbol, i_macro_tf, ta.ema(close, i_macro_slow_len)[1], lookahead = barmerge.lookahead_off)
+usdt_d_close = request.security(i_usdt_d_symbol, i_macro_tf, close[1], lookahead = barmerge.lookahead_off)
+usdt_d_fast = request.security(i_usdt_d_symbol, i_macro_tf, ta.ema(close, i_macro_fast_len)[1], lookahead = barmerge.lookahead_off)
+usdt_d_slow = request.security(i_usdt_d_symbol, i_macro_tf, ta.ema(close, i_macro_slow_len)[1], lookahead = barmerge.lookahead_off)
+rel_close = str.length(rel_symbol) > 0 ? request.security(rel_symbol, i_macro_tf, close[1], lookahead = barmerge.lookahead_off) : na
+rel_fast = str.length(rel_symbol) > 0 ? request.security(rel_symbol, i_macro_tf, ta.ema(close, i_macro_fast_len)[1], lookahead = barmerge.lookahead_off) : na
+rel_slow = str.length(rel_symbol) > 0 ? request.security(rel_symbol, i_macro_tf, ta.ema(close, i_macro_slow_len)[1], lookahead = barmerge.lookahead_off) : na
+
+// Completed HTF bars only for swing-channel detection.
+channel_htf_time = request.security(syminfo.tickerid, i_channel_htf, time[1], lookahead = barmerge.lookahead_off)
+channel_htf_high = request.security(syminfo.tickerid, i_channel_htf, high[1], lookahead = barmerge.lookahead_off)
+channel_htf_low = request.security(syminfo.tickerid, i_channel_htf, low[1], lookahead = barmerge.lookahead_off)
+
+// Confirmed pivot ranges only from completed bars for premium/discount and fib confluence.
+pd1_pivot_high = request.security(syminfo.tickerid, i_pd_tf1, ta.pivothigh(high, i_pd_left, i_pd_right), lookahead = barmerge.lookahead_off)
+pd1_pivot_low = request.security(syminfo.tickerid, i_pd_tf1, ta.pivotlow(low, i_pd_left, i_pd_right), lookahead = barmerge.lookahead_off)
+pd1_pivot_high_time = request.security(syminfo.tickerid, i_pd_tf1, not na(ta.pivothigh(high, i_pd_left, i_pd_right)) ? time[i_pd_right] : na, lookahead = barmerge.lookahead_off)
+pd1_pivot_low_time = request.security(syminfo.tickerid, i_pd_tf1, not na(ta.pivotlow(low, i_pd_left, i_pd_right)) ? time[i_pd_right] : na, lookahead = barmerge.lookahead_off)
+pd2_pivot_high = request.security(syminfo.tickerid, i_pd_tf2, ta.pivothigh(high, i_pd_left, i_pd_right), lookahead = barmerge.lookahead_off)
+pd2_pivot_low = request.security(syminfo.tickerid, i_pd_tf2, ta.pivotlow(low, i_pd_left, i_pd_right), lookahead = barmerge.lookahead_off)
+pd2_pivot_high_time = request.security(syminfo.tickerid, i_pd_tf2, not na(ta.pivothigh(high, i_pd_left, i_pd_right)) ? time[i_pd_right] : na, lookahead = barmerge.lookahead_off)
+pd2_pivot_low_time = request.security(syminfo.tickerid, i_pd_tf2, not na(ta.pivotlow(low, i_pd_left, i_pd_right)) ? time[i_pd_right] : na, lookahead = barmerge.lookahead_off)
+
+pd1_last_high = ta.valuewhen(not na(pd1_pivot_high), pd1_pivot_high, 0)
+pd1_last_low = ta.valuewhen(not na(pd1_pivot_low), pd1_pivot_low, 0)
+pd1_last_high_time = ta.valuewhen(not na(pd1_pivot_high_time), pd1_pivot_high_time, 0)
+pd1_last_low_time = ta.valuewhen(not na(pd1_pivot_low_time), pd1_pivot_low_time, 0)
+pd2_last_high = ta.valuewhen(not na(pd2_pivot_high), pd2_pivot_high, 0)
+pd2_last_low = ta.valuewhen(not na(pd2_pivot_low), pd2_pivot_low, 0)
+pd2_last_high_time = ta.valuewhen(not na(pd2_pivot_high_time), pd2_pivot_high_time, 0)
+pd2_last_low_time = ta.valuewhen(not na(pd2_pivot_low_time), pd2_pivot_low_time, 0)
+
+pd1_pos = f_range_pos(pd1_last_low, pd1_last_high, close)
+pd2_pos = f_range_pos(pd2_last_low, pd2_last_high, close)
+pd1_eq = not na(pd1_last_high) and not na(pd1_last_low) ? (pd1_last_high + pd1_last_low) * 0.5 : na
+pd2_eq = not na(pd2_last_high) and not na(pd2_last_low) ? (pd2_last_high + pd2_last_low) * 0.5 : na
+pd1_swing_bars = f_tf_bars_between(pd1_last_high_time, pd1_last_low_time, i_pd_tf1)
+pd2_swing_bars = f_tf_bars_between(pd2_last_high_time, pd2_last_low_time, i_pd_tf2)
+
+// Completed peer-major bars only for cross-major divergence.
+btc_peer_close = request.security(i_peer_btc_symbol, i_majors_div_tf, close[1], lookahead = barmerge.lookahead_off)
+btc_peer_fast = request.security(i_peer_btc_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_fast_len)[1], lookahead = barmerge.lookahead_off)
+btc_peer_slow = request.security(i_peer_btc_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_slow_len)[1], lookahead = barmerge.lookahead_off)
+btc_peer_roc = request.security(i_peer_btc_symbol, i_majors_div_tf, ta.roc(close, i_majors_div_roc_len)[1], lookahead = barmerge.lookahead_off)
+eth_peer_close = request.security(i_peer_eth_symbol, i_majors_div_tf, close[1], lookahead = barmerge.lookahead_off)
+eth_peer_fast = request.security(i_peer_eth_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_fast_len)[1], lookahead = barmerge.lookahead_off)
+eth_peer_slow = request.security(i_peer_eth_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_slow_len)[1], lookahead = barmerge.lookahead_off)
+eth_peer_roc = request.security(i_peer_eth_symbol, i_majors_div_tf, ta.roc(close, i_majors_div_roc_len)[1], lookahead = barmerge.lookahead_off)
+sol_peer_close = request.security(i_peer_sol_symbol, i_majors_div_tf, close[1], lookahead = barmerge.lookahead_off)
+sol_peer_fast = request.security(i_peer_sol_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_fast_len)[1], lookahead = barmerge.lookahead_off)
+sol_peer_slow = request.security(i_peer_sol_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_slow_len)[1], lookahead = barmerge.lookahead_off)
+sol_peer_roc = request.security(i_peer_sol_symbol, i_majors_div_tf, ta.roc(close, i_majors_div_roc_len)[1], lookahead = barmerge.lookahead_off)
+bnb_peer_close = request.security(i_peer_bnb_symbol, i_majors_div_tf, close[1], lookahead = barmerge.lookahead_off)
+bnb_peer_fast = request.security(i_peer_bnb_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_fast_len)[1], lookahead = barmerge.lookahead_off)
+bnb_peer_slow = request.security(i_peer_bnb_symbol, i_majors_div_tf, ta.ema(close, i_majors_div_slow_len)[1], lookahead = barmerge.lookahead_off)
+bnb_peer_roc = request.security(i_peer_bnb_symbol, i_majors_div_tf, ta.roc(close, i_majors_div_roc_len)[1], lookahead = barmerge.lookahead_off)
+
+regime_bull = (not i_use_htf or (htf_close >= htf_slow and htf_fast >= htf_slow)) and ema_fast >= ema_slow
+regime_bear = (not i_use_htf or (htf_close <= htf_slow and htf_fast <= htf_slow)) and ema_fast <= ema_slow
+adx_ok = not i_use_adx or adx >= i_min_adx
+chop_ok = not i_use_chop_filter or chop <= i_max_chop
+channel_chop_ok = not i_use_chop_filter or chop >= i_channel_min_chop
+channel_adx_ok = not i_channel_use_adx_filter or not i_use_adx or adx >= i_min_adx
+entropy_breakout_regime_ok = not i_use_entropy_regime or dir_entropy <= i_breakout_max_entropy
+entropy_reject_regime_ok = not i_use_entropy_regime or dir_entropy >= i_reject_min_entropy
+pd1_discount_ok = not na(pd1_pos) and pd1_pos <= i_pd_discount_max
+pd2_discount_ok = not na(pd2_pos) and pd2_pos <= i_pd_discount_max
+pd1_premium_ok = not na(pd1_pos) and pd1_pos >= i_pd_premium_min
+pd2_premium_ok = not na(pd2_pos) and pd2_pos >= i_pd_premium_min
+pd1_long_fib_ok = not na(pd1_pos) and pd1_pos >= i_long_fib_min and pd1_pos <= i_long_fib_max
+pd2_long_fib_ok = not na(pd2_pos) and pd2_pos >= i_long_fib_min and pd2_pos <= i_long_fib_max
+pd1_short_fib_ok = not na(pd1_pos) and pd1_pos >= i_short_fib_min and pd1_pos <= i_short_fib_max
+pd2_short_fib_ok = not na(pd2_pos) and pd2_pos >= i_short_fib_min and pd2_pos <= i_short_fib_max
+pd1_fib_time_ok = i_use_fib_time and f_near_fib_count(pd1_swing_bars, i_fib_time_tolerance)
+pd2_fib_time_ok = i_use_fib_time and f_near_fib_count(pd2_swing_bars, i_fib_time_tolerance)
+long_pd_tf_score = (pd1_discount_ok ? 1 : 0) + (pd2_discount_ok ? 1 : 0)
+short_pd_tf_score = (pd1_premium_ok ? 1 : 0) + (pd2_premium_ok ? 1 : 0)
+long_pd_total_score = long_pd_tf_score + (i_use_fib_price_zone ? ((pd1_long_fib_ok ? 1 : 0) + (pd2_long_fib_ok ? 1 : 0)) : 0) + (i_use_fib_time ? ((pd1_fib_time_ok ? 1 : 0) + (pd2_fib_time_ok ? 1 : 0)) : 0)
+short_pd_total_score = short_pd_tf_score + (i_use_fib_price_zone ? ((pd1_short_fib_ok ? 1 : 0) + (pd2_short_fib_ok ? 1 : 0)) : 0) + (i_use_fib_time ? ((pd1_fib_time_ok ? 1 : 0) + (pd2_fib_time_ok ? 1 : 0)) : 0)
+pd_fib_long_ok = not i_use_pd_fib_filter or (long_pd_tf_score >= i_pd_min_tf_align and long_pd_total_score >= i_pd_min_total_score)
+pd_fib_short_ok = not i_use_pd_fib_filter or (short_pd_tf_score >= i_pd_min_tf_align and short_pd_total_score >= i_pd_min_total_score)
+pd_fib_breakout_long_ok = i_pd_fib_apply_to == "Reject Only" ? true : pd_fib_long_ok
+pd_fib_breakout_short_ok = i_pd_fib_apply_to == "Reject Only" ? true : pd_fib_short_ok
+pd_fib_reject_long_ok = i_pd_fib_apply_to == "Breakout Only" ? true : pd_fib_long_ok
+pd_fib_reject_short_ok = i_pd_fib_apply_to == "Breakout Only" ? true : pd_fib_short_ok
+btc_peer_avail = current_base != "BTC" and not na(btc_peer_close) and not na(btc_peer_fast) and not na(btc_peer_slow) and not na(btc_peer_roc)
+eth_peer_avail = current_base != "ETH" and not na(eth_peer_close) and not na(eth_peer_fast) and not na(eth_peer_slow) and not na(eth_peer_roc)
+sol_peer_avail = current_base != "SOL" and not na(sol_peer_close) and not na(sol_peer_fast) and not na(sol_peer_slow) and not na(sol_peer_roc)
+bnb_peer_avail = current_base != "BNB" and not na(bnb_peer_close) and not na(bnb_peer_fast) and not na(bnb_peer_slow) and not na(bnb_peer_roc)
+btc_peer_bull = btc_peer_avail and btc_peer_close >= btc_peer_fast and btc_peer_fast >= btc_peer_slow and btc_peer_roc > 0
+btc_peer_bear = btc_peer_avail and btc_peer_close <= btc_peer_fast and btc_peer_fast <= btc_peer_slow and btc_peer_roc < 0
+eth_peer_bull = eth_peer_avail and eth_peer_close >= eth_peer_fast and eth_peer_fast >= eth_peer_slow and eth_peer_roc > 0
+eth_peer_bear = eth_peer_avail and eth_peer_close <= eth_peer_fast and eth_peer_fast <= eth_peer_slow and eth_peer_roc < 0
+sol_peer_bull = sol_peer_avail and sol_peer_close >= sol_peer_fast and sol_peer_fast >= sol_peer_slow and sol_peer_roc > 0
+sol_peer_bear = sol_peer_avail and sol_peer_close <= sol_peer_fast and sol_peer_fast <= sol_peer_slow and sol_peer_roc < 0
+bnb_peer_bull = bnb_peer_avail and bnb_peer_close >= bnb_peer_fast and bnb_peer_fast >= bnb_peer_slow and bnb_peer_roc > 0
+bnb_peer_bear = bnb_peer_avail and bnb_peer_close <= bnb_peer_fast and bnb_peer_fast <= bnb_peer_slow and bnb_peer_roc < 0
+majors_peer_total = (btc_peer_avail ? 1 : 0) + (eth_peer_avail ? 1 : 0) + (sol_peer_avail ? 1 : 0) + (bnb_peer_avail ? 1 : 0)
+majors_peer_bull_count = (btc_peer_bull ? 1 : 0) + (eth_peer_bull ? 1 : 0) + (sol_peer_bull ? 1 : 0) + (bnb_peer_bull ? 1 : 0)
+majors_peer_bear_count = (btc_peer_bear ? 1 : 0) + (eth_peer_bear ? 1 : 0) + (sol_peer_bear ? 1 : 0) + (bnb_peer_bear ? 1 : 0)
+majors_peer_breadth = majors_peer_bull_count - majors_peer_bear_count
+majors_required_confirm = math.min(i_majors_div_min_confirm, math.max(majors_peer_total, 1))
+majors_div_long_ok = not i_use_majors_div_filter or majors_peer_total == 0 or (majors_peer_bull_count >= majors_required_confirm and majors_peer_bear_count <= i_majors_div_max_opposition)
+majors_div_short_ok = not i_use_majors_div_filter or majors_peer_total == 0 or (majors_peer_bear_count >= majors_required_confirm and majors_peer_bull_count <= i_majors_div_max_opposition)
+majors_div_breakout_long_ok = i_majors_div_apply_to == "Reject Only" ? true : majors_div_long_ok
+majors_div_breakout_short_ok = i_majors_div_apply_to == "Reject Only" ? true : majors_div_short_ok
+majors_div_reject_long_ok = i_majors_div_apply_to == "Breakout Only" ? true : majors_div_long_ok
+majors_div_reject_short_ok = i_majors_div_apply_to == "Breakout Only" ? true : majors_div_short_ok
+
+// Lower-timeframe flow confirmation to screen out price moves that lack real participation.
+[_, _, _, flow_last_delta] = taLib.requestVolumeDelta(i_flow_ltf)
+flow_delta_available = not na(flow_last_delta)
+flow_net_delta = nz(flow_last_delta)
+flow_abs_delta = math.abs(flow_net_delta)
+flow_signed_delta = flow_delta_available ? flow_net_delta : volume * math.sign(close - close[1])
+flow_cvd = ta.cum(flow_signed_delta)
+flow_small_pct = 75.0
+flow_medium_pct = 90.0
+flow_big_pct = 97.0
+flow_min_level = i_flow_min_cluster == "Big" ? 3 : i_flow_min_cluster == "Medium" ? 2 : 1
+
+flow_v_small_short = ta.percentile_linear_interpolation(volume, i_flow_short_len, flow_small_pct)
+flow_v_small_mid = ta.percentile_linear_interpolation(volume, i_flow_mid_len, flow_small_pct)
+flow_v_small_long = ta.percentile_linear_interpolation(volume, i_flow_long_len, flow_small_pct)
+flow_v_medium_short = ta.percentile_linear_interpolation(volume, i_flow_short_len, flow_medium_pct)
+flow_v_medium_mid = ta.percentile_linear_interpolation(volume, i_flow_mid_len, flow_medium_pct)
+flow_v_medium_long = ta.percentile_linear_interpolation(volume, i_flow_long_len, flow_medium_pct)
+flow_v_big_short = ta.percentile_linear_interpolation(volume, i_flow_short_len, flow_big_pct)
+flow_v_big_mid = ta.percentile_linear_interpolation(volume, i_flow_mid_len, flow_big_pct)
+flow_v_big_long = ta.percentile_linear_interpolation(volume, i_flow_long_len, flow_big_pct)
+
+flow_d_small_short = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_short_len, flow_small_pct)
+flow_d_small_mid = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_mid_len, flow_small_pct)
+flow_d_small_long = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_long_len, flow_small_pct)
+flow_d_medium_short = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_short_len, flow_medium_pct)
+flow_d_medium_mid = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_mid_len, flow_medium_pct)
+flow_d_medium_long = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_long_len, flow_medium_pct)
+flow_d_big_short = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_short_len, flow_big_pct)
+flow_d_big_mid = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_mid_len, flow_big_pct)
+flow_d_big_long = ta.percentile_linear_interpolation(flow_abs_delta, i_flow_long_len, flow_big_pct)
+
+flow_vol_big = f_consensus(volume >= flow_v_big_short, volume >= flow_v_big_mid, volume >= flow_v_big_long, i_flow_consensus)
+flow_vol_medium = not flow_vol_big and f_consensus(volume >= flow_v_medium_short, volume >= flow_v_medium_mid, volume >= flow_v_medium_long, i_flow_consensus)
+flow_vol_small = not flow_vol_big and not flow_vol_medium and f_consensus(volume >= flow_v_small_short, volume >= flow_v_small_mid, volume >= flow_v_small_long, i_flow_consensus)
+flow_delta_big = f_consensus(flow_abs_delta >= flow_d_big_short, flow_abs_delta >= flow_d_big_mid, flow_abs_delta >= flow_d_big_long, i_flow_consensus)
+flow_delta_medium = not flow_delta_big and f_consensus(flow_abs_delta >= flow_d_medium_short, flow_abs_delta >= flow_d_medium_mid, flow_abs_delta >= flow_d_medium_long, i_flow_consensus)
+flow_delta_small = not flow_delta_big and not flow_delta_medium and f_consensus(flow_abs_delta >= flow_d_small_short, flow_abs_delta >= flow_d_small_mid, flow_abs_delta >= flow_d_small_long, i_flow_consensus)
+flow_big_cluster = f_detect_flow(flow_vol_big, flow_delta_big, i_flow_detect_mode)
+flow_medium_cluster = not flow_big_cluster and f_detect_flow(flow_vol_medium or flow_vol_big, flow_delta_medium or flow_delta_big, i_flow_detect_mode)
+flow_small_cluster = not flow_big_cluster and not flow_medium_cluster and f_detect_flow(flow_vol_small or flow_vol_medium or flow_vol_big, flow_delta_small or flow_delta_medium or flow_delta_big, i_flow_detect_mode)
+flow_cluster_level = flow_big_cluster ? 3 : flow_medium_cluster ? 2 : flow_small_cluster ? 1 : 0
+flow_long_side_ok = not i_require_flow_delta_side or (flow_delta_available ? flow_net_delta > 0 : close > open)
+flow_short_side_ok = not i_require_flow_delta_side or (flow_delta_available ? flow_net_delta < 0 : close < open)
+flow_long_candle_ok = not i_require_flow_candle_side or close > open
+flow_short_candle_ok = not i_require_flow_candle_side or close < open
+flow_long_ok = not i_use_flow_filter or (flow_cluster_level >= flow_min_level and flow_long_side_ok and flow_long_candle_ok)
+flow_short_ok = not i_use_flow_filter or (flow_cluster_level >= flow_min_level and flow_short_side_ok and flow_short_candle_ok)
+flow_breakout_long_ok = i_flow_apply_to == "Reject Only" ? true : flow_long_ok
+flow_breakout_short_ok = i_flow_apply_to == "Reject Only" ? true : flow_short_ok
+flow_reject_long_ok = i_flow_apply_to == "Breakout Only" ? true : flow_long_ok
+flow_reject_short_ok = i_flow_apply_to == "Breakout Only" ? true : flow_short_ok
+
+// Confirmed CVD divergence uses confirmed pivots only, so it stays non-repainting.
+cvd_price_pivot_high = ta.pivothigh(high, i_cvd_div_left, i_cvd_div_right)
+cvd_price_pivot_low = ta.pivotlow(low, i_cvd_div_left, i_cvd_div_right)
+var float prev_cvd_price_low = na
+var float last_cvd_price_low = na
+var float prev_cvd_value_low = na
+var float last_cvd_value_low = na
+var float prev_cvd_price_high = na
+var float last_cvd_price_high = na
+var float prev_cvd_value_high = na
+var float last_cvd_value_high = na
+bool bullish_cvd_div_event = false
+bool bearish_cvd_div_event = false
+
+if not na(cvd_price_pivot_low)
+    prev_cvd_price_low := last_cvd_price_low
+    prev_cvd_value_low := last_cvd_value_low
+    last_cvd_price_low := cvd_price_pivot_low
+    last_cvd_value_low := flow_cvd[i_cvd_div_right]
+    bullish_cvd_div_event := not na(prev_cvd_price_low) and last_cvd_price_low < prev_cvd_price_low and last_cvd_value_low > prev_cvd_value_low
+
+if not na(cvd_price_pivot_high)
+    prev_cvd_price_high := last_cvd_price_high
+    prev_cvd_value_high := last_cvd_value_high
+    last_cvd_price_high := cvd_price_pivot_high
+    last_cvd_value_high := flow_cvd[i_cvd_div_right]
+    bearish_cvd_div_event := not na(prev_cvd_price_high) and last_cvd_price_high > prev_cvd_price_high and last_cvd_value_high < prev_cvd_value_high
+
+bullish_cvd_div_age = ta.barssince(bullish_cvd_div_event)
+bearish_cvd_div_age = ta.barssince(bearish_cvd_div_event)
+bullish_cvd_div_recent = not na(bullish_cvd_div_age) and bullish_cvd_div_age <= i_cvd_div_valid_bars
+bearish_cvd_div_recent = not na(bearish_cvd_div_age) and bearish_cvd_div_age <= i_cvd_div_valid_bars
+cvd_div_long_ok = not i_use_cvd_div_filter or bullish_cvd_div_recent
+cvd_div_short_ok = not i_use_cvd_div_filter or bearish_cvd_div_recent
+cvd_div_breakout_long_ok = i_cvd_div_apply_to == "Reject Only" ? true : cvd_div_long_ok
+cvd_div_breakout_short_ok = i_cvd_div_apply_to == "Reject Only" ? true : cvd_div_short_ok
+cvd_div_reject_long_ok = i_cvd_div_apply_to == "Breakout Only" ? true : cvd_div_long_ok
+cvd_div_reject_short_ok = i_cvd_div_apply_to == "Breakout Only" ? true : cvd_div_short_ok
+
+// Store recent confirmed swing levels so we can measure room before entering.
+swing_pivot_high = ta.pivothigh(high, i_swing_left, i_swing_right)
+swing_pivot_low = ta.pivotlow(low, i_swing_left, i_swing_right)
+var swing_high_levels = array.new_float()
+var swing_low_levels = array.new_float()
+
+if not na(swing_pivot_high)
+    array.unshift(swing_high_levels, swing_pivot_high)
+    if array.size(swing_high_levels) > 30
+        array.pop(swing_high_levels)
+
+if not na(swing_pivot_low)
+    array.unshift(swing_low_levels, swing_pivot_low)
+    if array.size(swing_low_levels) > 30
+        array.pop(swing_low_levels)
+
+nearest_swing_resistance = f_nearest_above(swing_high_levels, close)
+nearest_swing_support = f_nearest_below(swing_low_levels, close)
+swing_room_long_ok = not i_use_swing_filter or na(nearest_swing_resistance) or (nearest_swing_resistance - close) >= atr * i_min_swing_room_atr
+swing_room_short_ok = not i_use_swing_filter or na(nearest_swing_support) or (close - nearest_swing_support) >= atr * i_min_swing_room_atr
+swing_breakout_long_ok = i_swing_apply_to == "Reject Only" ? true : swing_room_long_ok
+swing_breakout_short_ok = i_swing_apply_to == "Reject Only" ? true : swing_room_short_ok
+swing_reject_long_ok = i_swing_apply_to == "Breakout Only" ? true : swing_room_long_ok
+swing_reject_short_ok = i_swing_apply_to == "Breakout Only" ? true : swing_room_short_ok
+
+bearish_exhaustion_event = ta.crossunder(entry_rsi, i_exhaust_long_level)
+bullish_exhaustion_event = ta.crossover(entry_rsi, i_exhaust_short_level)
+bearish_exhaustion_age = ta.barssince(bearish_exhaustion_event)
+bullish_exhaustion_age = ta.barssince(bullish_exhaustion_event)
+bearish_exhaustion_recent = not na(bearish_exhaustion_age) and bearish_exhaustion_age <= i_exhaust_valid_bars
+bullish_exhaustion_recent = not na(bullish_exhaustion_age) and bullish_exhaustion_age <= i_exhaust_valid_bars
+exhaust_long_ok = not i_use_exhaust_filter or not bearish_exhaustion_recent
+exhaust_short_ok = not i_use_exhaust_filter or not bullish_exhaustion_recent
+exhaust_breakout_long_ok = i_exhaust_apply_to == "Reject Only" ? true : exhaust_long_ok
+exhaust_breakout_short_ok = i_exhaust_apply_to == "Reject Only" ? true : exhaust_short_ok
+exhaust_reject_long_ok = i_exhaust_apply_to == "Breakout Only" ? true : exhaust_long_ok
+exhaust_reject_short_ok = i_exhaust_apply_to == "Breakout Only" ? true : exhaust_short_ok
+
+vwap_ext_long_ok = not i_use_vwap_ext_filter or na(session_vwap_stdev) or session_vwap_dev <= i_vwap_long_max_stdev
+vwap_ext_short_ok = not i_use_vwap_ext_filter or na(session_vwap_stdev) or -session_vwap_dev <= i_vwap_short_max_stdev
+vwap_breakout_long_ok = i_vwap_ext_apply_to == "Reject Only" ? true : vwap_ext_long_ok
+vwap_breakout_short_ok = i_vwap_ext_apply_to == "Reject Only" ? true : vwap_ext_short_ok
+vwap_reject_long_ok = i_vwap_ext_apply_to == "Breakout Only" ? true : vwap_ext_long_ok
+vwap_reject_short_ok = i_vwap_ext_apply_to == "Breakout Only" ? true : vwap_ext_short_ok
+
+bbpct_long_ok = not i_use_bbpct_filter or bb_pct <= i_bbpct_long_max
+bbpct_short_ok = not i_use_bbpct_filter or bb_pct >= i_bbpct_short_min
+bbpct_breakout_long_ok = i_bbpct_apply_to == "Reject Only" ? true : bbpct_long_ok
+bbpct_breakout_short_ok = i_bbpct_apply_to == "Reject Only" ? true : bbpct_short_ok
+bbpct_reject_long_ok = i_bbpct_apply_to == "Breakout Only" ? true : bbpct_long_ok
+bbpct_reject_short_ok = i_bbpct_apply_to == "Breakout Only" ? true : bbpct_short_ok
+
+btc_d_avail = not na(btc_d_close) and not na(btc_d_fast) and not na(btc_d_slow)
+usdt_d_avail = not na(usdt_d_close) and not na(usdt_d_fast) and not na(usdt_d_slow)
+rel_avail = not na(rel_close) and not na(rel_fast) and not na(rel_slow)
+
+btc_d_bull = btc_d_close >= btc_d_slow and btc_d_fast >= btc_d_slow
+btc_d_bear = btc_d_close <= btc_d_slow and btc_d_fast <= btc_d_slow
+usdt_d_bull = usdt_d_close >= usdt_d_slow and usdt_d_fast >= usdt_d_slow
+usdt_d_bear = usdt_d_close <= usdt_d_slow and usdt_d_fast <= usdt_d_slow
+rel_bull = rel_close >= rel_slow and rel_fast >= rel_slow
+rel_bear = rel_close <= rel_slow and rel_fast <= rel_slow
+
+long_macro_score = 0
+long_macro_total = 0
+short_macro_score = 0
+short_macro_total = 0
+
+if i_use_btc_d and btc_d_avail
+    long_macro_total += 1
+    short_macro_total += 1
+    long_macro_score += (is_btc_chart ? btc_d_bull : btc_d_bear) ? 1 : 0
+    short_macro_score += (is_btc_chart ? btc_d_bear : btc_d_bull) ? 1 : 0
+
+if i_use_usdt_d and usdt_d_avail
+    long_macro_total += 1
+    short_macro_total += 1
+    long_macro_score += usdt_d_bear ? 1 : 0
+    short_macro_score += usdt_d_bull ? 1 : 0
+
+if i_use_rel_strength and rel_avail
+    long_macro_total += 1
+    short_macro_total += 1
+    long_macro_score += rel_bull ? 1 : 0
+    short_macro_score += rel_bear ? 1 : 0
+
+long_macro_ok = not i_use_macro or long_macro_total == 0 or long_macro_score >= math.min(i_macro_min_score, long_macro_total)
+short_macro_ok = not i_use_macro or short_macro_total == 0 or short_macro_score >= math.min(i_macro_min_score, short_macro_total)
+
+show_channel = i_use_htf_channel or i_use_channel_room_filter
+var channel_times = array.new_int()
+var channel_highs = array.new_float()
+var channel_lows = array.new_float()
+var int upper_t1 = na
+var int upper_t2 = na
+var float upper_v1 = na
+var float upper_v2 = na
+var int lower_t1 = na
+var int lower_t2 = na
+var float lower_v1 = na
+var float lower_v2 = na
+var line upper_line = na
+var line lower_line = na
+
+new_channel_bar = not na(channel_htf_time) and (array.size(channel_times) == 0 or channel_htf_time != array.get(channel_times, array.size(channel_times) - 1))
+
+if new_channel_bar
+    array.push(channel_times, int(channel_htf_time))
+    array.push(channel_highs, channel_htf_high)
+    array.push(channel_lows, channel_htf_low)
+
+    if array.size(channel_times) > 200
+        array.shift(channel_times)
+        array.shift(channel_highs)
+        array.shift(channel_lows)
+
+    candidate_idx = array.size(channel_times) - 1 - i_channel_right
+    enough_bars = candidate_idx >= i_channel_left and candidate_idx + i_channel_right < array.size(channel_times)
+
+    if enough_bars
+        candidate_time = array.get(channel_times, candidate_idx)
+        candidate_high = array.get(channel_highs, candidate_idx)
+        candidate_low = array.get(channel_lows, candidate_idx)
+
+        is_pivot_high = true
+        is_pivot_low = true
+
+        for i = candidate_idx - i_channel_left to candidate_idx + i_channel_right
+            if i != candidate_idx
+                is_pivot_high := is_pivot_high and array.get(channel_highs, i) < candidate_high
+                is_pivot_low := is_pivot_low and array.get(channel_lows, i) > candidate_low
+
+        if is_pivot_high
+            upper_t1 := upper_t2
+            upper_v1 := upper_v2
+            upper_t2 := candidate_time
+            upper_v2 := candidate_high
+
+        if is_pivot_low
+            lower_t1 := lower_t2
+            lower_v1 := lower_v2
+            lower_t2 := candidate_time
+            lower_v2 := candidate_low
+
+float upper_channel = na
+float lower_channel = na
+float channel_mid = na
+float upper_slope = na
+float lower_slope = na
+float channel_width = na
+
+if not na(upper_t1) and not na(upper_t2) and upper_t2 != upper_t1
+    upper_slope := (upper_v2 - upper_v1) / float(upper_t2 - upper_t1)
+    upper_channel := upper_v2 + upper_slope * float(time - upper_t2)
+
+if not na(lower_t1) and not na(lower_t2) and lower_t2 != lower_t1
+    lower_slope := (lower_v2 - lower_v1) / float(lower_t2 - lower_t1)
+    lower_channel := lower_v2 + lower_slope * float(time - lower_t2)
+
+if not na(upper_channel) and not na(lower_channel)
+    channel_mid := (upper_channel + lower_channel) * 0.5
+    channel_width := upper_channel - lower_channel
+
+if show_channel and not na(upper_t1) and not na(upper_t2)
+    if na(upper_line)
+        upper_line := line.new(upper_t1, upper_v1, upper_t2, upper_v2, xloc = xloc.bar_time, extend = extend.right, color = color.new(color.lime, 10), width = 2)
+    else
+        line.set_xy1(upper_line, upper_t1, upper_v1)
+        line.set_xy2(upper_line, upper_t2, upper_v2)
+        line.set_extend(upper_line, extend.right)
+        line.set_color(upper_line, color.new(color.lime, 10))
+
+if show_channel and not na(lower_t1) and not na(lower_t2)
+    if na(lower_line)
+        lower_line := line.new(lower_t1, lower_v1, lower_t2, lower_v2, xloc = xloc.bar_time, extend = extend.right, color = color.new(color.red, 10), width = 2)
+    else
+        line.set_xy1(lower_line, lower_t1, lower_v1)
+        line.set_xy2(lower_line, lower_t2, lower_v2)
+        line.set_extend(lower_line, extend.right)
+        line.set_color(lower_line, color.new(color.red, 10))
+
+if not show_channel
+    if not na(upper_line)
+        line.delete(upper_line)
+        upper_line := na
+    if not na(lower_line)
+        line.delete(lower_line)
+        lower_line := na
+
+channel_long_ok = not i_use_channel_room_filter or na(upper_channel) or (upper_channel - close) >= atr * i_min_channel_room_atr
+channel_short_ok = not i_use_channel_room_filter or na(lower_channel) or (close - lower_channel) >= atr * i_min_channel_room_atr
+channel_slope_long_ok = not i_use_channel_slope_filter or (not na(upper_slope) and not na(lower_slope) and upper_slope >= 0 and lower_slope >= 0)
+channel_slope_short_ok = not i_use_channel_slope_filter or (not na(upper_slope) and not na(lower_slope) and upper_slope <= 0 and lower_slope <= 0)
+channel_mid_touch = not na(channel_mid) and low <= channel_mid + atr * i_mid_reclaim_touch_atr and high >= channel_mid - atr * i_mid_reclaim_touch_atr
+bars_since_channel_mid_touch = ta.barssince(channel_mid_touch)
+channel_mid_long_ok = not i_use_channel_mid_reclaim or (not na(channel_mid) and close > channel_mid and not na(bars_since_channel_mid_touch) and bars_since_channel_mid_touch <= i_mid_reclaim_lookback)
+channel_mid_short_ok = not i_use_channel_mid_reclaim or (not na(channel_mid) and close < channel_mid and not na(bars_since_channel_mid_touch) and bars_since_channel_mid_touch <= i_mid_reclaim_lookback)
+channel_context_long_ok = channel_long_ok and channel_slope_long_ok and channel_mid_long_ok
+channel_context_short_ok = channel_short_ok and channel_slope_short_ok and channel_mid_short_ok
+channel_width_ok = na(channel_width) or channel_width >= atr * i_channel_min_width_atr
+fast_side_long_ok = not i_require_fast_side or close >= ema_fast
+fast_side_short_ok = not i_require_fast_side or close <= ema_fast
+channel_reject_long_ok = not na(lower_channel) and not na(channel_mid) and not na(upper_slope) and not na(lower_slope) and channel_width_ok and upper_slope >= 0 and lower_slope >= 0 and low <= lower_channel + atr * i_channel_reject_touch_atr and low >= lower_channel - atr * i_channel_reject_pierce_atr and close > lower_channel and close > open and close_pos >= i_channel_reject_close_pos and close <= channel_mid and fast_side_long_ok
+channel_reject_short_ok = not na(upper_channel) and not na(channel_mid) and not na(upper_slope) and not na(lower_slope) and channel_width_ok and upper_slope <= 0 and lower_slope <= 0 and high >= upper_channel - atr * i_channel_reject_touch_atr and high <= upper_channel + atr * i_channel_reject_pierce_atr and close < upper_channel and close < open and close_pos <= 1.0 - i_channel_reject_close_pos and close >= channel_mid and fast_side_short_ok
+
+entry_high = ta.highest(high[1], i_entry_len)
+entry_low = ta.lowest(low[1], i_entry_len)
+exit_low = ta.lowest(low[1], i_exit_len)
+exit_high = ta.highest(high[1], i_exit_len)
+
+var int last_signal_bar = na
+var float active_stop = na
+var float active_target = na
+var int active_entry_bar = na
+var float active_entry_price = na
+var float active_entry_atr = na
+var float active_max_high = na
+var float active_min_low = na
+var int active_entry_type = 0
+var int queued_entry_type = 0
+var float pending_entry_price = na
+var int pending_entry_side = 0
+var int pending_entry_bar = na
+var float pending_long_level = na
+var float pending_short_level = na
+var int pending_long_origin_bar = na
+var int pending_short_origin_bar = na
+var float pending_channel_long_trigger = na
+var float pending_channel_short_trigger = na
+var int pending_channel_long_origin_bar = na
+var int pending_channel_short_origin_bar = na
+
+entry_type_none = 0
+entry_type_breakout = 1
+entry_type_reject = 2
+
+cooldown_ok = na(last_signal_bar) or (bar_index - last_signal_bar) >= i_cooldown_bars
+entry_mode_immediate = i_entry_mode == "Immediate"
+entry_mode_retest = i_entry_mode == "Retest"
+entry_mode_limit = i_entry_mode == "Pullback Limit"
+
+long_breakout_level = entry_high + atr * i_breakout_buffer_atr
+short_breakout_level = entry_low - atr * i_breakout_buffer_atr
+long_breakout_excess_atr = atr > syminfo.mintick ? (close - long_breakout_level) / atr : 0.0
+short_breakout_excess_atr = atr > syminfo.mintick ? (short_breakout_level - close) / atr : 0.0
+long_extension_extreme = f_mode_hit(session_vwap_dev >= i_long_extension_vwap, bb_pct >= i_long_extension_bbpct, i_long_extension_mode)
+short_extension_extreme = f_mode_hit(-session_vwap_dev >= i_short_extension_vwap, bb_pct <= i_short_extension_bbpct, i_short_extension_mode)
+breakout_quality_long_ok = not i_use_breakout_quality or (long_breakout_excess_atr >= i_min_breakout_excess_long_atr and (not i_use_extension_veto or not long_extension_extreme))
+breakout_quality_short_ok = not i_use_breakout_quality or (short_breakout_excess_atr >= i_min_breakout_excess_short_atr and (not i_use_extension_veto or not short_extension_extreme))
+
+long_setup_signal = i_allow_longs and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and pending_entry_side == 0 and regime_bull and adx_ok and chop_ok and long_macro_ok and pd_fib_breakout_long_ok and majors_div_breakout_long_ok and flow_breakout_long_ok and cvd_div_breakout_long_ok and swing_breakout_long_ok and exhaust_breakout_long_ok and vwap_breakout_long_ok and bbpct_breakout_long_ok and channel_context_long_ok and breakout_quality_long_ok and close > long_breakout_level and close > open and close_pos >= i_close_pos_min and fast_side_long_ok
+short_setup_signal = i_allow_shorts and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and pending_entry_side == 0 and regime_bear and adx_ok and chop_ok and short_macro_ok and pd_fib_breakout_short_ok and majors_div_breakout_short_ok and flow_breakout_short_ok and cvd_div_breakout_short_ok and swing_breakout_short_ok and exhaust_breakout_short_ok and vwap_breakout_short_ok and bbpct_breakout_short_ok and channel_context_short_ok and breakout_quality_short_ok and close < short_breakout_level and close < open and close_pos <= 1.0 - i_close_pos_min and fast_side_short_ok
+
+if not entry_mode_retest
+    pending_long_level := na
+    pending_short_level := na
+    pending_long_origin_bar := na
+    pending_short_origin_bar := na
+
+if entry_mode_retest and long_setup_signal
+    pending_long_level := entry_high
+    pending_long_origin_bar := bar_index
+    pending_short_level := na
+    pending_short_origin_bar := na
+
+if entry_mode_retest and short_setup_signal
+    pending_short_level := entry_low
+    pending_short_origin_bar := bar_index
+    pending_long_level := na
+    pending_long_origin_bar := na
+
+long_pending_active = entry_mode_retest and not na(pending_long_level) and not na(pending_long_origin_bar) and bar_index > pending_long_origin_bar and (bar_index - pending_long_origin_bar) <= i_retest_valid_bars
+short_pending_active = entry_mode_retest and not na(pending_short_level) and not na(pending_short_origin_bar) and bar_index > pending_short_origin_bar and (bar_index - pending_short_origin_bar) <= i_retest_valid_bars
+
+if not na(pending_long_origin_bar) and (bar_index - pending_long_origin_bar) > i_retest_valid_bars
+    pending_long_level := na
+    pending_long_origin_bar := na
+
+if not na(pending_short_origin_bar) and (bar_index - pending_short_origin_bar) > i_retest_valid_bars
+    pending_short_level := na
+    pending_short_origin_bar := na
+
+channel_pending_long_active = i_channel_confirm_break and not na(pending_channel_long_trigger) and not na(pending_channel_long_origin_bar) and bar_index > pending_channel_long_origin_bar and (bar_index - pending_channel_long_origin_bar) <= i_channel_confirm_bars
+channel_pending_short_active = i_channel_confirm_break and not na(pending_channel_short_trigger) and not na(pending_channel_short_origin_bar) and bar_index > pending_channel_short_origin_bar and (bar_index - pending_channel_short_origin_bar) <= i_channel_confirm_bars
+
+if not na(pending_channel_long_origin_bar) and (bar_index - pending_channel_long_origin_bar) > i_channel_confirm_bars
+    pending_channel_long_trigger := na
+    pending_channel_long_origin_bar := na
+
+if not na(pending_channel_short_origin_bar) and (bar_index - pending_channel_short_origin_bar) > i_channel_confirm_bars
+    pending_channel_short_trigger := na
+    pending_channel_short_origin_bar := na
+
+long_retest_touch_ok = long_pending_active and low <= pending_long_level + atr * i_retest_touch_atr and low >= pending_long_level - atr * i_retest_pierce_atr
+short_retest_touch_ok = short_pending_active and high >= pending_short_level - atr * i_retest_touch_atr and high <= pending_short_level + atr * i_retest_pierce_atr
+
+long_retest_signal = long_pending_active and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and regime_bull and adx_ok and chop_ok and long_macro_ok and pd_fib_breakout_long_ok and majors_div_breakout_long_ok and flow_breakout_long_ok and cvd_div_breakout_long_ok and swing_breakout_long_ok and exhaust_breakout_long_ok and vwap_breakout_long_ok and bbpct_breakout_long_ok and channel_context_long_ok and long_retest_touch_ok and close > pending_long_level and close > open and close_pos >= i_close_pos_min and fast_side_long_ok
+short_retest_signal = short_pending_active and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and regime_bear and adx_ok and chop_ok and short_macro_ok and pd_fib_breakout_short_ok and majors_div_breakout_short_ok and flow_breakout_short_ok and cvd_div_breakout_short_ok and swing_breakout_short_ok and exhaust_breakout_short_ok and vwap_breakout_short_ok and bbpct_breakout_short_ok and channel_context_short_ok and short_retest_touch_ok and close < pending_short_level and close < open and close_pos <= 1.0 - i_close_pos_min and fast_side_short_ok
+
+base_long_signal = entry_mode_retest ? long_retest_signal : long_setup_signal
+base_short_signal = entry_mode_retest ? short_retest_signal : short_setup_signal
+channel_long_signal = i_allow_longs and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and regime_bull and channel_adx_ok and channel_chop_ok and long_macro_ok and pd_fib_reject_long_ok and majors_div_reject_long_ok and flow_reject_long_ok and cvd_div_reject_long_ok and swing_reject_long_ok and exhaust_reject_long_ok and vwap_reject_long_ok and bbpct_reject_long_ok and (i_channel_confirm_break ? (channel_pending_long_active and close > pending_channel_long_trigger and close > open and close_pos >= i_channel_reject_close_pos and fast_side_long_ok) : channel_reject_long_ok)
+channel_short_signal = i_allow_shorts and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and regime_bear and channel_adx_ok and channel_chop_ok and short_macro_ok and pd_fib_reject_short_ok and majors_div_reject_short_ok and flow_reject_short_ok and cvd_div_reject_short_ok and swing_reject_short_ok and exhaust_reject_short_ok and vwap_reject_short_ok and bbpct_reject_short_ok and (i_channel_confirm_break ? (channel_pending_short_active and close < pending_channel_short_trigger and close < open and close_pos <= 1.0 - i_channel_reject_close_pos and fast_side_short_ok) : channel_reject_short_ok)
+channel_long_auto_signal = i_allow_longs and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and regime_bull and channel_adx_ok and long_macro_ok and pd_fib_reject_long_ok and majors_div_reject_long_ok and flow_reject_long_ok and cvd_div_reject_long_ok and swing_reject_long_ok and exhaust_reject_long_ok and vwap_reject_long_ok and bbpct_reject_long_ok and (i_channel_confirm_break ? (channel_pending_long_active and close > pending_channel_long_trigger and close > open and close_pos >= i_channel_reject_close_pos and fast_side_long_ok) : channel_reject_long_ok)
+channel_short_auto_signal = i_allow_shorts and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and regime_bear and channel_adx_ok and short_macro_ok and pd_fib_reject_short_ok and majors_div_reject_short_ok and flow_reject_short_ok and cvd_div_reject_short_ok and swing_reject_short_ok and exhaust_reject_short_ok and vwap_reject_short_ok and bbpct_reject_short_ok and (i_channel_confirm_break ? (channel_pending_short_active and close < pending_channel_short_trigger and close < open and close_pos <= 1.0 - i_channel_reject_close_pos and fast_side_short_ok) : channel_reject_short_ok)
+
+auto_long_signal = entropy_breakout_regime_ok ? base_long_signal : entropy_reject_regime_ok ? channel_long_auto_signal : base_long_signal
+auto_short_signal = entropy_breakout_regime_ok ? base_short_signal : entropy_reject_regime_ok ? channel_short_auto_signal : base_short_signal
+long_signal = i_channel_signal_mode == "Reject Only" ? channel_long_signal : i_channel_signal_mode == "Combine" ? (base_long_signal or channel_long_signal) : i_channel_signal_mode == "Auto Regime" ? auto_long_signal : base_long_signal
+short_signal = i_channel_signal_mode == "Reject Only" ? channel_short_signal : i_channel_signal_mode == "Combine" ? (base_short_signal or channel_short_signal) : i_channel_signal_mode == "Auto Regime" ? auto_short_signal : base_short_signal
+long_signal_type = i_channel_signal_mode == "Reject Only" ? (channel_long_signal ? entry_type_reject : entry_type_none) : i_channel_signal_mode == "Combine" ? (base_long_signal ? entry_type_breakout : channel_long_signal ? entry_type_reject : entry_type_none) : i_channel_signal_mode == "Auto Regime" ? (entropy_breakout_regime_ok ? (base_long_signal ? entry_type_breakout : entry_type_none) : entropy_reject_regime_ok ? (channel_long_auto_signal ? entry_type_reject : entry_type_none) : (base_long_signal ? entry_type_breakout : entry_type_none)) : (base_long_signal ? entry_type_breakout : entry_type_none)
+short_signal_type = i_channel_signal_mode == "Reject Only" ? (channel_short_signal ? entry_type_reject : entry_type_none) : i_channel_signal_mode == "Combine" ? (base_short_signal ? entry_type_breakout : channel_short_signal ? entry_type_reject : entry_type_none) : i_channel_signal_mode == "Auto Regime" ? (entropy_breakout_regime_ok ? (base_short_signal ? entry_type_breakout : entry_type_none) : entropy_reject_regime_ok ? (channel_short_auto_signal ? entry_type_reject : entry_type_none) : (base_short_signal ? entry_type_breakout : entry_type_none)) : (base_short_signal ? entry_type_breakout : entry_type_none)
+
+if i_channel_signal_mode != "Off" and i_channel_confirm_break and channel_reject_long_ok and strategy.position_size == 0
+    pending_channel_long_trigger := high
+    pending_channel_long_origin_bar := bar_index
+    pending_channel_short_trigger := na
+    pending_channel_short_origin_bar := na
+
+if i_channel_signal_mode != "Off" and i_channel_confirm_break and channel_reject_short_ok and strategy.position_size == 0
+    pending_channel_short_trigger := low
+    pending_channel_short_origin_bar := bar_index
+    pending_channel_long_trigger := na
+    pending_channel_long_origin_bar := na
+
+if long_signal
+    last_signal_bar := bar_index
+    queued_entry_type := long_signal_type
+    pending_long_level := na
+    pending_short_level := na
+    pending_long_origin_bar := na
+    pending_short_origin_bar := na
+    pending_channel_long_trigger := na
+    pending_channel_short_trigger := na
+    pending_channel_long_origin_bar := na
+    pending_channel_short_origin_bar := na
+    if entry_mode_limit and long_signal_type == entry_type_breakout
+        limit_price = close - (close - long_breakout_level) * i_limit_pullback_frac
+        if limit_price > long_breakout_level + syminfo.mintick * 2 and limit_price < close - syminfo.mintick * 2
+            pending_entry_price := limit_price
+            pending_entry_side := 1
+            pending_entry_bar := bar_index
+            strategy.entry("Long", strategy.long, limit = limit_price)
+        else
+            strategy.entry("Long", strategy.long)
+    else
+        strategy.entry("Long", strategy.long)
+
+if short_signal
+    last_signal_bar := bar_index
+    queued_entry_type := short_signal_type
+    pending_long_level := na
+    pending_short_level := na
+    pending_long_origin_bar := na
+    pending_short_origin_bar := na
+    pending_channel_long_trigger := na
+    pending_channel_short_trigger := na
+    pending_channel_long_origin_bar := na
+    pending_channel_short_origin_bar := na
+    if entry_mode_limit and short_signal_type == entry_type_breakout
+        limit_price = close + (short_breakout_level - close) * i_limit_pullback_frac
+        if limit_price < short_breakout_level - syminfo.mintick * 2 and limit_price > close + syminfo.mintick * 2
+            pending_entry_price := limit_price
+            pending_entry_side := -1
+            pending_entry_bar := bar_index
+            strategy.entry("Short", strategy.short, limit = limit_price)
+        else
+            strategy.entry("Short", strategy.short)
+    else
+        strategy.entry("Short", strategy.short)
+
+limit_long_cancel = pending_entry_side == 1 and strategy.position_size == 0 and not na(pending_entry_bar) and (bar_index - pending_entry_bar) > i_limit_valid_bars
+limit_short_cancel = pending_entry_side == -1 and strategy.position_size == 0 and not na(pending_entry_bar) and (bar_index - pending_entry_bar) > i_limit_valid_bars
+
+if limit_long_cancel
+    strategy.cancel("Long")
+    pending_entry_price := na
+    pending_entry_side := 0
+    pending_entry_bar := na
+    queued_entry_type := entry_type_none
+
+if limit_short_cancel
+    strategy.cancel("Short")
+    pending_entry_price := na
+    pending_entry_side := 0
+    pending_entry_bar := na
+    queued_entry_type := entry_type_none
+
+new_long_fill = strategy.position_size > 0 and strategy.position_size[1] <= 0
+new_short_fill = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+if new_long_fill
+    initial_stop = strategy.position_avg_price - atr * i_initial_atr_stop
+    channel_stop = exit_low
+    active_stop := math.max(channel_stop, initial_stop)
+    active_target := i_use_swing_target and not na(nearest_swing_resistance) and nearest_swing_resistance > strategy.position_avg_price ? nearest_swing_resistance : na
+    active_entry_bar := bar_index
+    active_entry_price := strategy.position_avg_price
+    active_entry_atr := atr
+    active_max_high := math.max(high, strategy.position_avg_price)
+    active_min_low := math.min(low, strategy.position_avg_price)
+    active_entry_type := queued_entry_type
+    pending_entry_price := na
+    pending_entry_side := 0
+    pending_entry_bar := na
+
+if new_short_fill
+    initial_stop = strategy.position_avg_price + atr * i_initial_atr_stop
+    channel_stop = exit_high
+    active_stop := math.min(channel_stop, initial_stop)
+    active_target := i_use_swing_target and not na(nearest_swing_support) and nearest_swing_support < strategy.position_avg_price ? nearest_swing_support : na
+    active_entry_bar := bar_index
+    active_entry_price := strategy.position_avg_price
+    active_entry_atr := atr
+    active_max_high := math.max(high, strategy.position_avg_price)
+    active_min_low := math.min(low, strategy.position_avg_price)
+    active_entry_type := queued_entry_type
+    pending_entry_price := na
+    pending_entry_side := 0
+    pending_entry_bar := na
+
+bars_in_trade = strategy.position_size != 0 and not na(active_entry_bar) ? bar_index - active_entry_bar : 0
+early_applies = i_early_apply_to == "All Trades" or (i_early_apply_to == "Breakout Only" and active_entry_type == entry_type_breakout) or (i_early_apply_to == "Reject Only" and active_entry_type == entry_type_reject)
+long_first_close_atr = strategy.position_size > 0 and not na(active_entry_price) and not na(active_entry_atr) and active_entry_atr > syminfo.mintick ? (close - active_entry_price) / active_entry_atr : na
+short_first_close_atr = strategy.position_size < 0 and not na(active_entry_price) and not na(active_entry_atr) and active_entry_atr > syminfo.mintick ? (active_entry_price - close) / active_entry_atr : na
+long_mfe_atr = strategy.position_size > 0 and not na(active_entry_price) and not na(active_entry_atr) and active_entry_atr > syminfo.mintick and not na(active_max_high) ? (active_max_high - active_entry_price) / active_entry_atr : na
+short_mfe_atr = strategy.position_size < 0 and not na(active_entry_price) and not na(active_entry_atr) and active_entry_atr > syminfo.mintick and not na(active_min_low) ? (active_entry_price - active_min_low) / active_entry_atr : na
+
+if strategy.position_size > 0
+    active_max_high := na(active_max_high) ? high : math.max(active_max_high, high)
+    active_min_low := na(active_min_low) ? low : math.min(active_min_low, low)
+    protect_applies = i_be_apply_to == "All Trades" or (i_be_apply_to == "Breakout Only" and active_entry_type == entry_type_breakout) or (i_be_apply_to == "Reject Only" and active_entry_type == entry_type_reject)
+    trail_stop = math.max(exit_low, close - atr * i_trail_atr_stop)
+    active_stop := na(active_stop) ? trail_stop : math.max(active_stop, trail_stop)
+    if i_use_be_protect and protect_applies and not na(active_entry_price) and not na(active_entry_atr) and active_entry_atr > syminfo.mintick
+        long_be_level = active_entry_price + active_entry_atr * i_be_offset_atr
+        if long_mfe_atr >= i_be_trigger_atr
+            active_stop := math.max(active_stop, long_be_level)
+        if i_use_profit_lock and long_mfe_atr >= i_profit_lock_trigger_atr
+            active_stop := math.max(active_stop, active_entry_price + active_entry_atr * i_profit_lock_atr)
+    strategy.exit("Long-X", "Long", stop = active_stop, limit = active_target)
+
+if strategy.position_size < 0
+    active_max_high := na(active_max_high) ? high : math.max(active_max_high, high)
+    active_min_low := na(active_min_low) ? low : math.min(active_min_low, low)
+    protect_applies = i_be_apply_to == "All Trades" or (i_be_apply_to == "Breakout Only" and active_entry_type == entry_type_breakout) or (i_be_apply_to == "Reject Only" and active_entry_type == entry_type_reject)
+    trail_stop = math.min(exit_high, close + atr * i_trail_atr_stop)
+    active_stop := na(active_stop) ? trail_stop : math.min(active_stop, trail_stop)
+    if i_use_be_protect and protect_applies and not na(active_entry_price) and not na(active_entry_atr) and active_entry_atr > syminfo.mintick
+        short_be_level = active_entry_price - active_entry_atr * i_be_offset_atr
+        if short_mfe_atr >= i_be_trigger_atr
+            active_stop := math.min(active_stop, short_be_level)
+        if i_use_profit_lock and short_mfe_atr >= i_profit_lock_trigger_atr
+            active_stop := math.min(active_stop, active_entry_price - active_entry_atr * i_profit_lock_atr)
+    strategy.exit("Short-X", "Short", stop = active_stop, limit = active_target)
+
+if strategy.position_size > 0 and i_use_early_follow_through and early_applies and i_early_exit_on_adverse_close1 and bars_in_trade == 1 and not na(long_first_close_atr) and long_first_close_atr <= -i_early_adverse_close_atr
+    strategy.close("Long", comment = "EarlyAdverse")
+
+if strategy.position_size < 0 and i_use_early_follow_through and early_applies and i_early_exit_on_adverse_close1 and bars_in_trade == 1 and not na(short_first_close_atr) and short_first_close_atr <= -i_early_adverse_close_atr
+    strategy.close("Short", comment = "EarlyAdverse")
+
+if strategy.position_size > 0 and i_use_early_follow_through and early_applies and bars_in_trade == i_early_review_bars and not na(long_mfe_atr) and long_mfe_atr < i_early_min_mfe_atr
+    strategy.close("Long", comment = "NoFollow")
+
+if strategy.position_size < 0 and i_use_early_follow_through and early_applies and bars_in_trade == i_early_review_bars and not na(short_mfe_atr) and short_mfe_atr < i_early_min_mfe_atr
+    strategy.close("Short", comment = "NoFollow")
+
+if strategy.position_size > 0 and bars_in_trade >= i_max_hold_bars
+    strategy.close("Long", comment = "TimeStop")
+
+if strategy.position_size < 0 and bars_in_trade >= i_max_hold_bars
+    strategy.close("Short", comment = "TimeStop")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    active_stop := na
+    active_target := na
+    active_entry_bar := na
+    active_entry_price := na
+    active_entry_atr := na
+    active_max_high := na
+    active_min_low := na
+    active_entry_type := entry_type_none
+    queued_entry_type := entry_type_none
+    pending_entry_price := na
+    pending_entry_side := 0
+    pending_entry_bar := na
+
+plot(ema_fast, "EMA Fast", color = color.new(color.orange, 0))
+plot(ema_slow, "EMA Slow", color = color.new(color.red, 10))
+plot(entry_high, "Entry High", color = color.new(color.lime, 80), style = plot.style_linebr)
+plot(entry_low, "Entry Low", color = color.new(color.red, 80), style = plot.style_linebr)
+plot(show_channel ? upper_channel : na, "HTF Upper Channel", color = color.new(color.lime, 55), style = plot.style_linebr)
+plot(show_channel ? lower_channel : na, "HTF Lower Channel", color = color.new(color.red, 55), style = plot.style_linebr)
+plot(show_channel and i_plot_channel_mid ? channel_mid : na, "HTF Channel Mid", color = color.new(color.silver, 65), style = plot.style_linebr)
+plot(i_plot_pd_tf1_eq ? pd1_eq : na, "PD TF1 EQ", color = color.new(color.aqua, 60), style = plot.style_linebr)
+plot(i_plot_session_vwap ? session_vwap : na, "Session VWAP", color = color.new(color.aqua, 10), style = plot.style_linebr)
+plot(i_plot_swing_levels ? nearest_swing_resistance : na, "Nearest Swing Resistance", color = color.new(color.red, 65), style = plot.style_linebr)
+plot(i_plot_swing_levels ? nearest_swing_support : na, "Nearest Swing Support", color = color.new(color.lime, 65), style = plot.style_linebr)
+plot(i_plot_majors_breadth ? majors_peer_breadth : na, "Majors Peer Breadth", color = color.new(color.blue, 55), display = display.none)
+plot(i_plot_flow_cluster ? flow_cluster_level : na, "Flow Cluster", color = color.new(color.yellow, 50), display = display.none)
+plot(i_plot_bbpct ? bb_pct : na, "BB Percent", color = color.new(color.purple, 55), display = display.none)
+plot(dir_entropy, "Direction Entropy", color = color.new(color.fuchsia, 70), display = display.none)
+plotshape(i_plot_cvd_div and bullish_cvd_div_event, title = "Bullish CVD Divergence", style = shape.circle, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny, text = "CVD")
+plotshape(i_plot_cvd_div and bearish_cvd_div_event, title = "Bearish CVD Divergence", style = shape.circle, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny, text = "CVD")
+plotshape(long_signal, title = "Long Signal", style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny, text = "L")
+plotshape(short_signal, title = "Short Signal", style = shape.triangledown, location = location.abovebar, color = color.new(color.maroon, 0), size = size.tiny, text = "S")
+bgcolor(in_session ? na : color.new(color.gray, 92), title = "Out of Session")

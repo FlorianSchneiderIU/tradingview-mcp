@@ -1,0 +1,78 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlgoAlpha
+
+//@version=5
+indicator("Half Trend Regression [AlgoAlpha]", shorttitle = "AlgoAlpha - Half Trend", overlay=true)
+
+// Inputs grouped into 'Parameters'
+amplitude = input.int(2, "Amplitude", group="Parameters", tooltip="Look-back length of the indicator")
+channelDeviation = input.float(2.0, "Channel Deviation", minval=0.1, group="Parameters", tooltip="Deviation for the channel offset")
+linreglen = input.int(7, "Linear Regression Length", group="Parameters", tooltip="Length for linear regression calculations")
+
+// Inputs in 'Appearance' group
+green = input.color(#00ffbb, "Bullish Color", group = "Appearance", tooltip="Color for bullish trend")
+red = input.color(#ff1100, "Bearish Color", group = "Appearance", tooltip="Color for bearish trend")
+
+// Calculations
+highs = ta.linreg(high, linreglen, 0)
+lows = ta.linreg(low, linreglen, 0)
+closes = ta.linreg(close, linreglen, 0)
+
+var float trendLine = na
+var int trendDirection = na
+var float maxLow = low
+var float minHigh = high
+
+atrPeriod = 100
+halfATR = ta.atr(atrPeriod) / 2
+channelOffset = channelDeviation * halfATR
+
+highMA = ta.sma(highs, amplitude)
+lowMA = ta.sma(lows, amplitude)
+highestHigh = ta.highest(highs, amplitude)
+lowestLow = ta.lowest(lows, amplitude)
+
+if na(trendDirection) and bar_index > linreglen
+    trendDirection := 1
+    trendLine := lowestLow
+else
+    if trendDirection == 1
+        maxLow := math.max(maxLow, lowestLow)
+        if highMA < maxLow and closes < lows[1]
+            trendDirection := -1
+            trendLine := highestHigh
+            minHigh := highs
+    else
+        minHigh := math.min(minHigh, highestHigh)
+        if lowMA > minHigh and closes > highs[1]
+            trendDirection := 1
+            trendLine := lowestLow
+            maxLow := lows
+
+if trendDirection == 1
+    trendLine := math.max(trendLine, lowestLow)
+else
+    trendLine := math.min(trendLine, highestHigh)
+
+upperChannel = trendLine + channelOffset
+lowerChannel = trendLine - channelOffset
+
+trendColor = trendDirection == 1 ? color.new(green, 0) : color.new(red, 0)
+
+// Plotting
+plotTrend = plot(trendLine, color=color.new(trendColor, 90), linewidth=2, title="Trend Line")
+lower = plot(trendDirection == 1 ? lowerChannel : na, title="Lower Channel", style=plot.style_linebr, display=display.none)
+upper = plot(trendDirection == -1 ? upperChannel : na, title="Upper Channel", style=plot.style_linebr, display=display.none)
+
+// Filling
+fill(plotTrend, lower, (open + close) / 2, lowerChannel, color.new(green, 95), color.new(green, 70))
+fill(plotTrend, upper, upperChannel, (open + close) / 2, color.new(red, 70), color.new(red, 95))
+
+// Trend Signals
+plotshape(ta.crossunder(trendDirection, 0) ? upperChannel : na, title="Bearish Trend", style=shape.labeldown, location=location.absolute, color=red, text="▼", textcolor=chart.fg_color, size=size.small)
+plotshape(ta.crossover(trendDirection, 0) ? lowerChannel : na, title="Bullish Trend", style=shape.labelup, location=location.absolute, color=green, text="▲", textcolor=chart.fg_color, size=size.small)
+
+// Alerts
+alertcondition(ta.crossunder(trendDirection, 0), title="Bearish Trend Alert")
+alertcondition(ta.crossover(trendDirection, 0), title="Bullish Trend Alert")
+alertcondition(ta.cross(trendDirection, 0), title="Universal Trend Alert")

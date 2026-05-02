@@ -1,0 +1,335 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BOSWaves
+
+//@version=6
+indicator("Swing Structure Forecast [BOSWaves]", overlay = true, max_labels_count = 500, max_boxes_count = 500, max_lines_count = 500, max_bars_back = 5000)
+
+// ┌───────────────────────────── BOSWaves ─ Inputs ──────────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+GRP_DETECT = "Detection"
+swingLen = input.int(16, "Swing Length", minval = 10, group = GRP_DETECT, tooltip = "Number of bars used to identify swing highs and lows. Larger values produce fewer but stronger, more significant pivots. Smaller values are more sensitive and catch minor swings.")
+
+GRP_SR = "Support / Resistance"
+showLevels   = input.bool(true,  "Show S/R Levels",  group = GRP_SR, tooltip = "Toggle visibility of all support and resistance zones. When off, no zones or level lines are drawn.")
+zoneATR      = input.float(0.3,  "Zone Width (ATR)", minval = 0.05, maxval = 0.5, step = 0.05, group = GRP_SR, tooltip = "Controls the height of each S/R zone as a multiple of ATR(200). Higher values create wider zones that are easier to see but less precise.")
+maxAge       = input.int(300,    "Max Level Age",    minval = 30, group = GRP_SR, tooltip = "Maximum number of bars an unbroken S/R level will remain on the chart before being removed. Broken levels are removed after 30 bars regardless of this setting.")
+
+GRP_PROJ = "Forecast"
+samples      = input.int(20,           "Samples",         minval = 3, maxval = 20, group = GRP_PROJ, tooltip = "Number of the most recent completed swing legs used to calculate the forecast. Higher values smooth out outliers; lower values react faster to recent behaviour.")
+method       = input.string("Weighted", "Method",         ["Weighted", "Average", "Median"], group = GRP_PROJ, tooltip = "Statistical method used to aggregate swing history.\n\nWeighted: recent swings have more influence.\nAverage: all swings weighted equally.\nMedian: uses the middle value, ignoring outliers.")
+fwdBars      = input.int(5,            "Forecast Bars",   minval = 5, group = GRP_PROJ, tooltip = "How many bars ahead the forecast beam and target zone are projected. Does not affect the price target calculation — only how far right the visuals extend.")
+showBeam     = input.bool(true,        "Projection Beam", group = GRP_PROJ, tooltip = "Show the layered cone-shaped beam representing the projected path and uncertainty range. The beam widens with higher standard deviation across recent swings.")
+showTarget   = input.bool(true,        "Target Zone",     group = GRP_PROJ, tooltip = "Show the target box at the end of the forecast beam. The box height is derived from the standard deviation of recent swing sizes — wider box means less consistent history.")
+showDots     = input.bool(true,        "Path Markers",    group = GRP_PROJ, tooltip = "Show small dot markers along the center trajectory of the forecast beam. Dots fade in opacity as they approach the target, giving a sense of the projected path.")
+showFibs     = input.bool(true,    "Fib Extensions",  group = GRP_PROJ, tooltip = "Draw Fibonacci extension levels beyond the forecast target. Enable or disable individual levels using the inputs below.")
+fib1Active   = input.bool(true,    "Level 1",         group = GRP_PROJ, inline = "f1")
+fib1Val      = input.float(1.0,    "",                group = GRP_PROJ, inline = "f1", minval = 0.001, step = 0.001, tooltip = "First Fibonacci extension level. 1.0 = 100% of the projected move.")
+fib2Active   = input.bool(true,    "Level 2",         group = GRP_PROJ, inline = "f2")
+fib2Val      = input.float(1.272,  "",                group = GRP_PROJ, inline = "f2", minval = 0.001, step = 0.001, tooltip = "Second Fibonacci extension level. 1.272 = 127.2% of the projected move.")
+fib3Active   = input.bool(true,    "Level 3",         group = GRP_PROJ, inline = "f3")
+fib3Val      = input.float(1.618,  "",                group = GRP_PROJ, inline = "f3", minval = 0.001, step = 0.001, tooltip = "Third Fibonacci extension level. 1.618 = 161.8% of the projected move.")
+fib4Active   = input.bool(false,   "Level 4",         group = GRP_PROJ, inline = "f4")
+fib4Val      = input.float(2.0,    "",                group = GRP_PROJ, inline = "f4", minval = 0.001, step = 0.001, tooltip = "Fourth Fibonacci extension level. Disabled by default. 2.0 = 200% of the projected move.")
+fib5Active   = input.bool(false,   "Level 5",         group = GRP_PROJ, inline = "f5")
+fib5Val      = input.float(2.618,  "",                group = GRP_PROJ, inline = "f5", minval = 0.001, step = 0.001, tooltip = "Fifth Fibonacci extension level. Disabled by default. 2.618 = 261.8% of the projected move.")
+
+GRP_CLR = "Colors"
+bullClr      = input.color(#00ff00, "Bull",     inline = "c",  group = GRP_CLR, tooltip = "Color used for bullish swing S/R zones and support levels.")
+bearClr      = input.color(#ff0000, "Bear",     inline = "c",  group = GRP_CLR, tooltip = "Color used for bearish swing S/R zones and resistance levels.")
+projClr      = input.color(#42a5f5, "Forecast", inline = "c2", group = GRP_CLR, tooltip = "Color used for the projection beam, center trajectory line, path markers, and target zone.")
+fibClr       = input.color(#ffeb3b, "Fib",      inline = "c2", group = GRP_CLR, tooltip = "Color used for all Fibonacci extension lines and their labels.")
+
+CLEAR = color.new(color.black, 100)
+
+// ┌───────────────────────────── BOSWaves ─ Types ───────────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+type Pivot
+    float price
+    int   idx
+
+type SRZone
+    float price
+    int   startIdx
+    bool  isResistance
+    bool  broken
+    box   outerBox
+    box   innerBox
+    line  lvlLine
+
+// ┌───────────────────────────── BOSWaves ─ State ───────────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+var hi   = Pivot.new(na, na)
+var lo   = Pivot.new(na, na)
+var bool dir = false
+
+var srZones = array.new<SRZone>()
+var pcts    = array.new<float>()
+var durs    = array.new<float>()
+
+var polyline beamOuter  = na
+var polyline beamMid    = na
+var polyline beamInner  = na
+var line     centerLine = na
+var box      tgtOuter   = na
+var box      tgtInner   = na
+var label    tgtLabel   = na
+var label[]  dots       = array.new<label>()
+var line[]   fibLines   = array.new<line>()
+var label[]  fibLabels  = array.new<label>()
+
+atr = ta.atr(200)
+
+// ┌───────────────────────────── BOSWaves ─ Beam Builder ────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+buildBeamPts(int oIdx, int tIdx, float orig, float tgt, float bHalf, float mult, int steps) =>
+    pts = array.new<chart.point>()
+    for s = 0 to steps
+        t     = s / float(steps)
+        eased = t * t * (3.0 - 2.0 * t)
+        x     = oIdx + int((tIdx - oIdx) * t)
+        yc    = orig + (tgt - orig) * eased
+        sp    = bHalf * mult * eased
+        pts.push(chart.point.from_index(x, yc + sp))
+    for s = steps to 0
+        t     = s / float(steps)
+        eased = t * t * (3.0 - 2.0 * t)
+        x     = oIdx + int((tIdx - oIdx) * t)
+        yc    = orig + (tgt - orig) * eased
+        sp    = bHalf * mult * eased
+        pts.push(chart.point.from_index(x, yc - sp))
+    pts
+
+// ┌───────────────────────────── BOSWaves ─ Pivot Detection ─────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+H = ta.highest(high, swingLen)
+L = ta.lowest(low, swingLen)
+
+if high == H
+    dir := true
+if low == L
+    dir := false
+
+if high[1] == H[1] and high < H
+    hi.idx   := bar_index[1]
+    hi.price := high[1]
+
+if low[1] == L[1] and low > L
+    lo.idx   := bar_index[1]
+    lo.price := low[1]
+
+// ┌───────────────────────────── BOSWaves ─ Swing Recording & S/R Creation ──────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+if dir != dir[1]
+
+    pct  = not dir ? (hi.price - lo.price) / lo.price * 100 : (lo.price - hi.price) / hi.price * 100
+    bars = math.abs(hi.idx - lo.idx)
+
+    pcts.push(math.abs(pct))
+    durs.push(bars)
+    if pcts.size() > samples
+        pcts.shift()
+        durs.shift()
+
+    if showLevels
+        zWidth = atr * zoneATR
+
+        if dir
+            z = SRZone.new()
+            z.price        := hi.price
+            z.startIdx     := hi.idx
+            z.isResistance := true
+            z.broken       := false
+            z.outerBox     := box.new(hi.idx, hi.price + zWidth, bar_index + 5, hi.price, border_color = CLEAR, bgcolor = color.new(bearClr, 90))
+            z.innerBox     := box.new(hi.idx, hi.price + (zWidth * 0.35), bar_index + 5, hi.price, border_color = CLEAR, bgcolor = color.new(bearClr, 82))
+            z.lvlLine      := line.new(hi.idx, hi.price, bar_index + 5, hi.price, color = color.new(bearClr, 45), width = 1)
+            srZones.push(z)
+
+        else
+            z = SRZone.new()
+            z.price        := lo.price
+            z.startIdx     := lo.idx
+            z.isResistance := false
+            z.broken       := false
+            z.outerBox     := box.new(lo.idx, lo.price, bar_index + 5, lo.price - zWidth, border_color = CLEAR, bgcolor = color.new(bullClr, 90))
+            z.innerBox     := box.new(lo.idx, lo.price, bar_index + 5, lo.price - (zWidth * 0.35), border_color = CLEAR, bgcolor = color.new(bullClr, 82))
+            z.lvlLine      := line.new(lo.idx, lo.price, bar_index + 5, lo.price, color = color.new(bullClr, 45), width = 1)
+            srZones.push(z)
+
+// ┌───────────────────────────── BOSWaves ─ S/R Level Management ────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+if srZones.size() > 0
+    for i = srZones.size() - 1 to 0
+
+        z   = srZones.get(i)
+        age = bar_index - z.startIdx
+        clr = z.isResistance ? bearClr : bullClr
+
+        if not z.broken
+            if z.isResistance and close > z.price
+                z.broken := true
+                line.set_style(z.lvlLine, line.style_dotted)
+                line.set_color(z.lvlLine, color.new(clr, 80))
+                box.set_bgcolor(z.outerBox, color.new(clr, 96))
+                box.set_bgcolor(z.innerBox, color.new(clr, 94))
+
+            if not z.isResistance and close < z.price
+                z.broken := true
+                line.set_style(z.lvlLine, line.style_dotted)
+                line.set_color(z.lvlLine, color.new(clr, 80))
+                box.set_bgcolor(z.outerBox, color.new(clr, 96))
+                box.set_bgcolor(z.innerBox, color.new(clr, 94))
+
+        if age > maxAge or (z.broken and age > 30)
+            box.delete(z.outerBox)
+            box.delete(z.innerBox)
+            line.delete(z.lvlLine)
+            srZones.remove(i)
+            continue
+
+        if not z.broken
+            fade    = math.min(float(age) / float(maxAge), 1.0)
+            outerT  = int(90.0 + (10.0 * fade))
+            innerT  = int(82.0 + (18.0 * fade))
+            lineT   = int(45.0 + (55.0 * fade))
+
+            box.set_right(z.outerBox, bar_index + 5)
+            box.set_right(z.innerBox, bar_index + 5)
+            line.set_x2(z.lvlLine, bar_index + 5)
+
+            box.set_bgcolor(z.outerBox, color.new(clr, outerT))
+            box.set_bgcolor(z.innerBox, color.new(clr, innerT))
+            line.set_color(z.lvlLine, color.new(clr, lineT))
+
+// ┌───────────────────────────── BOSWaves ─ Forecast Engine ─────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+if barstate.islast and pcts.size() >= 2
+
+    // ── Cleanup ──
+    beamOuter.delete()
+    beamMid.delete()
+    beamInner.delete()
+    centerLine.delete()
+    tgtOuter.delete()
+    tgtInner.delete()
+    tgtLabel.delete()
+    for d in dots
+        d.delete()
+    dots.clear()
+    for fl in fibLines
+        fl.delete()
+    fibLines.clear()
+    for flb in fibLabels
+        flb.delete()
+    fibLabels.clear()
+
+    fPct  = 0.0
+    fBars = 0.0
+
+    if method == "Weighted"
+        tw = 0.0
+        wp = 0.0
+        wb = 0.0
+        for i = 0 to pcts.size() - 1
+            w   = i + 1.0
+            wp += pcts.get(i) * w
+            wb += durs.get(i) * w
+            tw += w
+        fPct  := wp / tw
+        fBars := wb / tw
+    else if method == "Median"
+        fPct  := pcts.median()
+        fBars := durs.median()
+    else
+        fPct  := pcts.avg()
+        fBars := durs.avg()
+
+    variance = 0.0
+    for i = 0 to pcts.size() - 1
+        diff      = pcts.get(i) - fPct
+        variance += diff * diff
+    stdDev = math.sqrt(variance / pcts.size())
+
+    isBear    = not dir
+    origin    = isBear ? hi.price : lo.price
+    originIdx = isBear ? hi.idx   : lo.idx
+    target    = isBear ? origin * (1.0 - fPct / 100.0) : origin * (1.0 + fPct / 100.0)
+    targetIdx = bar_index + fwdBars
+    bandHalf  = math.max(origin * stdDev / 100.0, atr * 0.1)
+
+    // ── Layered glow beam ──
+    if showBeam
+        outerPts = buildBeamPts(originIdx, targetIdx, origin, target, bandHalf, 1.5, 12)
+        midPts   = buildBeamPts(originIdx, targetIdx, origin, target, bandHalf, 1.0, 12)
+        innerPts = buildBeamPts(originIdx, targetIdx, origin, target, bandHalf, 0.5, 12)
+
+        beamOuter := polyline.new(outerPts, false, true, line_color = CLEAR,                    fill_color = color.new(projClr, 93))
+        beamMid   := polyline.new(midPts,   false, true, line_color = color.new(projClr, 80),   fill_color = color.new(projClr, 87))
+        beamInner := polyline.new(innerPts, false, true, line_color = CLEAR,                    fill_color = color.new(projClr, 78))
+
+    // ── Center trajectory ──
+    centerLine := line.new(originIdx, origin, targetIdx, target, color = color.new(projClr, 30), width = 1, style = line.style_dashed)
+
+    // ── Path markers ──
+    if showDots
+        for s = 1 to 4
+            t     = s / 5.0
+            eased = t * t * (3.0 - 2.0 * t)
+            x     = originIdx + int((targetIdx - originIdx) * t)
+            y     = origin + (target - origin) * eased
+            tr    = int(25.0 + (45.0 * (1.0 - t)))
+            dots.push(label.new(x, y, "●", style = label.style_none, textcolor = color.new(projClr, tr), size = size.tiny))
+
+    // ── Target zone ──
+    if showTarget
+        tgtTop = target + bandHalf * 0.6
+        tgtBot = target - bandHalf * 0.6
+
+        tgtOuter := box.new(targetIdx - 3, tgtTop + bandHalf * 0.3, targetIdx + 6, tgtBot - bandHalf * 0.3, border_color = CLEAR, bgcolor = color.new(projClr, 90))
+        tgtInner := box.new(targetIdx - 2, tgtTop, targetIdx + 5, tgtBot, border_color = color.new(projClr, 40), border_width = 1, bgcolor = color.new(projClr, 80))
+
+        sign     = isBear ? "▼ " : "▲ "
+        tgtLabel := label.new(targetIdx + 6, target, sign + str.tostring(fPct, "#.##") + "%\n" + str.tostring(target, format.mintick), style = label.style_label_left, color = color.new(projClr, 15), textcolor = color.white, size = size.normal)
+
+    // ── Fibonacci extensions ──
+    if showFibs
+        fullMove = target - origin
+
+        fibActive = array.from(fib1Active, fib2Active, fib3Active, fib4Active, fib5Active)
+        fibVals   = array.from(fib1Val,    fib2Val,    fib3Val,    fib4Val,    fib5Val)
+        fibAlphas = array.from(30,         45,         30,         55,         65)
+
+        for i = 0 to fibVals.size() - 1
+            if not fibActive.get(i)
+                continue
+
+            ratio    = fibVals.get(i)
+            fibPrice = origin + fullMove * ratio
+            alpha    = fibAlphas.get(i)
+
+            fibLines.push(
+              line.new(bar_index, fibPrice, targetIdx + 20, fibPrice,
+                       color = color.new(fibClr, alpha),
+                       width = 1,
+                       style = ratio == 1.0 ? line.style_solid : line.style_dashed))
+
+            fibLabels.push(
+              label.new(targetIdx + 22, fibPrice,
+                        str.tostring(ratio, "#.###") + "  " + str.tostring(fibPrice, format.mintick),
+                        style     = label.style_label_left,
+                        color     = color.new(fibClr, 80),
+                        textcolor = color.new(fibClr, 10),
+                        size      = size.small))
+
+// ┌───────────────────────────── BOSWaves ─ Alerts ──────────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+
+alertcondition(dir != dir[1] and dir,     title = "Swing High Confirmed", message = "{{ticker}} New swing high confirmed")
+alertcondition(dir != dir[1] and not dir, title = "Swing Low Confirmed",  message = "{{ticker}} New swing low confirmed")

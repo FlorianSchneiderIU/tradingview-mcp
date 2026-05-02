@@ -1,0 +1,791 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Join our channel for more free tools: https://t.me/simpleforextools
+
+//  @version=6
+indicator("Dynamic Support and Resistance with Trend Lines", shorttitle="DSRTL", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 1. IMPORTS & GLOBAL CONFIG
+// ══════════════════════════════════════════════════════════════════════════════
+import TradingView/ta/10 as tvta
+
+// --- Inputs Configuration 
+string GRP_CFG = "General Configuration (Universal)"
+string calc_method = input.string("Geometry (Source File)", "Calculation Method", options = ["Geometry (Source File)", "Intrabar (Precise)"], group=GRP_CFG)
+string ltf_input = input.timeframe("15S", "Intrabar Resolution", group=GRP_CFG)
+int universal_len = input.int(100, "Universal Lookback Length", minval=10, group=GRP_CFG)
+int proj_len = input.int(26, "Global Projection Bars", minval=0, group=GRP_CFG)
+int mat_transp = input.int(95, "Matrix Transparency", minval=0, maxval=100, group=GRP_CFG)
+int ext_transp = input.int(95, "Extremes Transparency", minval=0, maxval=100, group=GRP_CFG)
+
+string GRP_MAT = "Strategy A: Matrix Climax"
+bool show_max_mat = input.bool(true, "Show Resistance (Matrix)", group=GRP_MAT)
+bool show_min_mat = input.bool(true, "Show Support (Matrix)", group=GRP_MAT)
+int top_count = input.int(10, "Rank Count", minval=1, group=GRP_MAT)
+
+string GRP_EXT = "Strategy B: Volume Extremes"
+bool show_max_ext = input.bool(true, "Show Resistance (Extremes)", group=GRP_EXT)
+bool show_min_ext = input.bool(true, "Show Support (Extremes)", group=GRP_EXT)
+
+string grpPivotSpan = "Trend Line 1: Pivot Span"
+bool enable_pivot_span = input.bool(true, "Enable Pivot Span Trendline", group=grpPivotSpan)
+//  Unified color theme to Pink/Purple 
+color trend_high_color = input.color(#ff00d0, "High Trend Color", group=grpPivotSpan)
+color trend_low_color = input.color(#ff00d0, "Low Trend Color", group=grpPivotSpan)
+color trend_fill_color = input.color(#ff00d0, "Fill Color (90% Transp)", group=grpPivotSpan)
+int trend_line_width = input.int(2, "Line Width", group=grpPivotSpan)
+// Style dashed 
+string trend_line_style = input.string("dashed", "Line Style", options=["solid", "dashed", "dotted"], group=grpPivotSpan)
+int pivot_left_input = input.int(5, "Pivot Left", group=grpPivotSpan)
+int pivot_right_input = input.int(5, "Pivot Right", group=grpPivotSpan)
+int point_count_input = input.int(5, "Pivot Count", group=grpPivotSpan)
+
+string grpFivePoint = "Trend Line 2: 5-Point Channel"
+bool enable_5pt_channel = input.bool(true, "Enable 5-Point Channel", group=grpFivePoint)
+color five_hi_color = input.color(#ff00d0, "High Channel Color", group=grpFivePoint)
+color five_lo_color = input.color(#ff00d0, "Low Channel Color", group=grpFivePoint)
+int five_line_width = input.int(3, "Channel Width", group=grpFivePoint)
+string five_line_style = input.string("solid", "Channel Style", options=["solid", "dashed", "dotted"], group=grpFivePoint)
+
+string GRP_VIS = "Visual Interface"
+bool show_dash = input.bool(true, "Show Dashboard", group=GRP_VIS)
+bool show_map = input.bool(true, "Show Visual Matrix Map", group=GRP_VIS)
+string ui_theme = input.string("Dark Mode", "Color Theme", options=["Dark Mode", "Light Mode"], group=GRP_VIS)
+string dash_pos = input.string(position.top_right, "Table Position", group=GRP_VIS)
+string dash_size = input.string("Small", "Table Size", options=["Tiny", "Small", "Normal", "Large"], group=GRP_VIS)
+float time_offset = input.float(3.0, "Timezone Offset (Hours)", step=0.5, group=GRP_VIS)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2. GLOBAL PALETTE, UTILS & STATE (ENHANCED STRUCTURE)
+// ══════════════════════════════════════════════════════════════════════════════
+var color C_BG_TBL = na
+var color C_TXT = na
+var color C_LN = na
+var color C_MAT_SUP = na
+var color C_MAT_RES = na
+var color C_EXT_SUP = na
+var color C_EXT_RES = na
+
+// [ENHANCEMENT] Colors for Dashboard Bias Context
+var color C_BULL_STRONG = #00C853
+var color C_BULL_WEAK = #69F0AE
+var color C_BEAR_STRONG = #D50000
+var color C_BEAR_WEAK = #FF8A80
+var color C_NEUTRAL = #78909C
+var color C_CONFLICT = #FFD600 // Used for divergences or compression
+
+//  Ensured standard 
+if ui_theme == "Dark Mode"
+    C_BG_TBL := color.new(color.black, 95)
+    C_TXT := color.new(#eeeeee, 0)
+    C_LN := color.new(#eeeeee, 80)
+    C_MAT_SUP := #00E676
+    C_MAT_RES := #FF5258
+    C_EXT_SUP := #00e5ff
+    C_EXT_RES := #ff9100
+else
+    C_BG_TBL := color.new(color.white, 95)
+    C_TXT := color.new(#131722, 0)
+    C_LN := color.new(#131722, 80)
+    C_MAT_SUP := #00897b
+    C_MAT_RES := #e53935
+    C_EXT_SUP := #00bcd4
+    C_EXT_RES := #ff6d00
+
+// [OPTIMIZATION] Global State Variables for efficient data flow
+var float g_r_top_fin = na
+var float g_r_bot_fin = na
+var float g_s_top_fin = na
+var float g_s_bot_fin = na
+
+// Global ATR calculation 
+float global_atr = ta.atr(14)
+
+// Helper: Line Style
+get_line_style(string style) =>
+    style == "solid" ? line.style_solid :
+     style == "dashed" ? line.style_dashed :
+     style == "dotted" ? line.style_dotted : line.style_dashed
+
+// Helper: Format (Enhanced for precision and NA handling)
+f_fmt(float v) =>
+    if na(v)
+        "N/A"
+    else
+        float a = math.abs(v)
+        a >= 1e9 ? str.tostring(v / 1e9, "#.##") + "B" :
+         a >= 1e6 ? str.tostring(v / 1e6, "#.##") + "M" :
+         a >= 1e3 ? str.tostring(v / 1e3, "#.##") + "K" :
+         str.tostring(v, format.mintick) // Use chart's native precision
+
+f_get_size(string _s) =>
+    switch _s
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.small
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3. TREND LINE CALCULATIONS (METHOD 1 & 2) 
+// ══════════════════════════════════════════════════════════════════════════════
+// --- Method 1: Pivot Span ---
+var int[] high_idx_points = array.new_int()
+var float[] high_val_points = array.new_float()
+var int[] low_idx_points = array.new_int()
+var float[] low_val_points = array.new_float()
+var line high_trend_line_id = na
+var line low_trend_line_id = na
+var linefill pivot_span_fill_id = na
+
+if enable_pivot_span
+    // Pivot Detection and Storage Logic 
+    float pivot_high_value = ta.pivothigh(high, pivot_left_input, pivot_right_input)
+    float pivot_low_value = ta.pivotlow(low, pivot_left_input, pivot_right_input)
+    
+    if not na(pivot_high_value)
+        array.push(high_idx_points, bar_index - pivot_right_input)
+        array.push(high_val_points, high[pivot_right_input])
+        while array.size(high_idx_points) > point_count_input
+            array.shift(high_idx_points), array.shift(high_val_points)
+    
+    if not na(pivot_low_value)
+        array.push(low_idx_points, bar_index - pivot_right_input)
+        array.push(low_val_points, low[pivot_right_input])
+        while array.size(low_idx_points) > point_count_input
+            array.shift(low_idx_points), array.shift(low_val_points)
+
+    // Draw High Line 
+    if array.size(high_idx_points) >= 2
+        int far_hi_idx = array.get(high_idx_points, 0)
+        float far_hi_val = array.get(high_val_points, 0)
+        int near_hi_idx = array.get(high_idx_points, array.size(high_idx_points) - 1)
+        float near_hi_val = array.get(high_val_points, array.size(high_val_points) - 1)
+        int hi_bar_diff = near_hi_idx - far_hi_idx
+        float hi_slope = hi_bar_diff != 0 ? (near_hi_val - far_hi_val) / hi_bar_diff : 0.0
+        float hi_intercept = far_hi_val - hi_slope * far_hi_idx
+        
+        int x1_hi = bar_index - (universal_len - 1), int x2_hi = bar_index
+        float y1_hi = hi_intercept + hi_slope * x1_hi, float y2_hi = hi_intercept + hi_slope * x2_hi
+        
+        if na(high_trend_line_id)
+            high_trend_line_id := line.new(x1_hi, y1_hi, x2_hi, y2_hi, xloc=xloc.bar_index, color=trend_high_color, width=trend_line_width, style=get_line_style(trend_line_style))
+        else
+            line.set_xy1(high_trend_line_id, x1_hi, y1_hi), line.set_xy2(high_trend_line_id, x2_hi, y2_hi)
+            line.set_color(high_trend_line_id, trend_high_color), line.set_width(high_trend_line_id, trend_line_width), line.set_style(high_trend_line_id, get_line_style(trend_line_style))
+    else
+        if not na(high_trend_line_id)
+            line.delete(high_trend_line_id), high_trend_line_id := na
+
+    // Draw Low Line 
+    if array.size(low_idx_points) >= 2
+        int far_lo_idx = array.get(low_idx_points, 0)
+        float far_lo_val = array.get(low_val_points, 0)
+        int near_lo_idx = array.get(low_idx_points, array.size(low_idx_points) - 1)
+        float near_lo_val = array.get(low_val_points, array.size(low_val_points) - 1)
+        int lo_bar_diff = near_lo_idx - far_lo_idx
+        float lo_slope = lo_bar_diff != 0 ? (near_lo_val - far_lo_val) / lo_bar_diff : 0.0
+        float lo_intercept = far_lo_val - lo_slope * far_lo_idx
+        
+        int x1_lo = bar_index - (universal_len - 1), int x2_lo = bar_index
+        float y1_lo = lo_intercept + lo_slope * x1_lo, float y2_lo = lo_intercept + lo_slope * x2_lo
+        
+        if na(low_trend_line_id)
+            low_trend_line_id := line.new(x1_lo, y1_lo, x2_lo, y2_lo, xloc=xloc.bar_index, color=trend_low_color, width=trend_line_width, style=get_line_style(trend_line_style))
+        else
+            line.set_xy1(low_trend_line_id, x1_lo, y1_lo), line.set_xy2(low_trend_line_id, x2_lo, y2_lo)
+            line.set_color(low_trend_line_id, trend_low_color), line.set_width(low_trend_line_id, trend_line_width), line.set_style(low_trend_line_id, get_line_style(trend_line_style))
+    else
+        if not na(low_trend_line_id)
+            line.delete(low_trend_line_id), low_trend_line_id := na
+            
+    // Fill 
+    if not na(high_trend_line_id) and not na(low_trend_line_id)
+        color fill_col = color.new(trend_fill_color, 90)
+        if na(pivot_span_fill_id)
+            pivot_span_fill_id := linefill.new(high_trend_line_id, low_trend_line_id, fill_col)
+        else
+            linefill.set_color(pivot_span_fill_id, fill_col)
+    else
+        if not na(pivot_span_fill_id)
+            linefill.delete(pivot_span_fill_id), pivot_span_fill_id := na
+else
+    // Clean up if disabled
+    if not na(high_trend_line_id)
+        line.delete(high_trend_line_id), high_trend_line_id := na
+    if not na(low_trend_line_id)
+        line.delete(low_trend_line_id), low_trend_line_id := na
+    if not na(pivot_span_fill_id)
+        linefill.delete(pivot_span_fill_id), pivot_span_fill_id := na
+
+// --- Method 2: 5-Point Channel ---
+// Function 
+calcFivePointChannel(int len_window) =>
+    float slope_hi = na, float intercept_hi = na
+    float slope_lo = na, float intercept_lo = na
+    
+    if bar_index >= len_window
+        float sum_x_hi = 0.0, float sum_y_hi = 0.0, float sum_xy_hi = 0.0, float sum_x2_hi = 0.0, int n_hi = 0
+        float sum_x_lo = 0.0, float sum_y_lo = 0.0, float sum_xy_lo = 0.0, float sum_x2_lo = 0.0, int n_lo = 0
+        
+        int seg_len_base = math.max(1, math.floor(len_window / 5))
+        for k = 0 to 4
+            int seg_start = k * seg_len_base
+            int remaining = len_window - seg_start
+            if remaining <= 0
+                break
+            int seg_len_k = k < 4 ? math.min(seg_len_base, remaining) : remaining
+            
+            // High Search
+            float max_h = na, int barsAgo_h = na
+            for i = 0 to seg_len_k - 1
+                float v = high[seg_start + i]
+                if not na(v) and (na(max_h) or v > max_h)
+                    max_h := v, barsAgo_h := seg_start + i
+            if not na(barsAgo_h)
+                float x = bar_index - barsAgo_h, float y = max_h
+                sum_x_hi += x, sum_y_hi += y, sum_xy_hi += x * y, sum_x2_hi += x * x, n_hi += 1
+            
+            // Low Search
+            float min_l = na, int barsAgo_l = na
+            for i = 0 to seg_len_k - 1
+                float v2 = low[seg_start + i]
+                if not na(v2) and (na(min_l) or v2 < min_l)
+                    min_l := v2, barsAgo_l := seg_start + i
+            if not na(barsAgo_l)
+                float x = bar_index - barsAgo_l, float y = min_l
+                sum_x_lo += x, sum_y_lo += y, sum_xy_lo += x * y, sum_x2_lo += x * x, n_lo += 1
+        
+        // Regression 
+        if n_hi >= 2
+            float denom = n_hi * sum_x2_hi - sum_x_hi * sum_x_hi
+            slope_hi := denom != 0.0 ? (n_hi * sum_xy_hi - sum_x_hi * sum_y_hi) / denom : 0.0
+            intercept_hi := (sum_y_hi - slope_hi * sum_x_hi) / n_hi
+            
+        if n_lo >= 2
+            float denom = n_lo * sum_x2_lo - sum_x_lo * sum_x_lo
+            slope_lo := denom != 0.0 ? (n_lo * sum_xy_lo - sum_x_lo * sum_y_lo) / denom : 0.0
+            intercept_lo := (sum_y_lo - slope_lo * sum_x_lo) / n_lo
+    
+    [slope_hi, intercept_hi, slope_lo, intercept_lo]
+
+var line hi_line_5pt = na
+var line lo_line_5pt = na
+
+if enable_5pt_channel
+    [slope_hi, intercept_hi, slope_lo, intercept_lo] = calcFivePointChannel(universal_len)
+    bool can_draw_hi = not na(slope_hi), bool can_draw_lo = not na(slope_lo)
+    
+    int x1 = bar_index - universal_len + 1, int x2 = bar_index
+    
+    // Upper Line 
+    if can_draw_hi
+        float y1 = slope_hi * x1 + intercept_hi, float y2 = slope_hi * x2 + intercept_hi
+        if na(hi_line_5pt)
+            hi_line_5pt := line.new(x1, y1, x2, y2, xloc=xloc.bar_index, color=five_hi_color, style=get_line_style(five_line_style), width=five_line_width)
+        else
+            line.set_xy1(hi_line_5pt, x1, y1), line.set_xy2(hi_line_5pt, x2, y2)
+            line.set_color(hi_line_5pt, five_hi_color), line.set_style(hi_line_5pt, get_line_style(five_line_style)), line.set_width(hi_line_5pt, five_line_width)
+    else
+        if not na(hi_line_5pt)
+            line.delete(hi_line_5pt), hi_line_5pt := na
+            
+    // Lower Line 
+    if can_draw_lo
+        float y1 = slope_lo * x1 + intercept_lo, float y2 = slope_lo * x2 + intercept_lo
+        if na(lo_line_5pt)
+            lo_line_5pt := line.new(x1, y1, x2, y2, xloc=xloc.bar_index, color=five_lo_color, style=get_line_style(five_line_style), width=five_line_width)
+        else
+            line.set_xy1(lo_line_5pt, x1, y1), line.set_xy2(lo_line_5pt, x2, y2)
+            line.set_color(lo_line_5pt, five_lo_color), line.set_style(lo_line_5pt, get_line_style(five_line_style)), line.set_width(lo_line_5pt, five_line_width)
+    else
+        if not na(lo_line_5pt)
+            line.delete(lo_line_5pt), lo_line_5pt := na
+else
+    if not na(hi_line_5pt)
+        line.delete(hi_line_5pt), hi_line_5pt := na
+    if not na(lo_line_5pt)
+        line.delete(lo_line_5pt), lo_line_5pt := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 4. DSR ENGINE (SUPPORT/RESISTANCE LOGIC) 
+// ══════════════════════════════════════════════════════════════════════════════
+type BarVol
+    int idx
+    float vol_b
+    float vol_s
+    float price_h
+    float price_l
+    float price_c
+
+type VolData
+    float buy_vol
+    float sell_vol
+    float total_vol
+    float delta
+    bool is_valid
+
+var int ltf_cov_bars = 0
+
+// --- Helpers DSR ---
+var box[] clean_boxes = array.new_box()
+var line[] clean_lines = array.new_line()
+
+f_clear_drawings() =>
+    while array.size(clean_boxes) > 0
+        box.delete(array.pop(clean_boxes))
+    while array.size(clean_lines) > 0
+        line.delete(array.pop(clean_lines))
+
+f_draw_zone_clean(float y1, float y2, int x1, int x2, int x_proj, color c_fill, color c_border, int tr_val) =>
+    if not na(y1) and not na(y2)
+        box b = box.new(x1, y1, x2 + x_proj, y2, bgcolor=color.new(c_fill, tr_val), border_color=na, xloc=xloc.bar_index)
+        array.push(clean_boxes, b)
+        line l1 = line.new(x1, y1, x2, y1, xloc.bar_index, extend.none, c_border, line.style_solid, 1)
+        line l2 = line.new(x1, y2, x2, y2, xloc.bar_index, extend.none, c_border, line.style_solid, 1)
+        array.push(clean_lines, l1), array.push(clean_lines, l2)
+        if x_proj > 0
+            line l3 = line.new(x2, y1, x2 + x_proj, y1, xloc.bar_index, extend.none, c_border, line.style_dashed, 1)
+            line l4 = line.new(x2, y2, x2 + x_proj, y2, xloc.bar_index, extend.none, c_border, line.style_dashed, 1)
+            array.push(clean_lines, l3), array.push(clean_lines, l4)
+
+f_get_geo_volume_source() =>
+    float range_i = high - low
+    float v_b = 0.0, float v_s = 0.0
+    if range_i == 0
+        v_b := volume * 0.5, v_s := volume * 0.5
+    else
+        v_b := volume * ((close - low) / range_i)
+        v_s := volume * ((high - close) / range_i)
+    VolData.new(v_b, v_s, volume, v_b - v_s, true)
+
+f_get_ltf_volume_lib(string _ltf) =>
+    [u, d, dl] = tvta.requestUpAndDownVolume(_ltf)
+    float v_b = math.abs(u), float v_s = math.abs(d)
+    VolData.new(v_b, v_s, v_b + v_s, dl, not na(dl))
+
+// Main Calc
+VolData current_vol = VolData.new(0,0,0,0,false)
+if calc_method == "Intrabar (Precise)"
+    current_vol := f_get_ltf_volume_lib(ltf_input)
+else
+    current_vol := f_get_geo_volume_source()
+
+if calc_method == "Intrabar (Precise)" and current_vol.is_valid
+    ltf_cov_bars += 1
+
+// Store History
+float s_vb = current_vol.buy_vol
+float s_vs = current_vol.sell_vol
+var BarVol[] matrix_data = array.new<BarVol>()
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 5. MAIN LOGIC LOOP (ON LAST BAR) 
+// ══════════════════════════════════════════════════════════════════════════════
+if barstate.islast
+    f_clear_drawings()
+    array.clear(matrix_data)
+    
+    // Determine effective lookback length to respect LTF buffer limits
+    int effective_len = universal_len
+    if calc_method == "Intrabar (Precise)"
+        // Limit the lookback to the available LTF history coverage tracked by ltf_cov_bars
+        effective_len := math.min(universal_len, ltf_cov_bars)
+
+    // Data Collection
+    // Use effective_len instead of universal_len and ensure length is > 0
+    if effective_len > 0
+        for i = 0 to effective_len - 1
+            if not na(s_vb[i])
+                // Note: Arguments must match the UDT definition order.
+                array.push(matrix_data, BarVol.new(bar_index - i, s_vb[i], s_vs[i], high[i], low[i], close[i]))
+            
+    // Strategy A: Matrix 
+    float[] all_vb = array.new_float(), float[] all_vs = array.new_float()
+    for item in matrix_data
+        array.push(all_vb, item.vol_b), array.push(all_vs, item.vol_s)
+    array.sort(all_vb), array.sort(all_vs)
+    
+    int sz = array.size(all_vb)
+    float t_vb_hi = (sz > top_count) ? array.get(all_vb, sz - top_count) : 0.0
+    float t_vs_hi = (sz > top_count) ? array.get(all_vs, sz - top_count) : 0.0
+    
+    BarVol[] top_highs_c = array.copy(matrix_data)
+    int n = array.size(top_highs_c)
+    int loop_limit = math.min(top_count + 5, n - 1)
+    
+    // Partial Bubble Sort 
+    if n > 1
+        for i = 0 to loop_limit
+            for j = 0 to n - 2 - i
+                BarVol b1 = array.get(top_highs_c, j), BarVol b2 = array.get(top_highs_c, j + 1)
+                if b1.price_c < b2.price_c
+                    array.set(top_highs_c, j, b2), array.set(top_highs_c, j + 1, b1)
+        
+        BarVol[] top_lows_c = array.copy(matrix_data)
+        if n > 1
+            for i = 0 to loop_limit
+                for j = 0 to n - 2 - i
+                    BarVol b1 = array.get(top_lows_c, j), BarVol b2 = array.get(top_lows_c, j + 1)
+                    if b1.price_c > b2.price_c
+                        array.set(top_lows_c, j, b2), array.set(top_lows_c, j + 1, b1)
+        
+        // Resistance & Support Calculation
+        int rank_limit = math.min(top_count, n)
+        float z_res_top_a = na, float z_res_bot_a = na, int z_res_idx_a = na, float max_c = na
+        float z_sup_top_a = na, float z_sup_bot_a = na, int z_sup_idx_a = na, float min_c = na
+        if rank_limit > 0
+            // Resistance
+            for i = 0 to rank_limit - 1
+                BarVol b = array.get(top_highs_c, i)
+                if (b.vol_b >= t_vb_hi) or (b.vol_s >= t_vs_hi)
+                    if na(max_c) or b.price_c > max_c
+                        max_c := b.price_c, z_res_top_a := b.price_h, z_res_bot_a := b.price_l, z_res_idx_a := b.idx
+            // Support
+            for i = 0 to rank_limit - 1
+                BarVol b = array.get(top_lows_c, i)
+                if (b.vol_b >= t_vb_hi) or (b.vol_s >= t_vs_hi)
+                    if na(min_c) or b.price_c < min_c
+                        min_c := b.price_c, z_sup_top_a := b.price_h, z_sup_bot_a := b.price_l, z_sup_idx_a := b.idx
+        
+        // Draw Matrix 
+        if show_max_mat
+            f_draw_zone_clean(z_res_top_a, z_res_bot_a, z_res_idx_a, bar_index, proj_len, C_MAT_RES, C_MAT_RES, mat_transp)
+        if show_min_mat
+            f_draw_zone_clean(z_sup_top_a, z_sup_bot_a, z_sup_idx_a, bar_index, proj_len, C_MAT_SUP, C_MAT_SUP, mat_transp)
+
+    // Strategy B: Extremes 
+    int idx_b_max = -1, int idx_s_max = -1, int idx_b_min = -1, int idx_s_min = -1
+    float val_b_max = -1.0, float val_s_max = -1.0, float val_b_min = 1.0e15, float val_s_min = 1.0e15
+    
+    for i = 0 to array.size(matrix_data) - 1
+        BarVol b = array.get(matrix_data, i)
+        if b.vol_b > val_b_max
+            val_b_max := b.vol_b, idx_b_max := i
+        if b.vol_s > val_s_max
+            val_s_max := b.vol_s, idx_s_max := i
+        if b.vol_b > 0 and b.vol_b < val_b_min
+            val_b_min := b.vol_b, idx_b_min := i
+        if b.vol_s > 0 and b.vol_s < val_s_min
+            val_s_min := b.vol_s, idx_s_min := i
+            
+    // Calc Extremes 
+    float res_top_b = na, float res_bot_b = na
+    if idx_b_max != -1 and idx_s_max != -1
+        BarVol bb = array.get(matrix_data, idx_b_max), BarVol bs = array.get(matrix_data, idx_s_max)
+        if idx_b_max == idx_s_max
+            res_top_b := bb.price_h, res_bot_b := bb.price_l
+        else
+            res_top_b := math.max(bb.price_h, bs.price_h), res_bot_b := math.min(bb.price_h, bs.price_h)
+        if (res_top_b - res_bot_b) < (2 * syminfo.mintick)
+            float c = (res_top_b + res_bot_b) / 2
+            res_top_b := c + syminfo.mintick, res_bot_b := c - syminfo.mintick
+            
+    float sup_top_b = na, float sup_bot_b = na
+    if idx_b_min != -1 and idx_s_min != -1
+        BarVol bb = array.get(matrix_data, idx_b_min), BarVol bs = array.get(matrix_data, idx_s_min)
+        if idx_b_min == idx_s_min
+            sup_top_b := bb.price_h, sup_bot_b := bb.price_l
+        else
+            sup_top_b := math.max(bb.price_l, bs.price_l), sup_bot_b := math.min(bb.price_l, bs.price_l)
+        if (sup_top_b - sup_bot_b) < (2 * syminfo.mintick)
+            float c = (sup_top_b + sup_bot_b) / 2
+            sup_top_b := c + syminfo.mintick, sup_bot_b := c - syminfo.mintick
+            
+    // Flip Logic 
+    color col_res_draw = C_EXT_RES, color col_sup_draw = C_EXT_SUP
+    float r_top_fin = res_top_b, float r_bot_fin = res_bot_b
+    float s_top_fin = sup_top_b, float s_bot_fin = sup_bot_b
+    
+    if not na(res_top_b) and not na(sup_top_b)
+        if ((sup_top_b + sup_bot_b) / 2) > ((res_top_b + res_bot_b) / 2)
+            r_top_fin := sup_top_b, r_bot_fin := sup_bot_b
+            s_top_fin := res_top_b, s_bot_fin := res_bot_b
+            col_res_draw := C_EXT_SUP, col_sup_draw := C_EXT_RES
+
+    // Update Global State for Dashboard
+    g_r_top_fin := r_top_fin
+    g_r_bot_fin := r_bot_fin
+    g_s_top_fin := s_top_fin
+    g_s_bot_fin := s_bot_fin
+            
+    // Draw Extremes 
+    int x1 = bar_index - universal_len
+    if show_max_ext
+        f_draw_zone_clean(r_top_fin, r_bot_fin, x1, bar_index, proj_len, col_res_draw, col_res_draw, ext_transp)
+    if show_min_ext
+        f_draw_zone_clean(s_top_fin, s_bot_fin, x1, bar_index, proj_len, col_sup_draw, col_sup_draw, ext_transp)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 6. ENHANCED DASHBOARD (Dynamic Smart Matrix Engine with 3D Interpretation)
+// ══════════════════════════════════════════════════════════════════════════════
+// [MODULARIZATION] Helper Functions for State Detection
+// S-State (Static): 1=Breakout Up ... 5=Breakdown Down
+f_get_s_state(float c, float rTop, float rBot, float sTop, float sBot) =>
+    int res = 3
+    if not na(rTop) and not na(sBot)
+        if c > rTop
+            res := 1
+        else if c >= rBot
+            res := 2
+        else if c < sBot
+            res := 5
+        else if c <= sTop
+            res := 4
+        else
+            res := 3
+    res
+
+// D-State (Dynamic): 1=Overextended Up ... 5=Overextended Down
+
+f_get_d_state(float c, float dynR, float dynS, float atr) =>
+    int res = 3
+    float d_eps = atr * 0.20
+    if not na(dynR) and not na(dynS)
+        if c > dynR + d_eps
+            res := 1
+        else if c >= dynR - d_eps
+            res := 2
+        else if c < dynS - d_eps
+            res := 5
+        else if c <= dynS + d_eps
+            res := 4
+        else
+            res := 3
+    res
+
+// 3D Interpretation Engine (Title, Bias, Signal, Color)
+type MatrixInterpretation
+    string title
+    string bias
+    string signal
+    color m_col
+    color bias_col
+
+// The core interpretation logic
+f_interpret_matrix(int s_state, int d_state) =>
+    string m_title = "ANALYZING...", string m_bias = "N/A", string m_signal = "N/A"
+    color m_col = color.gray, color bias_col = C_NEUTRAL
+    
+    if s_state == 1 // S1: Breakout
+        if d_state == 1
+            m_title := "HYPER EXTENSION", m_col := #ff007a, m_bias := "Extreme Bullish", bias_col := C_BULL_STRONG, m_signal := "Caution: Exhaustion Risk. Trail stops."
+        else if d_state == 2
+            m_title := "RESISTANCE CLASH", m_col := #ff9800, m_bias := "Bullish", bias_col := C_BULL_WEAK, m_signal := "Breakout confirmed but facing dynamic R."
+        else if d_state == 3
+            m_title := "CHANNEL BREAKOUT", m_col := #00E676, m_bias := "Strong Bullish", bias_col := C_BULL_STRONG, m_signal := "Ideal Trend Continuation. Buy dips."
+        else if d_state == 4
+            m_title := "SMART PULLBACK", m_col := #2962ff, m_bias := "Bullish (Pullback)", bias_col := C_BULL_WEAK, m_signal := "Pullback after breakout. Strong buy opportunity."
+        else
+            m_title := "CONFLICT (DIV)", m_col := #b0bec5, m_bias := "Conflict/Reversal", bias_col := C_CONFLICT, m_signal := "Major Divergence. Static breakout failing. High Risk."
+            
+    else if s_state == 2 // S2: Inside Res
+        if d_state == 1
+            m_title := "WEAK SPIKE", m_col := #ff5252, m_bias := "Neutral/Bullish", bias_col := C_BULL_WEAK, m_signal := "Testing resistance, overextended short-term."
+        else if d_state == 2
+            m_title := "IRON FORTRESS (R)",m_col := #d50000, m_bias := "Rejection Risk", bias_col := C_BEAR_STRONG, m_signal := "Double Resistance. High probability of rejection."
+        else if d_state == 3
+            m_title := "TESTING RES", m_col := #ffab00, m_bias := "Neutral", bias_col := C_NEUTRAL, m_signal := "Consolidating at resistance. Wait for break/rejection."
+        else if d_state == 4
+            m_title := "COMPRESSION (UP)", m_col := #00b0ff, m_bias := "Conflict (Squeeze)", bias_col := C_CONFLICT, m_signal := "Squeezed between Static R and Dynamic S. Volatility imminent."
+        else
+            m_title := "RES vs DOWN-TREND",m_col := #d50000, m_bias := "Bearish", bias_col := C_BEAR_STRONG, m_signal := "Strong downtrend meeting static resistance. Potential Short."
+            
+    else if s_state == 3 // S3: Mid-Range
+        if d_state == 1
+            m_title := "OVERBOUGHT RANGE", m_col := #ff5252, m_bias := "Rejection Risk (OB)", bias_col := C_BEAR_WEAK, m_signal := "Overextended in range. Potential fade (short)."
+        else if d_state == 2
+            m_title := "RANGE HIGH LIMIT", m_col := #ff9800, m_bias := "Neutral/Bearish", bias_col := C_BEAR_WEAK, m_signal := "At top of dynamic channel. Look for rejection."
+        else if d_state == 3
+            m_title := "NEUTRAL / CHOPPY", m_col := #9e9e9e, m_bias := "Neutral (Choppy)", bias_col := C_NEUTRAL, m_signal := "Dead Center. Low probability trades. Avoid."
+        else if d_state == 4
+            m_title := "RANGE DIP BUY", m_col := #00e5ff, m_bias := "Neutral/Bullish", bias_col := C_BULL_WEAK, m_signal := "At bottom of dynamic channel. Look for bounce."
+        else
+            m_title := "WEAK RANGE (OS)", m_col := #ff5252, m_bias := "Bounce Risk (OS)", bias_col := C_BULL_WEAK, m_signal := "Oversold in range. Potential fade (long)."
+            
+    else if s_state == 4 // S4: Inside Sup
+        if d_state == 1
+            m_title := "SUP vs UP-TREND", m_col := #00c853, m_bias := "Bullish", bias_col := C_BULL_STRONG, m_signal := "Strong uptrend meeting static support. Potential Long."
+        else if d_state == 2
+            m_title := "COMPRESSION (DN)", m_col := #ff9100, m_bias := "Conflict (Squeeze)", bias_col := C_CONFLICT, m_signal := "Squeezed between Static S and Dynamic R. Volatility imminent."
+        else if d_state == 3
+            m_title := "TESTING SUPPORT", m_col := #00b0ff, m_bias := "Neutral", bias_col := C_NEUTRAL, m_signal := "Consolidating at support. Wait for bounce/break."
+        else if d_state == 4
+            m_title := "IRON FLOOR (S)", m_col := #00c853, m_bias := "Bounce Risk", bias_col := C_BULL_STRONG, m_signal := "Double Support. High probability of bounce."
+        else
+            m_title := "WEAK DIP", m_col := #ff5252, m_bias := "Neutral/Bearish", bias_col := C_BEAR_WEAK, m_signal := "Testing support, oversold short-term."
+            
+    else if s_state == 5 // S5: Breakdown
+        if d_state == 1
+            m_title := "CONFLICT (DIV)", m_col := #b0bec5, m_bias := "Conflict/Reversal", bias_col := C_CONFLICT, m_signal := "Major Divergence. Static breakdown failing. High Risk."
+        else if d_state == 2
+            m_title := "BEAR PULLBACK", m_col := #d50000, m_bias := "Bearish (Pullback)", bias_col := C_BEAR_WEAK, m_signal := "Pullback after breakdown. Strong selling opportunity."
+        else if d_state == 3
+            m_title := "CHANNEL BREAKDOWN",m_col := #d50000, m_bias := "Strong Bearish", bias_col := C_BEAR_STRONG, m_signal := "Ideal Trend Continuation (Down). Sell rallies."
+        else if d_state == 4
+            m_title := "SUPPORT CLASH", m_col := #ff9800, m_bias := "Bearish", bias_col := C_BEAR_WEAK, m_signal := "Breakdown confirmed but facing dynamic S."
+        else
+            m_title := "HYPER DROP (VOID)",m_col := #ff007a, m_bias := "Extreme Bearish", bias_col := C_BEAR_STRONG, m_signal := "Caution: Climax risk. Trail stops (Shorts)."
+    
+    MatrixInterpretation.new(m_title, m_bias, m_signal, m_col, bias_col)
+
+// --- DASHBOARD RENDER ---
+
+// Unified dashboard table 
+
+var table info_tbl = table.new(dash_pos, 6, 20, border_width=1, frame_color=C_LN)
+
+// Helper function to create a spanned cell (for single-column info rows in the 6-column table).
+f_cell_span(table _tbl, int _row, string _text, color _txt_color, color _bg_color, string _txt_size) =>
+    table.cell(_tbl, 0, _row, _text, text_color=_txt_color, bgcolor=_bg_color, text_size=_txt_size, text_halign=text.align_center)
+    // Merge cells from column 0 to 5.
+    table.merge_cells(_tbl, 0, _row, 5, _row)
+
+if barstate.islast and show_dash
+     
+    string _size = f_get_size(dash_size)
+    int row_cursor = 0
+    
+    // ─── 1. DATA ACQUISITION (Optimized) ───
+    
+    // A. Static Levels (Read from Global State)
+    float _r_top = g_r_top_fin, float _r_bot = g_r_bot_fin
+    float _s_top = g_s_top_fin, float _s_bot = g_s_bot_fin
+    // B. Dynamic Levels (Read efficiently from Line Objects)
+    float dyn_r_val = na, float dyn_s_val = na
+    
+    // Priority: 5-Point Channel
+    if enable_5pt_channel and not na(hi_line_5pt) and not na(lo_line_5pt)
+        // Check ensures the line data is current for the bar_index
+        if line.get_x2(hi_line_5pt) == bar_index
+            dyn_r_val := line.get_y2(hi_line_5pt)
+            dyn_s_val := line.get_y2(lo_line_5pt)
+    
+    // Fallback: Pivot Span
+    if (na(dyn_r_val) or na(dyn_s_val)) and enable_pivot_span and not na(high_trend_line_id) and not na(low_trend_line_id)
+        if line.get_x2(high_trend_line_id) == bar_index
+            dyn_r_val := line.get_y2(high_trend_line_id)
+            dyn_s_val := line.get_y2(low_trend_line_id)
+
+    // C. Calculate States & Interpret
+    int s_state = f_get_s_state(close, _r_top, _r_bot, _s_top, _s_bot)
+    int d_state = f_get_d_state(close, dyn_r_val, dyn_s_val, global_atr)
+    MatrixInterpretation interpretation = f_interpret_matrix(s_state, d_state)
+
+    // ─── 2. DRAW MAIN DASHBOARD ───
+    
+    // Main Title (Tactical Description)
+    f_cell_span(info_tbl, row_cursor, interpretation.title, color.white, color.new(interpretation.m_col, 20), _size)
+    row_cursor += 1
+
+    // Bias (Strategic Overview)
+    f_cell_span(info_tbl, row_cursor, "Bias: " + interpretation.bias, interpretation.bias_col, C_BG_TBL, _size)
+    row_cursor += 1
+
+    // Consideration (Actionable Signal)
+     
+    f_cell_span(info_tbl, row_cursor, interpretation.signal, C_TXT, C_BG_TBL, _size)
+    row_cursor += 1
+
+    // Levels Info
+    
+    f_cell_span(info_tbl, row_cursor, "═══════ LEVELS ═══════", C_LN, C_BG_TBL, _size)
+    row_cursor += 1
+    string static_levels = "Static R: [" + f_fmt(_r_bot) + "-" + f_fmt(_r_top) + "]\nStatic S: [" + f_fmt(_s_bot) + "-" + f_fmt(_s_top) + "]"
+    string dynamic_levels = "Dynamic: [" + f_fmt(dyn_s_val) + "-" + f_fmt(dyn_r_val) + "]"
+    
+    f_cell_span(info_tbl, row_cursor, static_levels + "\n" + dynamic_levels, C_TXT, C_BG_TBL, _size)
+    row_cursor += 1
+
+    // SPECS & INFO
+    
+    f_cell_span(info_tbl, row_cursor, "═══════ SYSTEM ═══════", C_LN, C_BG_TBL, _size)
+    row_cursor += 1
+    string method_str = calc_method == "Intrabar (Precise)" ? "Mode: Precise (" + ltf_input + ")" : "Mode: Geometry (Approx)"
+    string cover_str = calc_method == "Intrabar (Precise)" ? "Scanned: " + str.tostring(ltf_cov_bars) + " Bars" : "Lookback: " + str.tostring(universal_len) + " Bars"
+    
+    f_cell_span(info_tbl, row_cursor, method_str + "\n" + cover_str, color.new(C_TXT, 30), C_BG_TBL, _size)
+    row_cursor += 1
+
+    // VOLUME
+    string d_sign = current_vol.delta > 0 ? "(+)" : (current_vol.delta < 0 ? "(-)" : "")
+    string vol_row = " ▲  " + f_fmt(current_vol.buy_vol) + "  ▼  " + f_fmt(current_vol.sell_vol) + "\nΣ" + f_fmt(current_vol.total_vol) + " Δ" + f_fmt(math.abs(current_vol.delta)) + d_sign
+    
+    f_cell_span(info_tbl, row_cursor, vol_row, C_TXT, C_BG_TBL, _size)
+    row_cursor += 1
+
+    // TIME
+    int offsetMillis = int(time_offset * 60 * 60 * 1000)
+    string time_str = str.format("{0,time,HH:mm}", timenow + offsetMillis)
+    
+    f_cell_span(info_tbl, row_cursor, "#" + syminfo.ticker + " | " + time_str, color.gray, C_BG_TBL, _size)
+    row_cursor += 1
+
+    // ─── 3. DRAW VISUAL MATRIX MAP (Merged) ───
+    if show_map
+        // Optional: Add a visual separator before the matrix
+        f_cell_span(info_tbl, row_cursor, "══════ MATRIX MAP ══════", C_LN, C_BG_TBL, _size)
+        row_cursor += 1
+
+        // Define the starting row for the matrix grid
+        int map_start_row = row_cursor
+
+        // Set headers
+        
+        table.cell(info_tbl, 0, map_start_row+0, "S\\D", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 1, map_start_row+0, "D1 ↑ ", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 2, map_start_row+0, "D2", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 3, map_start_row+0, "D3", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 4, map_start_row+0, "D4", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 5, map_start_row+0, "D5 ↓ ", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 0, map_start_row+1, "S1 ↑ ", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 0, map_start_row+2, "S2", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 0, map_start_row+3, "S3", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 0, map_start_row+4, "S4", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        table.cell(info_tbl, 0, map_start_row+5, "S5 ↓ ", bgcolor=C_BG_TBL, text_color=C_TXT, text_size=_size)
+        // Populate the matrix map
+        for i = 1 to 5 // S-State (Rows)
+            for j = 1 to 5 // D-State (Cols)
+                MatrixInterpretation cell_data = f_interpret_matrix(i, j)
+                color bg_color = cell_data.bias_col
+                string txt = ""
+                int transp = 85
+                // Highlight the active cell
+                if i == s_state and j == d_state
+                    transp := 50 // Less transparent for active cell
+                    txt := " ⬤ " // Unicode circle character
+                
+        
+                table.cell(info_tbl, j, map_start_row+i, txt, bgcolor=color.new(bg_color, transp), text_color=color.white, text_size=_size, text_halign=text.align_center, text_valign=text.align_center)
+
+
+
+// ╔════════════════════════════════╗
+// ║      Download at               ║
+// ╚════════════════════════════════╝
+// ███████╗██╗███╗   ███╗██████╗ ██╗     ███████╗
+// ██╔════╝██║████╗ ████║██╔══██╗██║     ██╔════╝
+// ███████╗██║██╔████╔██║██████╔╝██║     █████╗  
+// ╚════██║██║██║╚██╔╝██║██╔═══╝ ██║     ██╔══╝  
+// ███████║██║██║ ╚═╝ ██║██║     ███████╗███████╗
+// ╚══════╝╚═╝╚═╝     ╚═╝╚═╝     ╚══════╝╚══════╝
+// ███████╗ ██████╗ ██████╗ ███████╗██╗  ██╗
+// ██╔════╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝
+// █████╗  ██║   ██║██████╔╝█████╗   ╚███╔╝ 
+// ██╔══╝  ██║   ██║██╔══██╗██╔══╝   ██╔██╗ 
+// ██║     ╚██████╔╝██║  ██║███████╗██╔╝ ██╗
+// ╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
+// ████████╗ ██████╗  ██████╗ ██╗     ███████╗
+// ╚══██╔══╝██╔═══██╗██╔═══██╗██║     ██╔════╝
+//    ██║   ██║   ██║██║   ██║██║     ███████╗
+//    ██║   ██║   ██║██║   ██║██║     ╚════██║
+//    ██║   ╚██████╔╝╚██████╔╝███████╗███████║
+//    ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚══════╝
+
+// ==========================================================================================
+
+// === Dashboard with Telegram Link ===
+var table myTable = table.new(position.top_center, 1, 1, border_width=1, frame_color=color.black, bgcolor=color.white)
+
+// Add Telegram Message to Dashboard
+table.cell(myTable, 0, 0, "Join Telegram @simpleforextools", bgcolor=color.blue, text_color=color.white, text_size=size.normal)

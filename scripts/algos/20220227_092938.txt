@@ -1,0 +1,2346 @@
+======
+N:;Азизов;;;
+FN:Азизов
+TEL;type=CELL;type=VOICE;type=pref:+7 (961) 303-27-65
+
+======
+N:;Акишина Наташа;;;
+FN:Акишина Наташа
+TEL;type=OTHER;type=VOICE:+79043455532
+
+======
+N:Курдюмов;Александр Борисович;;;
+FN:Александр Борисович Курдюмов
+EMAIL;type=INTERNET;type=HOME;type=pref:kurdyumov@duma.gov.ru
+TEL;type=WORK;type=VOICE;type=pref:+7 (495) 692-39-30
+TEL;type=WORK;type=FAX:+7 (495) 692-91-85
+TEL;type=CELL;type=VOICE:+7 (985) 764-75-29
+TEL;type=CELL;type=VOICE:+7 (908) 764-75-29
+
+======
+N:Бородай;Александр;;;
+FN:Александр Бородай
+TEL;type=CELL;type=VOICE;type=pref:+7 (905) 788-85-60
+TEL;type=CELL;type=VOICE:+7 (495) 694-32-89
+TEL;type=HOME;type=VOICE:+7 (926) 531-85-14
+
+======
+N:Малахов;Александр Владимирович;;;
+FN:Александр Владимирович Малахов
+TEL;type=CELL;type=VOICE;type=pref:+7 903 136-35-53
+TEL;type=CELL;type=VOICE:+7 916 850-02-96
+TEL;type=CELL;type=VOICE:+7 (966) 086-10-76
+TEL;type=CELL;type=VOICE:+7 (925) 887-74-43
+
+======
+N:Дугин;Александр Гельевич;;;
+FN:Александр Гельевич Дугин
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 857-84-26
+
+======
+N:Гришин;Александр;;;
+FN:Александр Гришин
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 783-39-99
+
+======
+N:Зинченко Народный Фронт;Александр;;;
+FN:Александр Зинченко Народный Фронт
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 571-55-54
+
+======
+N:;Александр Коробко;;;
+FN:Александр Коробко
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 290-56-40
+
+======
+N:Кропачев;Александр;;;
+FN:Александр Кропачев
+TEL;type=OTHER;type=VOICE;type=pref:+7 (985) 764-71-19
+
+======
+N:Лаврентьев;Александр;;;
+FN:Александр Лаврентьев
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 121-30-91
+TEL;type=CELL;type=VOICE:+7 701 1288899
+TEL;type=CELL;type=VOICE:+7 (938) 161-78-98
+TEL;type=CELL;type=VOICE:+7 (903) 430-22-62
+
+======
+N:Павлов Суркова;Александр;;;
+FN:Александр Павлов Суркова
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 065-82-88
+
+======
+N:Чайхана Хаям;Александр;;;
+FN:Александр Чайхана Хаям
+TEL;type=HOME;type=VOICE;type=pref:+79265739247
+
+======
+N:Чаленко;Александр;;;
+FN:Александр Чаленко
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 468-47-59
+TEL;type=HOME;type=VOICE:+7 916 169 08 78
+TEL;type=CELL;type=VOICE:+7 (968) 766-28-16
+
+======
+N:;Александр Чех ДНР;;;
+FN:Александр Чех ДНР
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 012-54-22
+
+======
+N:Алексей Георгиевич;Александров;;;
+FN:Александров Алексей Георгиевич
+TEL;type=CELL;type=VOICE:+7 (965) 201-04-16
+
+======
+N:Чегевара;Алексей Александрович;;;
+FN:Алексей Александрович Чегевара
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 452-80-45
+
+======
+N:;Алексей Анпилог От Проханова;;;
+FN:Алексей Анпилог От Проханова
+EMAIL;type=INTERNET;type=HOME;type=pref:alexey.anpilogov1974@gmail.com
+TEL;type=HOME;type=VOICE;type=pref:+7 (915) 100-18-65
+TEL;type=WORK;type=VOICE:+7 (915) 440-53-80
+
+======
+N:;Алексей Горбачев ;;;
+FN:Алексей Горбачев 
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 053-53-52
+
+======
+N:Кобелев;Алексей;;;
+FN:Алексей Кобелев
+TEL;type=CELL;type=VOICE;type=pref:+79202678635
+
+======
+N:;Алексей Леонидович;;;
+FN:Алексей Леонидович
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 767-26-38
+
+======
+N:Майборода;Алексей;;;
+FN:Алексей Майборода
+TEL;type=HOME;type=VOICE;type=pref:+79266315270
+
+======
+N:Худяков;Алексей;;;
+FN:Алексей Худяков
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 581-07-50
+TEL;type=CELL;type=VOICE:+7 (968) 666-36-65
+
+======
+N:Чесноков;Алексей;;;
+FN:Алексей Чесноков
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 733-29-44
+TEL;type=CELL;type=VOICE:+7 (925) 074-00-20
+TEL;type=OTHER;type=VOICE:+7 (926) 095-32-45
+
+======
+N:;Алексей Штабскапитан;;;
+FN:Алексей Штабскапитан
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 595-86-89
+
+======
+N:Щукин;Алексей;;;
+FN:Алексей Щукин
+TEL;type=CELL;type=VOICE;type=pref:+7 (937) 797-49-99
+
+======
+N:;Алена Гюрза Одесса;;;
+FN:Алена Гюрза Одесса
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 704-70-25
+
+======
+N:;Алена Днепр ополчение;;;
+FN:Алена Днепр ополчение
+TEL;type=CELL;type=VOICE;type=pref:+7 926 750-77-63
+
+======
+N:;Алена Кочкина;;;
+FN:Алена Кочкина
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 757-75-32
+
+======
+N:;Алеся Дениса Новинского;;;
+FN:Алеся Дениса Новинского
+TEL;type=CELL;type=VOICE;type=pref:+7 (929) 963-52-59
+
+======
+N:Натальченко;Алиса;;;
+FN:Алиса Натальченко
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 873-14-87
+TEL;type=HOME;type=VOICE:+7 (978) 821-57-58
+
+======
+N:Питер;Алия;;;
+FN:Алия Питер
+TEL;type=HOME;type=VOICE;type=pref:+79215920462
+TEL;type=CELL;type=VOICE:+79119234077
+
+======
+N:Карабань;Альберт;;;
+FN:Альберт Карабань
+item1.EMAIL;type=INTERNET;type=pref:ideolog.mmm@gmail.com
+EMAIL;type=INTERNET;type=HOME:djbertinyo@gmail.com
+TEL;type=CELL;type=VOICE:+79061179479
+
+======
+N:Карабань;Альберт;;;
+FN:Альберт Карабань
+item1.EMAIL;type=INTERNET;type=pref:ideolog.mmm@gmail.com
+EMAIL;type=INTERNET;type=HOME:djbertinyo@gmail.com
+TEL;type=CELL;type=VOICE:+79061179479
+
+======
+N:Белгород;Аля;;;
+FN:Аля Белгород
+TEL;type=CELL;type=VOICE;type=pref:+7 (951) 138-90-51
+TEL;type=IPHONE;type=CELL;type=VOICE:+7 (910) 745-12-17
+
+======
+N:Барадай;Андрей;Советник;;
+FN:Андрей Советник Барадай
+EMAIL;type=INTERNET;type=HOME;type=pref:ppmmm2010@gmail.com
+TEL;type=WORK;type=VOICE:+7 985 634-37-59
+
+======
+N:;Андрей Иванович;;;
+FN:Андрей Иванович
+TEL;type=CELL;type=VOICE;type=pref:+7 (938) 130-82-95
+
+======
+N:Ким;Андрей;;;
+FN:Андрей Ким
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 422-91-94
+
+======
+N:Коваленко;Андрей ;;;
+FN:Андрей  Коваленко
+TEL;type=CELL;type=VOICE;type=pref:+7 (909) 679-43-16
+
+======
+N:Коваленко;Андрей;;;
+FN:Андрей Коваленко
+TEL;type=CELL;type=VOICE;type=pref:+7 (909) 679-43-16
+
+======
+N:Крамар;Андрей;;;
+FN:Андрей Крамар
+item1.EMAIL;type=INTERNET;type=pref:kramar67@gmail.com
+EMAIL;type=INTERNET;type=HOME:kpamap@inbox.ru
+TEL;type=CELL;type=VOICE;type=pref:+79156386763
+
+======
+N:Мирошин;Андрей;;;
+FN:Андрей Мирошин
+TEL;type=CELL;type=VOICE;type=pref:+7 (900) 526-36-66
+
+======
+N:Атрохов;Андрей Михайлович;;;
+FN:Андрей Михайлович Атрохов
+EMAIL;type=INTERNET;type=HOME;type=pref:ama2005@yandex.ru
+TEL;type=HOME;type=VOICE;type=pref:+7 (985) 763-03-90
+
+======
+N:;Андрей Саныч Ржавый;;;
+FN:Андрей Саныч Ржавый
+TEL;type=CELL;type=VOICE;type=pref:+7 (910) 111-33-88
+
+======
+N:РТР Россия;Андрей Сапигин;;;
+FN:Андрей Сапигин РТР Россия
+TEL;type=CELL;type=VOICE;type=pref:+7 (951) 530-93-09
+
+======
+N:Родкин;Андрей Советник Бородая;;;
+FN:Андрей Советник Бородая Родкин
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 634-37-59
+TEL;type=CELL;type=VOICE:+7 (903) 578-30-31
+
+======
+N:Питер;Антон;;;
+FN:Антон Питер
+TEL;type=HOME;type=VOICE;type=pref:+79219465110
+
+======
+N:;Аня Лайньюз Москва;;;
+FN:Аня Лайньюз Москва
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 712-64-79
+
+======
+N:Зам Губернатора Ростова;Артемов;;;
+FN:Артемов Зам Губернатора Ростова
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 270-28-01
+
+======
+N:;Батя Козак;;;
+FN:Батя Козак
+TEL;type=CELL;type=VOICE:+7 (954) 101-38-06
+
+======
+N:;Белгород Анна Николаевна;;;
+FN:Белгород Анна Николаевна
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 569-91-17
+
+======
+N:;Бельянинов Андрей Юрьевич;;;
+FN:Бельянинов Андрей Юрьевич
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 922-08-80
+
+======
+N:;Блашкевич Андрей;;;
+FN:Блашкевич Андрей
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 284-25-73
+
+======
+N:;Богдан Безпалько;;;
+FN:Богдан Безпалько
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 523-27-38
+
+======
+N:;Борис АП по Ростову;;;
+FN:Борис АП по Ростову
+TEL;type=CELL;type=VOICE;type=pref:+7 (920) 671-03-20
+
+======
+N:Россрезерв Зам Ростов;Бутенко Алексей Викторович;;;
+FN:Бутенко Алексей Викторович Россрезерв Зам Ростов
+TEL;type=HOME;type=VOICE;type=pref:+7 (904) 506-30-04
+
+======
+N:;Валентин;;;
+FN:Валентин
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 548-15-29
+
+======
+N:Скороходов;Валера;;;
+FN:Валера Скороходов
+TEL;type=CELL;type=VOICE:+7 (910) 465-19-40
+
+======
+N:Солянин;Валерий Владимирович;;;
+FN:Валерий Владимирович Солянин
+EMAIL;type=INTERNET;type=HOME;type=pref:solyanin@msmoscow.ru
+TEL;type=HOME;type=VOICE;type=pref:+7 (495) 748-97-51
+
+======
+N:;Ванечка Амвросиевка;;;
+FN:Ванечка Амвросиевка
+TEL;type=CELL;type=VOICE;type=pref:+7 (961) 277-44-03
+
+======
+N:;Василий от Новинского;;;
+FN:Василий от Новинского
+TEL;type=CELL;type=VOICE;type=pref:+7 (967) 157-16-10
+
+======
+N:;Вера Лайфньюс;;;
+FN:Вера Лайфньюс
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 142-62-32
+
+======
+N:;Вероника Квартира Ростов;;;
+FN:Вероника Квартира Ростов
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 279-14-90
+
+======
+N:;Взгляд;;;
+FN:Взгляд
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 660-04-64
+
+======
+N:;Виктор\, Днепр Активист;;;
+FN:Виктор\, Днепр Активист
+TEL;type=CELL;type=VOICE;type=pref:+7 (917) 562-32-35
+
+======
+N:Южная Осетия Помощник;Виктор Анатольевич Бунин;;;
+FN:Виктор Анатольевич Бунин Южная Осетия Помощник
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 720-38-05
+
+======
+N:Медведчук;Виктор Владимирович;;;
+FN:Виктор Владимирович Медведчук
+EMAIL;type=INTERNET;type=HOME;type=pref:arbalet2014@mail.ua
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 214-98-34
+
+======
+N:;Виктория Каск;;;
+FN:Виктория Каск
+TEL;type=HOME;type=VOICE;type=pref:+7 (926) 257-41-91
+
+======
+N:Первый Канал;Виола;;;
+FN:Виола Первый Канал
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 617-85-54
+
+======
+N:;Виола Первый Канал;;;
+FN:Виола Первый Канал
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 507-30-65
+
+======
+N:;Виталий Военторг Ростов;;;
+FN:Виталий Военторг Ростов
+TEL;type=CELL;type=VOICE;type=pref:+7 (918) 854-03-87
+
+======
+N:;Виталий Тихонов;;;
+FN:Виталий Тихонов
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 492-59-52
+
+======
+N:Экономист Суркова;Владимир Авдеенко;;;
+FN:Владимир Авдеенко Экономист Суркова
+item1.EMAIL;type=INTERNET;type=pref:rusbio@gmail.com
+TEL;type=OTHER;type=VOICE;type=pref:+7 (903) 967-48-54
+
+======
+N:;Владимир ;;;
+FN:Владимир 
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 867-37-23
+TEL;type=CELL;type=VOICE:+7 (926) 293-50-44
+
+======
+N:Демкин;Владимир;;;
+FN:Владимир Демкин
+TEL;type=HOME;type=VOICE;type=pref:+79164816146
+
+======
+N:Дергачев;Владимир;;;
+FN:Владимир Дергачев
+EMAIL;type=INTERNET;type=WORK;type=pref:vdergachoff@gmail.com
+EMAIL;type=INTERNET;type=WORK:vladimir.dergachev@gazeta.ru
+TEL;type=WORK;type=VOICE;type=pref:+7(964)630-2010
+
+======
+N:Дергачев;Владимир;;;
+FN:Владимир Дергачев
+EMAIL;type=INTERNET;type=WORK;type=pref:vdergachoff@gmail.com
+EMAIL;type=INTERNET;type=WORK:vladimir.dergachev@gazeta.ru
+TEL;type=WORK;type=VOICE;type=pref:+7(964)630-2010
+
+======
+N:;Владимир Иванович;;;
+FN:Владимир Иванович
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 501-87-74
+TEL;type=HOME;type=VOICE:+7 (495) 626-74-53
+TEL;type=WORK;type=VOICE:+7 (928) 774-61-32
+TEL;type=IPHONE;type=CELL;type=VOICE:+7 (926) 531-85-63
+
+======
+N:Петров;Владимир;;;
+FN:Владимир Петров
+TEL;type=HOME;type=VOICE;type=pref:+79045203759
+
+======
+N:Петров;Владимир Петрович;;;
+FN:Владимир Петрович Петров
+EMAIL;type=INTERNET;type=WORK;type=pref:petrov@eurasec.com
+TEL;type=WORK;type=VOICE;type=pref:+7(985)999-9001
+TEL;type=WORK;type=VOICE:+7(963)991-9990
+
+======
+N:Прокопенко;Владимир;;;
+FN:Владимир Прокопенко
+TEL;type=CELL;type=VOICE;type=pref:+7 (950) 843-38-07
+TEL;type=CELL;type=VOICE:+7 (909) 648-93-97
+
+======
+N:Лукьян;Владислав ;;;
+FN:Владислав  Лукьян
+TEL;type=CELL;type=VOICE:+7 (985) 696-19-18
+
+======
+N:;Владислав Николаевич Дейнего;;;
+FN:Владислав Николаевич Дейнего
+EMAIL;type=INTERNET;type=HOME;type=pref:d5927439@ya.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 938 146-51-81
+TEL;type=HOME;type=VOICE:+7 905 452-02-49
+TEL;type=CELL;type=VOICE:+7 962 936-71-19
+
+======
+N:;Вова Таможня;;;
+FN:Вова Таможня
+TEL;type=CELL;type=VOICE;type=pref:+7 (952) 604-18-59
+
+======
+N:;Водолазк Игорь МЧС;;;
+FN:Водолазк Игорь МЧС
+TEL;type=CELL;type=VOICE;type=pref:+7 (929) 627-57-43
+
+======
+N:Мед Башкирия;Володя;;;
+FN:Володя Мед Башкирия
+item1.TEL;type=pref:+79183837205
+
+======
+N:;Воран;;;
+FN:Воран
+TEL;type=CELL;type=VOICE:+7 (915) 024-60-34
+
+======
+N:;Газета Комерсант;;;
+FN:Газета Комерсант
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 081-04-57
+
+======
+N:;Галина ДАН;;;
+FN:Галина ДАН
+TEL;type=CELL;type=VOICE;type=pref:+7 978 069-37-44
+
+======
+N:Жукова ДАН;Галина;;;
+FN:Галина Жукова ДАН
+TEL;type=CELL;type=VOICE;type=pref:+7 978 750-52-77
+
+======
+N:Лавров;Генадий;;;
+FN:Генадий Лавров
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 760-04-67
+
+======
+N:ЩЕРБИНА;Геннадий Валентинович;;;
+FN:Геннадий Валентинович ЩЕРБИНА
+EMAIL;type=INTERNET;type=WORK;type=pref:info@altek.su
+TEL;type=CELL;type=VOICE;type=pref:+7(910)741-0174
+
+======
+N:ЩЕРБИНА;Геннадий Валентинович;;;
+FN:Геннадий Валентинович ЩЕРБИНА
+EMAIL;type=INTERNET;type=WORK;type=pref:info@altek.su
+TEL;type=CELL;type=VOICE;type=pref:+7(910)741-0174
+
+======
+N:;Геннадий Литовченко;;;
+FN:Геннадий Литовченко
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 875-59-90
+
+======
+N:;Геннадий Рации Москва Донецк;;;
+FN:Геннадий Рации Москва Донецк
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 532-70-53
+
+======
+N:Логист Фонда;Глеб;;;
+FN:Глеб Логист Фонда
+TEL;type=OTHER;type=VOICE:+79192680271
+TEL;type=CELL;type=VOICE:+7 (911) 489-23-35
+
+======
+N:Москва;Говорит;;;
+FN:Говорит Москва
+TEL;type=CELL;type=VOICE;type=pref:+7 499 579-77-91
+
+======
+N:;Гор;;;
+FN:Гор
+EMAIL;type=INTERNET;type=HOME;type=pref:gor87@list.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 368-94-73
+
+======
+N:Хачетурян;Гор;;;
+FN:Гор Хачетурян
+TEL;type=CELL;type=VOICE;type=pref:+7 968 847-40-06
+
+======
+N:;Горсвет;;;
+FN:Горсвет
+TEL;type=CELL;type=VOICE:+7 (960) 452-06-37
+
+======
+N:Степан;Грицьков;;;
+FN:Грицьков Степан
+EMAIL;type=INTERNET;type=HOME;type=pref:2012pirammmida@gmail.com
+TEL;type=HOME;type=VOICE;type=pref:+79117901482
+
+======
+N:;Губарева Катя;;;
+FN:Губарева Катя
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 473-40-64
+
+======
+N:Манюков Борис;Гурин Григорий;;;
+FN:Гурин Григорий Манюков Борис
+TEL;type=HOME;type=VOICE;type=pref:+7 (926) 642-83-19
+
+======
+N:Землячество;Гусяков Максим;;;
+FN:Гусяков Максим Землячество
+TEL;type=HOME;type=VOICE:+7 (909) 660-51-22
+TEL;type=CELL;type=VOICE:+7 (926) 678-75-44
+TEL;type=CELL;type=VOICE:+7 (978) 020-96-77
+
+======
+N:Россия;Гюрза;;;
+FN:Гюрза Россия
+TEL;type=HOME;type=VOICE;type=pref:+7 (905) 431-06-49
+TEL;type=CELL;type=VOICE:+7 (968) 598-26-28
+TEL;type=CELL;type=VOICE:+7 (978) 821-57-67
+
+======
+N:;Давидченко Антон Одесса;;;
+FN:Давидченко Антон Одесса
+TEL;type=CELL;type=VOICE;type=pref:+7 (978) 889-77-31
+
+======
+N:;ДАН Виталий;;;
+FN:ДАН Виталий
+TEL;type=CELL;type=VOICE;type=pref:+7 (965) 510-11-84
+
+======
+N:;Данеэль Вехлин;;;
+FN:Данеэль Вехлин
+TEL;type=WORK;type=VOICE;type=pref:+749593730361
+TEL;type=WORK;type=VOICE:+790672396991d.wechlin@nzz.ch
+TEL;type=WORK;type=FAX:+7(499)243-0951
+
+======
+N:;Данеэль Вехлин;;;
+FN:Данеэль Вехлин
+TEL;type=WORK;type=VOICE;type=pref:+749593730361
+TEL;type=WORK;type=VOICE:+790672396991d.wechlin@nzz.ch
+TEL;type=WORK;type=FAX:+7(499)243-0951
+
+======
+N:;Дарья Андреева;;;
+FN:Дарья Андреева
+TEL;type=HOME;type=VOICE;type=pref:+74956252110
+
+======
+N:;Дарья Андреева;;;
+FN:Дарья Андреева
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 421-11-35
+
+======
+N:;Дарья Дождь;;;
+FN:Дарья Дождь
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 780-83-04
+
+======
+N:;Дарья Лайфньюс;;;
+FN:Дарья Лайфньюс
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 213-29-49
+
+======
+N:ПЦ Новороссия;Дарья Мазаева;;;
+FN:Дарья Мазаева ПЦ Новороссия
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 525-34-67
+
+======
+N:Сорокина;Дарья ;;;
+FN:Дарья  Сорокина
+TEL;type=CELL;type=VOICE;type=pref:+7 (963) 715-12-80
+
+======
+N:Сорокина;Дарья;;;
+FN:Дарья Сорокина
+TEL;type=CELL;type=VOICE;type=pref:+7 (963) 715-12-80
+
+======
+N:;Деденко Алексей;;;
+FN:Деденко Алексей
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 764-43-40
+
+======
+N:Луганск С Реф;Демидова Марина;;;
+FN:Демидова Марина Луганск С Реф
+TEL;type=CELL;type=VOICE;type=pref:+7 (909) 741-20-91
+
+======
+N:Пушилин;Денис Владимирович;;;
+FN:Денис Владимирович Пушилин
+EMAIL;type=INTERNET;type=WORK;type=pref:dnrpdv@mail.ru
+TEL;type=WORK;type=VOICE;type=pref:+7(910)414-8926
+
+======
+N:;Денис Дон;;;
+FN:Денис Дон
+TEL;type=CELL;type=VOICE:+7 (989) 904-35-61
+
+======
+N:Лоторев;Денис;;;
+FN:Денис Лоторев
+item1.TEL;type=pref:+79191701777
+
+======
+N:;Денис От Новинского;;;
+FN:Денис От Новинского
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 007-22-99
+
+======
+N:Побилат;Денис Петрович;;;
+FN:Денис Петрович Побилат
+EMAIL;type=INTERNET;type=WORK;type=pref:2787707@mail.ru
+EMAIL;type=INTERNET;type=WORK:pobilat.ru
+EMAIL;type=INTERNET;type=WORK:sobranie.info
+TEL;type=WORK;type=VOICE;type=pref:+7 (3912) 49-39-28
+TEL;type=WORK;type=VOICE:+7 (3912) 66-70-31
+
+======
+N:Пом Федорова;Денис;;;
+FN:Денис Пом Федорова
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 911-62-64
+
+======
+N:РБК Ростов;Денис Третьяков;;;
+FN:Денис Третьяков РБК Ростов
+TEL;type=CELL;type=VOICE;type=pref:+7 (961) 284-65-43
+
+======
+N:;Дина Шеф Редактор Соловьева;;;
+FN:Дина Шеф Редактор Соловьева
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 244-82-59
+
+======
+N:Контрразведка;Дмитрий Иванович;;;
+FN:Дмитрий Иванович Контрразведка
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 411-30-63
+
+======
+N:Кукушкин;дмитрий;;;
+FN:дмитрий Кукушкин
+EMAIL;type=INTERNET;type=WORK;type=pref:dakukushkinюrttv.ru
+TEL;type=WORK;type=VOICE;type=pref:+7(499)750-0075#1926
+
+======
+N:Любченко;Дмитрий;;;
+FN:Дмитрий Любченко
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 882-24-85
+
+======
+N:;Дмитрий мавроновости;;;
+FN:Дмитрий мавроновости
+TEL;type=HOME;type=VOICE;type=pref:+79033480400
+
+======
+N:Антон;Днепр ополчение;;;
+FN:Днепр ополчение Антон
+TEL;type=CELL;type=VOICE:+7 (978) 859-60-32
+TEL;type=CELL;type=VOICE:+7 (978) 006-27-76
+
+======
+N:;Дождь;;;
+FN:Дождь
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 198-97-60
+
+======
+N:;Дождь Канал;;;
+FN:Дождь Канал
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 744-01-77
+
+======
+N:;Доллар ;;;
+FN:Доллар 
+TEL;type=CELL;type=VOICE;type=pref:+79885483812
+
+======
+N:СК России;Дрыманов Александр Александрович;;;
+FN:Дрыманов Александр Александрович СК России
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 770-84-74
+
+======
+N:;Дьяченко Славик;;;
+FN:Дьяченко Славик
+TEL;type=CELL;type=VOICE;type=pref:+7 (918) 206-79-79
+TEL;type=CELL;type=VOICE:+7 (967) 321-20-96
+
+======
+N:;Евгений Новорос Активист Днепр;;;
+FN:Евгений Новорос Активист Днепр
+TEL;type=CELL;type=VOICE;type=pref:+7 (989) 234-27-93
+
+======
+N:;Евгений Оник;;;
+FN:Евгений Оник
+EMAIL;type=INTERNET;type=HOME;type=pref:info-daily@yandex.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (966) 355-61-15
+
+======
+N:;Евгений Поддубный;;;
+FN:Евгений Поддубный
+TEL;type=CELL;type=VOICE;type=pref:+7 (906) 071-21-06
+
+======
+N:Транспорт;Евгений;Тамплиер;;
+FN:Евгений Тамплиер Транспорт
+TEL;type=HOME;type=VOICE:+7 (926) 179-04-21
+TEL;type=CELL;type=VOICE:+7 (926) 154-76-39
+
+======
+N:;Евгений;;;
+FN:Евгений
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 778-76-64
+
+======
+N:;Егор Джокер;;;
+FN:Егор Джокер
+TEL;type=CELL;type=VOICE;type=pref:+7 (961) 286-31-83
+
+======
+N:Лымарь;Егор ;;;
+FN:Егор  Лымарь
+TEL;type=HOME;type=VOICE;type=pref:+7 (926) 760-30-83
+
+======
+N:Виноградова;Екатерина;;;
+FN:Екатерина Виноградова
+TEL;type=CELL;type=VOICE;type=pref:+7 (920) 982-09-32
+
+======
+N:Виноградова;Екатерина ;;;
+FN:Екатерина  Виноградова
+TEL;type=CELL;type=VOICE;type=pref:+7 (920) 982-09-32
+
+======
+N:Кравченко;Елена ;;;
+FN:Елена  Кравченко
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 405-26-06
+
+======
+N:Кузнецова;Елена;;;
+FN:Елена Кузнецова
+EMAIL;type=INTERNET;type=HOME;type=pref:obnimash9@gmail.com
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 501-77-71
+
+======
+N:;Епифан;;;
+FN:Епифан
+TEL;type=HOME;type=VOICE;type=pref:+7 (968) 870-98-77
+
+======
+N:;Жена Россия;;;
+FN:Жена Россия
+TEL;type=CELL;type=VOICE;type=pref:+7 (908) 186-58-73
+
+======
+N:;Женя Будник;;;
+FN:Женя Будник
+TEL;type=HOME;type=VOICE;type=pref:+7 (926) 702-98-49
+
+======
+N:;Заря;;;
+FN:Заря
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 772-61-88
+
+======
+N:;Заур;;;
+FN:Заур
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 957-51-11
+
+======
+N:;Захарченко Александр;;;
+FN:Захарченко Александр
+TEL;type=CELL;type=VOICE:+7 (961) 294-97-85
+
+======
+N:;Зосимов Александр;;;
+FN:Зосимов Александр
+TEL;type=CELL;type=VOICE:+7 (961) 307-30-83
+
+======
+N:;Иван 24 Канал;;;
+FN:Иван 24 Канал
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 071-01-30
+
+======
+N:RenTV Москва;Иван;;;
+FN:Иван RenTV Москва
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 475-14-48
+
+======
+N:МАКУШОК;Иван Викторович;;;
+FN:Иван Викторович МАКУШОК
+EMAIL;type=INTERNET;type=WORK;type=pref:imak@gov.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(903)960-7700
+TEL;type=WORK;type=VOICE:+7(495)606-3165
+
+======
+N:МАКУШОК;Иван Викторович;;;
+FN:Иван Викторович МАКУШОК
+EMAIL;type=INTERNET;type=WORK;type=pref:imak@gov.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(903)960-7700
+TEL;type=WORK;type=VOICE:+7(495)606-3165
+
+======
+N:;Иван;;;
+FN:Иван
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 674-50-27
+
+======
+N:Панарин;Игорь Владимирович;;;
+FN:Игорь Владимирович Панарин
+EMAIL;type=INTERNET;type=HOME;type=pref:ipan1966@mail.ru
+EMAIL;type=INTERNET;type=WORK:ecogradmoscow.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 126-64-31
+TEL;type=WORK;type=VOICE:+7 (495) 485-85-89
+
+======
+N:Перков;Игорь Владимирович;;;
+FN:Игорь Владимирович Перков
+EMAIL;type=INTERNET;type=HOME;type=pref:bratchina@gmail.com
+TEL;type=HOME;type=VOICE;type=pref:+7 (916) 490-74-12
+
+======
+N:Дроздов;Игорь;;;
+FN:Игорь Дроздов
+TEL;type=HOME;type=VOICE;type=pref:+79082813747
+
+======
+N:;Игорь Марков Одесса;;;
+FN:Игорь Марков Одесса
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 772-35-72
+
+======
+N:Солон...;Игорь;;;
+FN:Игорь Солон...
+EMAIL;type=INTERNET;type=HOME;type=pref:twenty20@zoho.com
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 202-91-72
+
+======
+N:;Игорь Старков фотограф Родина;;;
+FN:Игорь Старков фотограф Родина
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 436-31-64
+
+======
+N:;Ильин Виктор Анатольевич БФ Донбасс;;;
+FN:Ильин Виктор Анатольевич БФ Донбасс
+TEL;type=OTHER;type=VOICE;type=pref:+79381184702
+
+======
+N:;Инал Батувич;;;
+FN:Инал Батувич
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 912-09-93
+
+======
+N:;Инна по жд;;;
+FN:Инна по жд
+TEL;type=CELL;type=VOICE;type=pref:+7 926 636-98-82
+
+======
+N:;Инна Попова Старый Оскол;;;
+FN:Инна Попова Старый Оскол
+TEL;type=CELL;type=VOICE;type=pref:+7 (980) 522-11-58
+
+======
+N:;Интерфакс Дмитрий;;;
+FN:Интерфакс Дмитрий
+item1.EMAIL;type=INTERNET;type=pref:dmitry.veklich@gmail.com
+item2.EMAIL;type=INTERNET:opi@interfax.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (910) 420-06-71
+
+======
+N:Заборская;Ирина;;;
+FN:Ирина Заборская
+EMAIL;type=INTERNET;type=WORK;type=pref:i.zaborskaya@gazeta.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(926)525-1648
+TEL;type=WORK;type=VOICE:+7(495)980-8028
+TEL;type=WORK;type=FAX:+7(495)980-9075
+
+======
+N:Заборская;Ирина;;;
+FN:Ирина Заборская
+EMAIL;type=INTERNET;type=WORK;type=pref:i.zaborskaya@gazeta.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(926)525-1648
+TEL;type=WORK;type=VOICE:+7(495)980-8028
+TEL;type=WORK;type=FAX:+7(495)980-9075
+
+======
+N:Путинцева;Ирина;;;
+FN:Ирина Путинцева
+TEL;type=CELL;type=VOICE;type=pref:+77051061511
+TEL;type=IPHONE;type=CELL;type=VOICE:+7 705 4053105
+
+======
+N:;Исаева;;;
+FN:Исаева
+TEL;type=HOME;type=VOICE;type=pref:+79154229194
+
+======
+N:;Итар - Тасс;;;
+FN:Итар - Тасс
+TEL;type=CELL;type=VOICE;type=pref:+7 (499) 791-04-44
+
+======
+N:;Итар Тасс;;;
+FN:Итар Тасс
+TEL;type=CELL;type=VOICE;type=pref:+7 (499) 791-04-01
+
+======
+N:Борис;Кагарлицкий;;;
+FN:Кагарлицкий Борис
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 745-51-06
+
+======
+N:;Казаков Александр;;;
+FN:Казаков Александр
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 154-31-07
+
+======
+N:;Каранай;;;
+FN:Каранай
+TEL;type=CELL;type=VOICE;type=pref:+7 (963) 427-88-00
+
+======
+N:;Карасев Владимир;;;
+FN:Карасев Владимир
+TEL;type=CELL;type=VOICE;type=pref:+7 (919) 761-08-03
+
+======
+N:;Карякин Алексей;;;
+FN:Карякин Алексей
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 391-86-18
+
+======
+N:;Катасонов Валентин Юрьевич;;;
+FN:Катасонов Валентин Юрьевич
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 885-50-73
+
+======
+N:;Катя АИФ;;;
+FN:Катя АИФ
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 211-45-17
+
+======
+N:Анохина 5 Корпус 3;Квартира Москва;;;
+FN:Квартира Москва Анохина 5 Корпус 3
+TEL;type=CELL;type=VOICE;type=pref:+7 (965) 151-19-57
+
+======
+N:Кеп;;;;
+FN:Кеп
+TEL;type=IPHONE;type=CELL;type=VOICE:+79163040250
+TEL;type=HOME;type=VOICE:+79807221174
+
+======
+N:;Кирилл Белошицкий;;;
+FN:Кирилл Белошицкий
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 621-06-70
+
+======
+N:;КИТ Иван (Гюрзы);;;
+FN:КИТ Иван (Гюрзы)
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 240-61-71
+
+======
+N:Викторович;Кобелев;Алексей;;
+FN:Кобелев Алексей Викторович
+item1.EMAIL;type=INTERNET;type=pref:kurskmmm@gmail.com
+TEL;type=HOME;type=VOICE;type=pref:+79202678635
+
+======
+N:Не Давать Интервью;Комерсант;;;
+FN:Комерсант Не Давать Интервью
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 627-10-27
+
+======
+N:;КОНСТАНТИН;;;
+FN:КОНСТАНТИН
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 721-76-96
+
+======
+N:;Константин Белов;;;
+FN:Константин Белов
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 724-82-63
+
+======
+N:Долгов;Константин Константинович ;;;
+FN:Константин Константинович  Долгов
+EMAIL;type=INTERNET;type=WORK;type=pref:kdolgov@mid.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 304-78-28
+TEL;type=WORK;type=VOICE:+7 (499) 244-14-86
+TEL;type=WORK;type=VOICE:+7 (499) 244-31-78
+TEL;type=WORK;type=FAX:+7 (499) 244-15-71
+
+======
+N:;Коровин;;;
+FN:Коровин
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 580-18-36
+
+======
+N:;Костя Долгов;;;
+FN:Костя Долгов
+TEL;type=CELL;type=VOICE;type=pref:+7 (967) 263-32-15
+
+======
+N:Долгов;Костя;;;
+FN:Костя Долгов
+TEL;type=CELL;type=VOICE;type=pref:+7 (967) 263-32-15
+
+======
+N:;Костя Шахтер;;;
+FN:Костя Шахтер
+TEL;type=CELL;type=VOICE:+7 (916) 137-61-90
+TEL;type=HOME;type=VOICE:+7 (978) 059-27-39
+
+======
+N:;Крамар;;;
+FN:Крамар
+TEL;type=HOME;type=VOICE;type=pref:+79107897577
+TEL;type=CELL;type=VOICE:+79156386763
+TEL;type=CELL;type=VOICE:+7 (985) 695-25-92
+
+======
+N:;Краснодон Склад Киса;;;
+FN:Краснодон Склад Киса
+TEL;type=CELL;type=VOICE:+7 (903) 460-60-86
+TEL;type=CELL;type=VOICE:+7 (928) 100-25-76
+
+======
+N:;Крым Друг Коробки;;;
+FN:Крым Друг Коробки
+TEL;type=CELL;type=VOICE;type=pref:+7 (978) 781-14-08
+
+======
+N:;Ксения Лайфньюс;;;
+FN:Ксения Лайфньюс
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 663-38-11
+TEL;type=CELL;type=VOICE:+7 (916) 355-47-79
+
+======
+N:;Ксения Россия-24;;;
+FN:Ксения Россия-24
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 747-01-35
+
+======
+N:;Ксюша Актуальные Комментарии!!!;;;
+FN:Ксюша Актуальные Комментарии!!!
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 416-88-74
+
+======
+N:;Кум Доброволец;;;
+FN:Кум Доброволец
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 318-39-01
+
+======
+N:;ЛайфНьюз;;;
+FN:ЛайфНьюз
+TEL;type=CELL;type=VOICE;type=pref:+74956633811
+
+======
+N:;Лайфньюс;;;
+FN:Лайфньюс
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 520-78-23
+
+======
+N:;Лайфньюс Марина;;;
+FN:Лайфньюс Марина
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 855-12-45
+
+======
+N:;Лариса\, Программа Соловьева;;;
+FN:Лариса\, Программа Соловьева
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 502-42-55
+
+======
+N:Индонезия;Лариса;;;
+FN:Лариса Индонезия
+TEL;type=CELL;type=VOICE;type=pref:+7 (923) 363-24-23
+
+======
+N:Алина;ЛДПР Тв;;;
+FN:ЛДПР Тв Алина
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 628-06-20
+TEL;type=CELL;type=VOICE:+7 (967) 246-76-30
+
+======
+N:;Легкоступ Анатолий Михайлович;;;
+FN:Легкоступ Анатолий Михайлович
+TEL;type=WORK;type=VOICE;type=pref:+7 (910) 368-72-32
+
+======
+N:;Легкоступ Анатолий Михайлович;;;
+FN:Легкоступ Анатолий Михайлович
+TEL;type=WORK;type=VOICE;type=pref:+7 (910) 368-72-32
+
+======
+N:Загурская;Лена;;;
+FN:Лена Загурская
+TEL;type=CELL;type=VOICE;type=pref:+7 (950) 878-66-66
+
+======
+N:Муратова;Лена;;;
+FN:Лена Муратова
+NICKNAME:kursk33
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 519-41-01
+
+======
+N:Сивущенков;Леонид Викторович;;;
+FN:Леонид Викторович Сивущенков
+EMAIL;type=INTERNET;type=HOME;type=pref:alfa-foton2006@mail.ru
+TEL;type=WORK;type=VOICE;type=pref:+7 (499) 728-04-08
+TEL;type=CELL;type=VOICE:+7 (926) 691-61-19
+
+======
+N:Решетников;Леонид Петрович;;;
+FN:Леонид Петрович Решетников
+TEL;type=HOME;type=VOICE;type=pref:+7 (495) 454-92-64
+TEL;type=WORK;type=VOICE:+7 (985) 766-11-23
+
+======
+N:Финансы;Леонид;;;
+FN:Леонид Финансы
+TEL;type=CELL;type=VOICE:+7 (926) 937-25-76
+
+======
+N:Финансы1;Леонид;;;
+FN:Леонид Финансы1
+TEL;type=CELL;type=VOICE;type=pref:+7 926 937-25-76
+
+======
+N:;Леха Через Границу;;;
+FN:Леха Через Границу
+TEL;type=CELL;type=VOICE:+7 (909) 440-57-69
+
+======
+N:;Лещенко Максим Иванович;;;
+FN:Лещенко Максим Иванович
+TEL;type=HOME;type=VOICE:+7 (988) 990-30-69
+
+======
+N:;Лия Коваленко ;;;
+FN:Лия Коваленко 
+TEL;type=CELL;type=VOICE;type=pref:+7 (989) 726-87-57
+
+======
+N:Премьер;ЛНР Цепкалов Геннадий Николаевич;;;
+FN:ЛНР Цепкалов Геннадий Николаевич Премьер
+TEL;type=HOME;type=VOICE:+7 (926) 531-17-52
+
+======
+N:Логачев Виталик;;;;
+FN:Логачев Виталик
+TEL;type=CELL;type=VOICE:+7 (928) 189-21-96
+
+======
+N:Ибрагимов;Магомед;;;
+FN:Магомед Ибрагимов
+TEL;type=HOME;type=VOICE;type=pref:+79031208346
+
+======
+N:Владимир Иванович;Макович;;;
+FN:Макович Владимир Иванович
+TEL;type=CELL;type=VOICE:+7 (928) 605-87-01
+
+======
+N:Финанс Пургина;Максим Иванов;;;
+FN:Максим Иванов Финанс Пургина
+TEL;type=CELL;type=VOICE;type=pref:+7 (908) 570-21-43
+TEL;type=CELL;type=VOICE:+7 (985) 756-21-15
+TEL;type=CELL;type=VOICE:+7 (903) 719-75-70
+
+======
+N:;Максим Кисилев;;;
+FN:Максим Кисилев
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 245-65-37
+
+======
+N:По Правам Человека;Максим Леонардович Шевченко;;;
+FN:Максим Леонардович Шевченко По Правам Человека
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 726-08-82
+
+======
+N:Траст Металл ;Максим Майкоп;;;
+FN:Максим Майкоп Траст Металл 
+TEL;type=HOME;type=VOICE;type=pref:+7 (911) 700-76-76
+
+======
+N:;Максим Сергеевич Григорьев;;;
+FN:Максим Сергеевич Григорьев
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 648-67-01
+
+======
+N:Изварино Комендант;Максим Стопятый;;;
+FN:Максим Стопятый Изварино Комендант
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 625-80-32
+
+======
+N:;Мама;;;
+FN:Мама
+TEL;type=OTHER;type=VOICE:+79081865873
+
+======
+N:;Мама Россия;;;
+FN:Мама Россия
+TEL;type=CELL;type=VOICE;type=pref:+7 (908) 186-45-95
+
+======
+N:Дождь;Мария Ноэль;;;
+FN:Мария Ноэль Дождь
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 029-91-33
+
+======
+N:;Мария Рен Тв Москва;;;
+FN:Мария Рен Тв Москва
+TEL;type=CELL;type=VOICE;type=pref:+7 (910) 400-01-64
+TEL;type=CELL;type=VOICE:+7 (925) 175-73-40
+
+======
+N:;Мария Россия - 24;;;
+FN:Мария Россия - 24
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 969-53-67
+
+======
+N:Вассен;Марсель;;;
+FN:Марсель Вассен
+EMAIL;type=INTERNET;type=WORK;type=pref:vaessen@un.org
+TEL;type=CELL;type=VOICE;type=pref:+77777809071
+TEL;type=WORK;type=VOICE:+77273122643#1511
+TEL;type=WORK;type=FAX:+77273123148
+
+======
+N:Вассен;Марсель;;;
+FN:Марсель Вассен
+EMAIL;type=INTERNET;type=WORK;type=pref:vaessen@un.org
+TEL;type=CELL;type=VOICE;type=pref:+77777809071
+TEL;type=WORK;type=VOICE:+77273122643#1511
+TEL;type=WORK;type=FAX:+77273123148
+
+======
+N:;Марченко Оскол;;;
+FN:Марченко Оскол
+TEL;type=CELL;type=VOICE;type=pref:+7 (910) 320-45-82
+
+======
+N:;Маша ;;;
+FN:Маша 
+TEL;type=CELL;type=VOICE;type=pref:+7 (919) 107-77-07
+
+======
+N:;Мила Политика;;;
+FN:Мила Политика
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 541-10-55
+
+======
+N:Миха Гриль;;;;
+FN:Миха Гриль
+TEL;type=IPHONE;type=CELL;type=VOICE:+7 (917) 511-11-07
+
+======
+N:;Михаил Бизнесмен Долгова;;;
+FN:Михаил Бизнесмен Долгова
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 921-84-59
+
+======
+N:БРЯЧАК;Михаил Васильевич;;;
+FN:Михаил Васильевич БРЯЧАК
+EMAIL;type=INTERNET;type=WORK;type=pref:bryachak@duma.gov.ru
+TEL;type=WORK;type=VOICE;type=pref:+7(495)692-8400
+TEL;type=WORK;type=VOICE:+7(495)692-7650
+TEL;type=HOME;type=VOICE:+7 (985) 764-29-94
+TEL;type=WORK;type=FAX:+7(495)692-2816
+
+======
+N:Емельянов;Михаил Васильевич ;;;
+FN:Михаил Васильевич  Емельянов
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 766-93-25
+
+======
+N:Дегтярев;Михаил;;;
+FN:Михаил Дегтярев
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 764-43-14
+
+======
+N:;Михаил Оника;;;
+FN:Михаил Оника
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 570-34-10
+
+======
+N:НТВ;Миша Ракицкий;;;
+FN:Миша Ракицкий НТВ
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 354-18-28
+
+======
+N:;мой абхазия;;;
+FN:мой абхазия
+TEL;type=HOME;type=VOICE;type=pref:+79407147723
+
+======
+N:;Мой Билайн 2;;;
+FN:Мой Билайн 2
+TEL;type=HOME;type=VOICE;type=pref:+7 (962) 949-71-03
+
+======
+N:;Мой Билайн Москва;;;
+FN:Мой Билайн Москва
+TEL;type=HOME;type=VOICE;type=pref:+7 (968) 664-26-51
+
+======
+N:Мой Курск;;;;
+FN:Мой Курск
+item1.TEL;type=pref:+79202609589
+
+======
+N:;Мой Мегафон;;;
+FN:Мой Мегафон
+TEL;type=HOME;type=VOICE;type=pref:+7 (928) 149-11-36
+
+======
+N:Мой Сочи;;;;
+FN:Мой Сочи
+item1.TEL;type=pref:+79649491296
+
+======
+N:;Москва Быстрое Такси;;;
+FN:Москва Быстрое Такси
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 514-01-01
+
+======
+N:;МТС Менеджер Россия;;;
+FN:МТС Менеджер Россия
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 268-49-44
+
+======
+N:Алексей;Муратов;;;
+FN:Муратов Алексей
+EMAIL;type=INTERNET;type=HOME;type=pref:kursk18@gmail.com
+TEL;type=CELL;type=VOICE:+79102111030
+
+======
+N:;Наталья Захарова;;;
+FN:Наталья Захарова
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 828-44-72
+
+======
+N:Журналист Муратова;Наталья Литвиненко ;;;
+FN:Наталья Литвиненко  Журналист Муратова
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 967-71-59
+
+======
+N:;Национальная Служба Новостей (прессконференции);;;
+FN:Национальная Служба Новостей (прессконференции)
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 107-77-34
+
+======
+N:;некипелов сергей;;;
+FN:некипелов сергей
+TEL;type=HOME;type=VOICE;type=pref:+79265563720
+
+======
+N:Викторович Стариков;Николай;;;
+FN:Николай Викторович Стариков
+EMAIL;type=INTERNET;type=HOME;type=pref:mail@nstarikov.ru
+TEL;type=HOME;type=VOICE;type=pref:+7 (921) 957-09-50
+
+======
+N:Гончаров;Николай;;;
+FN:Николай Гончаров
+EMAIL;type=INTERNET;type=WORK;type=pref:nik12343@yandex.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(926)910-4595
+TEL;type=WORK;type=VOICE:+7(499)791-0035
+
+======
+N:Гончаров;Николай;;;
+FN:Николай Гончаров
+EMAIL;type=INTERNET;type=WORK;type=pref:nik12343@yandex.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(926)910-4595
+TEL;type=WORK;type=VOICE:+7(499)791-0035
+
+======
+N:Дроздов;Николай;;;
+FN:Николай Дроздов
+TEL;type=CELL;type=VOICE;type=pref:+7 967 148-49-55
+
+======
+N:ВИЛЯНСКИИ;Николай Константинович;;;
+FN:Николай Константинович ВИЛЯНСКИИ
+TEL;type=CELL;type=VOICE;type=pref:+7(903)960-8798
+
+======
+N:МАРЧЕНКО;Николай Михаилович;;;
+FN:Николай Михаилович МАРЧЕНКО
+EMAIL;type=INTERNET;type=WORK;type=pref:russiahotel_70@mail.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (910) 320-45-82
+
+======
+N:МАРЧЕНКО;Николай Михаилович;;;
+FN:Николай Михаилович МАРЧЕНКО
+EMAIL;type=INTERNET;type=WORK;type=pref:russiahotel_70@mail.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (910) 320-45-82
+
+======
+N:;Николай Побилата;;;
+FN:Николай Побилата
+TEL;type=CELL;type=VOICE;type=pref:+7 (962) 066-76-79
+
+======
+N:Чирко;Николай;;;
+FN:Николай Чирко
+TEL;type=CELL;type=VOICE:+79787228542
+
+======
+N:;Новиков Владимир;;;
+FN:Новиков Владимир
+TEL;type=HOME;type=VOICE:+7 (925) 057-53-51
+
+======
+N:Финансы;Ногинский Олег Владимирович;;;
+FN:Ногинский Олег Владимирович Финансы
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 215-99-27
+
+======
+N:;НСН++;;;
+FN:НСН++
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 925-04-49
+
+======
+N:;НСН Алина;;;
+FN:НСН Алина
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 678-71-02
+
+======
+N:;Оксана Гюрзы;;;
+FN:Оксана Гюрзы
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 630-88-32
+
+======
+N:НИЛОВ;Олег Анатольевич;;;
+FN:Олег Анатольевич НИЛОВ
+EMAIL;type=INTERNET;type=WORK;type=pref:nilovoa@duma.gov.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(985)765-2850
+
+======
+N:Бондаренко;Олег;;;
+FN:Олег Бондаренко
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 517-82-25
+TEL;type=HOME;type=VOICE:+7 (925) 919-76-50
+
+======
+N:Бондаренко;Олег;;;
+FN:Олег Бондаренко
+EMAIL;type=INTERNET;type=WORK;type=pref:rosukrinform@gmail.com
+TEL;type=WORK;type=VOICE;type=pref:+7(925)517-8225
+
+======
+N:Бондаренко;Олег;;;
+FN:Олег Бондаренко
+EMAIL;type=INTERNET;type=WORK;type=pref:rosukrinform@gmail.com
+TEL;type=WORK;type=VOICE;type=pref:+7(925)517-8225
+
+======
+N:;Олег Вести Россия 1;;;
+FN:Олег Вести Россия 1
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 225-68-00
+
+======
+N:;Олег Вести Россия 1;;;
+FN:Олег Вести Россия 1
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 660-83-38
+
+======
+N:Нобитский;Олег Владимирович;;;
+FN:Олег Владимирович Нобитский
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 652-77-05
+
+======
+N:Новинский;Олег Владимирович;;;
+FN:Олег Владимирович Новинский
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 652-77-05
+
+======
+N:Гуманитарка;Олег;Ростов;;
+FN:Олег Ростов Гуманитарка
+TEL;type=CELL;type=VOICE;type=pref:+7 928 774-04-54
+
+======
+N:;Олег Дубинин Россия 1;;;
+FN:Олег Дубинин Россия 1
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 960-79-87
+
+======
+N:;Олег Касавченко Ростов Шахты;;;
+FN:Олег Касавченко Ростов Шахты
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 774-04-54
+
+======
+N:;Олег Лондон Ялта;;;
+FN:Олег Лондон Ялта
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 972-97-64
+
+======
+N:Говорун;Олег Маркович;;;
+FN:Олег Маркович Говорун
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 991-85-81
+TEL;type=CELL;type=VOICE:+7 (925) 710-03-44
+
+======
+N:;Олег Николаевич Кравченко Амвей Платина;;;
+FN:Олег Николаевич Кравченко Амвей Платина
+TEL;type=CELL;type=VOICE;type=pref:+7 (937) 709-99-21
+
+======
+N:Царев;Олег;;;
+FN:Олег Царев
+TEL;type=HOME;type=VOICE:+7 (925) 020-24-35
+
+======
+N:;Олеся АИФ;;;
+FN:Олеся АИФ
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 792-08-53
+
+======
+N:;Ольга Павелко;;;
+FN:Ольга Павелко
+EMAIL;type=INTERNET;type=HOME;type=pref:kukolkavip@mail.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (980) 322-01-45
+
+======
+N:Позднякова;Ольга ;;;
+FN:Ольга  Позднякова
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 107-14-13
+
+======
+N:Рожкова;Ольга;;;
+FN:Ольга Рожкова
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 000-11-49
+
+======
+N:Оля Кепа;;;;
+FN:Оля Кепа
+TEL;type=WORK;type=VOICE:+79807221427
+
+======
+N:Ковригина;Оля;;;
+FN:Оля Ковригина
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 774-74-19
+
+======
+N:Ковригина;Оля ;;;
+FN:Оля  Ковригина
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 774-74-19
+
+======
+N:;Охр Павел Крым;;;
+FN:Охр Павел Крым
+TEL;type=CELL;type=VOICE;type=pref:+7 (906) 033-90-83
+
+======
+N:Гузев;Павел;;;
+FN:Павел Гузев
+TEL;type=CELL;type=VOICE;type=pref:+7 (929) 524-10-85
+
+======
+N:;Павел Карпов;;;
+FN:Павел Карпов
+TEL;type=HOME;type=VOICE;type=pref:+7 (985) 991-00-78
+
+======
+N:;Палестинец;;;
+FN:Палестинец
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 547-77-32
+TEL;type=CELL;type=VOICE:+7 (913) 330-00-08
+
+======
+N:;Палестинец Новый;;;
+FN:Палестинец Новый
+TEL;type=HOME;type=VOICE;type=pref:+7 (916) 547-77-32
+
+======
+N:;Партизан Евгений Судибор;;;
+FN:Партизан Евгений Судибор
+TEL;type=HOME;type=VOICE;type=pref:+7 (925) 722-52-49
+TEL;type=WORK;type=VOICE:+7 (985) 235-28-51
+TEL;type=CELL;type=VOICE:+7 (968) 594-98-76
+
+======
+N:Яна;Первый Канал Прямой Эфир;;;
+FN:Первый Канал Прямой Эфир Яна
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 617-72-98
+TEL;type=CELL;type=VOICE:+7 (903) 277-71-62
+
+======
+N:;Петр Яблоновский;;;
+FN:Петр Яблоновский
+TEL;type=CELL;type=VOICE;type=pref:+7 (919) 167-79-65
+
+======
+N:Матеря России;Петренко Валентина Александровна;;;
+FN:Петренко Валентина Александровна Матеря России
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 999-28-09
+
+======
+N:;Плахин Юрий;;;
+FN:Плахин Юрий
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 359-85-31
+
+======
+N:;Племянница;;;
+FN:Племянница
+TEL;type=HOME;type=VOICE:+79183510086
+
+======
+N:Полярник;Поляков Максим Борисович;;;
+FN:Поляков Максим Борисович Полярник
+TEL;type=HOME;type=VOICE;type=pref:+7 (909) 950-46-44
+TEL;type=CELL;type=VOICE:+7 (968) 711-85-74
+TEL;type=CELL;type=VOICE:+79295345230
+
+======
+N:;Пресс Центр Новороссии;;;
+FN:Пресс Центр Новороссии
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 625-21-10
+
+======
+N:Суркова;Приемна;;;
+FN:Приемна Суркова
+item1.EMAIL;type=INTERNET;type=pref:prm_Surkova@gov.ru
+EMAIL;type=INTERNET;type=HOME:mariya777_2000@mail.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 606-07-34
+TEL;type=CELL;type=VOICE:+7 (910) 413-88-47
+TEL;type=CELL;type=VOICE:+7 (985) 765-28-29
+
+======
+N:;Приемная Говоруна Олега Марковича;;;
+FN:Приемная Говоруна Олега Марковича
+TEL;type=WORK;type=VOICE;type=pref:+7 (495) 606-43-65
+TEL;type=CELL;type=VOICE:+7 (916) 696-97-58
+
+======
+N:;Пургин;;;
+FN:Пургин
+TEL;type=CELL;type=VOICE:+7 (964) 701-24-82
+
+======
+N:;Пушилина;;;
+FN:Пушилина
+TEL;type=CELL;type=VOICE:+7 (978) 871-31-44
+
+======
+N:Приемная;Рапапорт;;;
+FN:Рапапорт Приемная
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 606-28-65
+
+======
+N:;Рапопорт Борис Яковлевич;;;
+FN:Рапопорт Борис Яковлевич
+EMAIL;type=INTERNET;type=HOME;type=pref:krotoff7@yandex.ry
+TEL;type=CELL;type=VOICE:+7 (964) 728-13-00
+
+======
+N:;Рапопорт вайбер;;;
+FN:Рапопорт вайбер
+TEL;type=CELL;type=VOICE;type=pref:+7 926 254-38-79
+
+======
+N:;Рафаэль;;;
+FN:Рафаэль
+TEL;type=CELL;type=VOICE:+7 (962) 949-57-66
+
+======
+N:;Раша Тудей Москва;;;
+FN:Раша Тудей Москва
+TEL;type=CELL;type=VOICE;type=pref:+7 (499) 750-00-75
+
+======
+N:;РБК;;;
+FN:РБК
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 789-80-67
+
+======
+N:;РБК к Томанцеву;;;
+FN:РБК к Томанцеву
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 762-61-15
+
+======
+N:;Ремезов Александр;;;
+FN:Ремезов Александр
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 503-73-18
+
+======
+N:;Риа Дмитрий;;;
+FN:Риа Дмитрий
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 766-54-89
+
+======
+N:;Риановости;;;
+FN:Риановости
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 645-66-01
+
+======
+N:Доброволец;Рома;;;
+FN:Рома Доброволец
+TEL;type=CELL;type=VOICE;type=pref:+7 989 168-20-54
+
+======
+N:;Рома Новый;;;
+FN:Рома Новый
+TEL;type=CELL;type=VOICE;type=pref:+7 (965) 328-86-98
+
+======
+N:Поздняков;Рома;;;
+FN:Рома Поздняков
+TEL;type=CELL;type=VOICE;type=pref:+7 938 114-04-77
+
+======
+N:Поздняков;Рома ;;;
+FN:Рома  Поздняков
+TEL;type=CELL;type=VOICE;type=pref:+7 938 114-04-77
+
+======
+N:;Рома;;;
+FN:Рома
+TEL;type=CELL;type=VOICE;type=pref:+7 (966) 080-84-65
+
+======
+N:Чирик;Рома Черкашин;;;
+FN:Рома Черкашин Чирик
+TEL;type=CELL;type=VOICE;type=pref:+7 (919) 765-24-81
+
+======
+N:;Роман Викторович;;;
+FN:Роман Викторович
+TEL;type=OTHER;type=VOICE;type=pref:+79629502074
+
+======
+N:;Роман Казаки Россия;;;
+FN:Роман Казаки Россия
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 591-59-16
+
+======
+N:Лягин;Роман;;;
+FN:Роман Лягин
+TEL;type=CELL;type=VOICE:+7 (925) 830-07-92
+
+======
+N:;Роман Разум;;;
+FN:Роман Разум
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 518-00-73
+
+======
+N:Ратнер Алия;Роман;;;
+FN:Роман Ратнер Алия
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 220-17-93
+
+======
+N:Ратнер Алия;Роман;;;
+FN:Роман Ратнер Алия
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 220-17-93
+
+======
+N:;Российская Газета;;;
+FN:Российская Газета
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 775-31-18
+
+======
+N:;Россия-1\, Юля Специальный Кореспондент;;;
+FN:Россия-1\, Юля Специальный Кореспондент
+TEL;type=CELL;type=VOICE;type=pref:+7 (905) 747-09-55
+
+======
+N:;Россия - 24 Москва новости;;;
+FN:Россия - 24 Москва новости
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 728-73-00
+
+======
+N:;Россия 1;;;
+FN:Россия 1
+TEL;type=CELL;type=VOICE;type=pref:+7 (499) 995-23-35
+
+======
+N:;Россия 1 Олег;;;
+FN:Россия 1 Олег
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 617-98-59
+
+======
+N:24;Россия;;;
+FN:Россия 24
+TEL;type=CELL;type=VOICE;type=pref:+7 495 000-70-49
+
+======
+N:;Россия 24 Алексей Казаков;;;
+FN:Россия 24 Алексей Казаков
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 798-11-71
+
+======
+N:;Россия 24 Вести;;;
+FN:Россия 24 Вести
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 724-81-95
+
+======
+N:;Россия 24 Ильина Ирина;;;
+FN:Россия 24 Ильина Ирина
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 725-96-43
+
+======
+N:;Россия1 Ростов Денис;;;
+FN:Россия1 Ростов Денис
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 406-15-16
+
+======
+N:;Ростов База Поз Москва;;;
+FN:Ростов База Поз Москва
+TEL;type=CELL;type=VOICE;type=pref:+7 (960) 453-75-19
+
+======
+N:;Ростов Юрий От Мурванидзе;;;
+FN:Ростов Юрий От Мурванидзе
+TEL;type=CELL;type=VOICE;type=pref:+7 (909) 407-98-33
+
+======
+N:;РСН;;;
+FN:РСН
+TEL;type=CELL;type=VOICE;type=pref:+7 (495) 230-04-30
+
+======
+N:;РТ Лида;;;
+FN:РТ Лида
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 803-36-69
+
+======
+N:;Русск Предст БиБиСи;;;
+FN:Русск Предст БиБиСи
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 185-70-13
+
+======
+N:;Рухлядин Виктор Иванович;;;
+FN:Рухлядин Виктор Иванович
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 390-59-60
+
+======
+N:;Рыжков Шувалова Помощник;;;
+FN:Рыжков Шувалова Помощник
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 800-15-18
+
+======
+N:;Саша Бовдунов Новоросинформ;;;
+FN:Саша Бовдунов Новоросинформ
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 225-96-65
+
+======
+N:Гундерич;Саша;;;
+FN:Саша Гундерич
+TEL;type=CELL;type=VOICE:+7 (978) 751-21-51
+
+======
+N:Броневик;Саша ЛДПР;;;
+FN:Саша ЛДПР Броневик
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 364-94-90
+
+======
+N:;Саша Мунтяну;;;
+FN:Саша Мунтяну
+TEL;type=HOME;type=VOICE;type=pref:+7 (960) 262-06-87
+
+======
+N:;Саша Павлов;;;
+FN:Саша Павлов
+TEL;type=HOME;type=VOICE;type=pref:+7 (964) 592-36-52
+
+======
+N:Смирнов;Саша;;;
+FN:Саша Смирнов
+TEL;type=CELL;type=VOICE:+7 (961) 311-79-93
+
+======
+N:;С.Б. ;;;
+FN:С.Б. 
+TEL;type=CELL;type=VOICE;type=pref:+7 (917) 551-36-92
+
+======
+N:Кукол;Семен;;;
+FN:Семен Кукол
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 461-10-50
+
+======
+N:;Сеня;;;
+FN:Сеня
+TEL;type=CELL;type=VOICE:+7 (989) 701-67-27
+TEL;type=CELL;type=VOICE:+7 (926) 363-34-23
+TEL;type=CELL;type=VOICE:+7 (954) 101-38-07
+
+======
+N:;Серб;;;
+FN:Серб
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 951-30-87
+
+======
+N:Иващенко;Сергей Александрович;;;
+FN:Сергей Александрович Иващенко
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 965-49-61
+
+======
+N:МАРКОВ;Сергей Александрович;;;
+FN:Сергей Александрович МАРКОВ
+EMAIL;type=INTERNET;type=WORK;type=pref:duma.gov@gmail.com
+TEL;type=CELL;type=VOICE;type=pref:+7(985)999-0502
+TEL;type=WORK;type=VOICE:+7(926)539-8658
+TEL;type=WORK;type=FAX:+7(499)764-5524
+
+======
+N:Бородая;Сергей;;;
+FN:Сергей Бородая
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 775-13-89
+TEL;type=CELL;type=VOICE:+7 (938) 133-45-19
+TEL;type=CELL;type=VOICE:+7 (918) 518-02-70
+
+======
+N:Шишкин;Сергей Владимирович;;;
+FN:Сергей Владимирович Шишкин
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 042-31-66
+TEL;type=CELL;type=VOICE:+7 (916) 958-88-99
+
+======
+N:Глазьев;Сергей;;;
+FN:Сергей Глазьев
+EMAIL;type=INTERNET;type=HOME;type=pref:prm_glazyev@gov.ru
+TEL;type=WORK;type=VOICE;type=pref:+7 (495) 606-43-02
+TEL;type=WORK;type=FAX:+7 (495) 606-79-10
+
+======
+N:ГЕРАЙМОВИЧ;Сергей Леонидович;;;
+FN:Сергей Леонидович ГЕРАЙМОВИЧ
+EMAIL;type=INTERNET;type=WORK;type=pref:geraimovich@yandex.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 570-40-45
+
+======
+N:ГЕРАЙМОВИЧ;Сергей Леонидович;;;
+FN:Сергей Леонидович ГЕРАЙМОВИЧ
+EMAIL;type=INTERNET;type=WORK;type=pref:geraimovich@yandex.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 570-40-45
+
+======
+N:Никешин;Сергей;;;
+FN:Сергей Никешин
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 337-66-30
+
+======
+N:Бабурин;Сергей Николаевич;;;
+FN:Сергей Николаевич Бабурин
+EMAIL;type=INTERNET;type=WORK;type=pref:rcjer@mail.ru
+TEL;type=WORK;type=VOICE;type=pref:+7(903)725-1227
+
+======
+N:Бабурин;Сергей Николаевич;;;
+FN:Сергей Николаевич Бабурин
+EMAIL;type=INTERNET;type=WORK;type=pref:rcjer@mail.ru
+TEL;type=WORK;type=VOICE;type=pref:+7(903)725-1227
+
+======
+N:Ткачук;Сергей Петрович;;;
+FN:Сергей Петрович Ткачук
+EMAIL;type=INTERNET;type=HOME;type=pref:serg1784@mail.ru
+TEL;type=WORK;type=VOICE;type=pref:+7 (495) 606-43-02
+TEL;type=CELL;type=VOICE:+7 (903) 960-39-10
+
+======
+N:;Сергей Сергеевич;;;
+FN:Сергей Сергеевич
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 640-30-00
+
+======
+N:;Сергей Стрелка;;;
+FN:Сергей Стрелка
+TEL;type=CELL;type=VOICE;type=pref:+7 (929) 636-73-16
+
+======
+N:Ткачук от Глазьева;Сергей;;;
+FN:Сергей Ткачук от Глазьева
+TEL;type=CELL;type=VOICE;type=pref:+7 (903) 960-39-10
+
+======
+N:Филькин;Сергей;;;
+FN:Сергей Филькин
+TEL;type=CELL;type=VOICE;type=pref:+7 96224709714
+TEL;type=CELL;type=VOICE:+79624709714
+
+======
+N:Филькин;Сергей;;;
+FN:Сергей Филькин
+TEL;type=CELL;type=VOICE;type=pref:+79624709714
+TEL;type=CELL;type=VOICE:+7 96224709714
+
+======
+N:;Сердар Дмитрий Олегович;;;
+FN:Сердар Дмитрий Олегович
+EMAIL;type=INTERNET;type=HOME;type=pref:serdar.alimov@yandex.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 840-79-96
+TEL;type=CELL;type=VOICE:+7 (968) 847-40-04
+
+======
+N:;Соловьев Владимир;;;
+FN:Соловьев Владимир
+TEL;type=CELL;type=VOICE;type=pref:+7 (929) 970-33-33
+
+======
+N:;Сорокин;;;
+FN:Сорокин
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 763-90-81
+
+======
+N:;Спец Кореспондент;;;
+FN:Спец Кореспондент
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 079-88-00
+
+======
+N:;Станислав Полосков;;;
+FN:Станислав Полосков
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 668-78-01
+TEL;type=CELL;type=VOICE:+7 (985) 136-13-30
+
+======
+N:Макоев;Стас;;;
+FN:Стас Макоев
+item1.EMAIL;type=INTERNET;type=pref:mmm.miting@gmail.com
+TEL;type=CELL;type=VOICE:+7 (985) 759-10-58
+
+======
+N:;Степан НТВ;;;
+FN:Степан НТВ
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 537-38-37
+
+======
+N:;Стрелков Николай Владимирович;;;
+FN:Стрелков Николай Владимирович
+TEL;type=CELL;type=VOICE:+7 (926) 870-22-92
+
+======
+N:;Стрелок;;;
+FN:Стрелок
+TEL;type=HOME;type=VOICE;type=pref:+7 (926) 531-03-00
+
+======
+N:;Сурков В.Ю.;;;
+FN:Сурков В.Ю.
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 272-52-26
+
+======
+N:;Сытов НИКОЛАЙ Олегович ;;;
+FN:Сытов НИКОЛАЙ Олегович 
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 966-68-76
+
+======
+N:Москов;Таня Мальцева;;;
+FN:Таня Мальцева Москов
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 374-11-16
+
+======
+N:;Таня Поп;;;
+FN:Таня Поп
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 535-96-07
+TEL;type=WORK;type=VOICE:+7 (916) 738-36-85
+
+======
+N:;Татаринов Руслан Владимирович;;;
+FN:Татаринов Руслан Владимирович
+EMAIL;type=INTERNET;type=HOME;type=pref:tatrus.01@mail.ru
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 997-01-69
+
+======
+N:Елена;ТВ Центр\, Итоги;;;
+FN:ТВ Центр\, Итоги Елена
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 673-11-35
+
+======
+N:;Терещенко Кандидат На Министра;;;
+FN:Терещенко Кандидат На Министра
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 130-96-99
+
+======
+N:Тазиев;Тимур;;;
+FN:Тимур Тазиев
+TEL;type=CELL;type=VOICE;type=pref:+7 (920) 266-26-66
+
+======
+N:;Федор Лайф Ньюс;;;
+FN:Федор Лайф Ньюс
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 156-38-55
+
+======
+N:Иконников;Феликс;;;
+FN:Феликс Иконников
+item1.EMAIL;type=INTERNET;type=pref:mmm2011.rodaslav@gmail.com
+TEL;type=HOME;type=VOICE;type=pref:+7967829762933
+TEL;type=HOME;type=VOICE:+7 (967) 829-76-33
+
+======
+N:Иконников;Феликс;;;
+FN:Феликс Иконников
+item1.EMAIL;type=INTERNET;type=pref:mmm2011.rodaslav@gmail.com
+TEL;type=HOME;type=VOICE;type=pref:+7 (967) 829-76-33
+TEL;type=CELL;type=VOICE:+7967829812990
+
+======
+N:;Ферберт Александр Александрович;;;
+FN:Ферберт Александр Александрович
+EMAIL;type=INTERNET;type=HOME;type=pref:msk.student@yandex.ru
+TEL;type=HOME;type=VOICE;type=pref:+7 (910) 985-49-50
+TEL;type=CELL;type=VOICE:+7 (915) 424-39-64
+TEL;type=CELL;type=VOICE:+79621609686
+
+======
+N:Прешерен;Франце;;;
+FN:Франце Прешерен
+TEL;type=WORK;type=VOICE;type=pref:+7(926)566-4239
+
+======
+N:Прешерен;Франце;;;
+FN:Франце Прешерен
+TEL;type=WORK;type=VOICE;type=pref:+7(926)566-4239
+
+======
+N:;Чайка;;;
+FN:Чайка
+TEL;type=CELL;type=VOICE;type=pref:+7 964 582-90-23
+
+======
+N:Владимирович;Шахты Вельмицкий;;;
+FN:Шахты Вельмицкий Владимирович
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 227-19-62
+TEL;type=HOME;type=VOICE:+7 (928) 126-66-66
+
+======
+N:;Шишкин Александр Тамбов;;;
+FN:Шишкин Александр Тамбов
+TEL;type=CELL;type=VOICE;type=pref:+7 910 752 2264
+
+======
+N:Атаман Казачий Полковник;Шишкин Сергей Владимирович;;;
+FN:Шишкин Сергей Владимирович Атаман Казачий Полковник
+EMAIL;type=INTERNET;type=HOME;type=pref:rar177@mail.ru
+EMAIL;type=INTERNET;type=WORK:nato177@mail.ru
+TEL;type=HOME;type=VOICE;type=pref:+7 (926) 042-31-66
+TEL;type=WORK;type=VOICE:+7 (499) 784-01-18
+TEL;type=WORK;type=FAX:+7 (499) 784-05-10
+
+======
+N:Борис;Шмидт;;;
+FN:Шмидт Борис
+TEL;type=CELL;type=VOICE;type=pref:+7 921 967-37-49
+
+======
+N:;Шувалова ;;;
+FN:Шувалова 
+TEL;type=CELL;type=VOICE;type=pref:+7 (964) 641-50-28
+
+======
+N:;Щедрин Александр Владимирович;;;
+FN:Щедрин Александр Владимирович
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 051-74-34
+
+======
+N:РИСИ Ростов;Эдуард Анатольевич Попов;;;
+FN:Эдуард Анатольевич Попов РИСИ Ростов
+TEL;type=CELL;type=VOICE;type=pref:+7 (928) 954-80-68
+
+======
+N:;Эльбрус;;;
+FN:Эльбрус
+TEL;type=CELL;type=VOICE;type=pref:+7 (938) 105-64-83
+
+======
+N:;Юлия Жена Вадима;;;
+FN:Юлия Жена Вадима
+TEL;type=CELL;type=VOICE;type=pref:+7 (961) 273-94-80
+
+======
+N:Никитина;Юля;;;
+FN:Юля Никитина
+TEL;type=CELL;type=VOICE;type=pref:+7 (925) 708-87-91
+
+======
+N:;Юля Свичкарь Москва;;;
+FN:Юля Свичкарь Москва
+TEL;type=CELL;type=VOICE;type=pref:+7 (915) 515-20-95
+
+======
+N:;Юля сестра;;;
+FN:Юля сестра
+EMAIL;type=INTERNET;type=HOME;type=pref:4488771@gmail.com
+TEL;type=CELL;type=VOICE:+7 (904) 345-57-52
+
+======
+N:ТЕПЛОВ;Юрий Алексеевич;;;
+FN:Юрий Алексеевич ТЕПЛОВ
+EMAIL;type=INTERNET;type=WORK;type=pref:ok428745@mail.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(910)328-1283
+
+======
+N:ТЕПЛОВ;Юрий Алексеевич;;;
+FN:Юрий Алексеевич ТЕПЛОВ
+EMAIL;type=INTERNET;type=WORK;type=pref:ok428745@mail.ru
+TEL;type=CELL;type=VOICE;type=pref:+7(910)328-1283
+
+======
+N:Сидоров Ген.Директор;Юрий Владимирович;;;
+FN:Юрий Владимирович Сидоров Ген.Директор
+EMAIL;type=INTERNET;type=WORK;type=pref:alfa-foton2006@mail.ru
+TEL;type=WORK;type=VOICE;type=pref:+7 (499) 728-04-08
+TEL;type=CELL;type=VOICE:+7 (903) 138-56-80
+
+======
+N:;Юрий Кот;;;
+FN:Юрий Кот
+TEL;type=CELL;type=VOICE;type=pref:+7 (968) 766-28-22
+
+======
+N:Курносов Охр;Юрий;;;
+FN:Юрий Курносов Охр
+TEL;type=CELL;type=VOICE;type=pref:+7 (916) 308-69-89
+
+======
+N:;Я Ростов;;;
+FN:Я Ростов
+TEL;type=CELL;type=VOICE;type=pref:+7 (918) 543-56-82
+
+======
+N:;Ярослав японское ТВ;;;
+FN:Ярослав японское ТВ
+TEL;type=CELL;type=VOICE;type=pref:+7 (985) 226-57-81
+
+======
+N:;;;;
+FN:
+TEL;type=WORK;type=VOICE;type=pref:+749593730361
+TEL;type=WORK;type=VOICE:+790672396991d.wechlin@nzz.ch
+TEL;type=WORK;type=FAX:+7(499)243-0951
+TEL;type=MAIN:+7 495 961-24-26
+TEL;type=WORK;type=FAX:+7 495 961-24-27
+
+======
+N:;;;;
+FN:Apple
+item1.EMAIL;type=INTERNET;type=pref:6203091@gmail.com
+TEL;type=MAIN;type=pref:+7 495 961-24-26
+TEL;type=WORK;type=FAX:+7 495 961-24-27
+
+======
+N:;Ka3axc;;;
+FN:Ka3axc
+EMAIL;type=INTERNET;type=WORK;type=pref:vaessen@un.org
+TEL;type=CELL;type=VOICE;type=pref:+77777809071
+TEL;type=WORK;type=VOICE:+77273122643/266.1511
+TEL;type=WORK;type=VOICE:+77273123148
+
+======
+N:;KOCTEHKO Борис Игоревич;;;
+FN:KOCTEHKO Борис Игоревич
+TEL;type=WORK;type=VOICE;type=pref:+74991363601
+
+======
+N:;KOCTEHKO Борис Игоревич;;;
+FN:KOCTEHKO Борис Игоревич
+TEL;type=WORK;type=VOICE;type=pref:+74991363601
+
+======
+N:Семен Риси;Thoeodourooth;;;
+FN:Thoeodourooth Семен Риси
+TEL;type=CELL;type=VOICE;type=pref:+7 925 608-97-21
+
+======
+N:Koln;Westdeutscher Rundfunk;;;
+FN:Westdeutscher Rundfunk Koln
+EMAIL;type=INTERNET;type=WORK;type=pref:ard-moskau.tv@wdr.de
+TEL;type=WORK;type=VOICE;type=pref:+7/495/7835998
+TEL;type=WORK;type=FAX:+7/495/7835999
+
+======
+N:;;;;
+FN:
+TEL;type=CELL;type=VOICE;type=pref:+7 (926) 195-90-38
+
+======
+N:;;;;
+FN:9621804@gmail.com
+EMAIL;type=INTERNET;type=HOME;type=pref:9621804@gmail.com

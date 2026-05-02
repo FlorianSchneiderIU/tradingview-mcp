@@ -1,0 +1,559 @@
+//@version=6
+indicator("Turtle Soup Retest Indicator", "TurtleSoupRT", overlay = true, max_bars_back = 3000, max_boxes_count = 20, max_labels_count = 200)
+
+grpLevels = "HTF Zones"
+i_use_tf1 = input.bool(true, "Use first key timeframe", group = grpLevels)
+i_tf1 = input.timeframe("240", "Timeframe 1", group = grpLevels)
+i_use_tf2 = input.bool(true, "Use second key timeframe", group = grpLevels)
+i_tf2 = input.timeframe("1D", "Timeframe 2", group = grpLevels)
+i_htf_left = input.int(5, "HTF pivot left bars", minval = 1, maxval = 20, group = grpLevels)
+i_htf_right = input.int(5, "HTF pivot right bars", minval = 1, maxval = 20, group = grpLevels)
+i_htf_ob_search_bars = input.int(50, "Max HTF bars to search OB", minval = 5, maxval = 200, group = grpLevels)
+i_show_levels = input.bool(true, "Show active HTF zones", group = grpLevels)
+i_prioritize_higher_tf = input.bool(true, "Prioritize second timeframe when both sweep", group = grpLevels)
+
+grpSweep = "Sweep"
+i_zone_penetration_frac = input.float(0.50, "Tap tolerance below/above zone (x width)", minval = 0.0, maxval = 2.0, step = 0.05, group = grpSweep)
+i_min_sweep_reclaim_pos = input.float(0.70, "Min sweep reclaim position", minval = 0.0, maxval = 1.0, step = 0.05, group = grpSweep)
+i_max_bars_to_choch = input.int(40, "Max bars from sweep to CHoCH", minval = 1, maxval = 300, group = grpSweep)
+i_show_sweep_labels = input.bool(true, "Show sweep labels", group = grpSweep)
+
+grpStructure = "LTF CHoCH"
+i_structure_left = input.int(2, "LTF pivot left bars", minval = 1, maxval = 20, group = grpStructure)
+i_structure_right = input.int(2, "LTF pivot right bars", minval = 1, maxval = 20, group = grpStructure)
+i_show_structure_labels = input.bool(true, "Show CHoCH labels", group = grpStructure)
+
+grpOB = "Order Block Retest"
+i_ob_use_body = input.bool(false, "Use candle body for OB bounds", group = grpOB)
+i_ob_search_bars = input.int(20, "Max candles from CHoCH to search OB", minval = 1, maxval = 200, group = grpOB)
+i_retest_valid_bars = input.int(30, "Max bars from CHoCH to retest", minval = 1, maxval = 300, group = grpOB)
+i_retest_close_pos = input.float(0.50, "Retest close position inside OB", minval = 0.0, maxval = 1.0, step = 0.05, group = grpOB)
+i_invalidate_on_close = input.bool(true, "Invalidate if candle closes through OB", group = grpOB)
+i_show_ob_boxes = input.bool(true, "Show active OB boxes", group = grpOB)
+
+grpStyle = "Style"
+i_tf1_res_color = input.color(color.new(color.red, 0), "TF1 resistance", group = grpStyle)
+i_tf1_sup_color = input.color(color.new(color.green, 0), "TF1 support", group = grpStyle)
+i_tf2_res_color = input.color(color.new(color.maroon, 0), "TF2 resistance", group = grpStyle)
+i_tf2_sup_color = input.color(color.new(color.teal, 0), "TF2 support", group = grpStyle)
+i_bull_ob_color = input.color(color.new(color.lime, 85), "Bullish OB", group = grpStyle)
+i_bear_ob_color = input.color(color.new(color.red, 85), "Bearish OB", group = grpStyle)
+
+f_tf_label(string tf) =>
+    tf == "240" ? "4H" : tf == "1D" ? "1D" : tf == "1W" ? "1W" : tf
+
+f_htf_smc_zones(int left, int right, int maxLookback, bool useBody) =>
+    ph = ta.pivothigh(high, left, right)
+    pl = ta.pivotlow(low, left, right)
+    var float activeHigh = na
+    var float activeLow = na
+    var int activeHighIndex = na
+    var int activeLowIndex = na
+    var bool highCrossed = false
+    var bool lowCrossed = false
+    var float demandTop = na
+    var float demandBottom = na
+    var int demandTime = na
+    var float supplyTop = na
+    var float supplyBottom = na
+    var int supplyTime = na
+    if not na(ph)
+        activeHigh := ph
+        activeHighIndex := bar_index - right
+        highCrossed := false
+    if not na(pl)
+        activeLow := pl
+        activeLowIndex := bar_index - right
+        lowCrossed := false
+    bullBreak = not na(activeHigh) and not highCrossed and close > activeHigh and nz(close[1], close) <= activeHigh
+    bearBreak = not na(activeLow) and not lowCrossed and close < activeLow and nz(close[1], close) >= activeLow
+    if bullBreak and not na(activeHighIndex)
+        float bestLow = na
+        float obTop = na
+        float obBottom = na
+        int obTime = na
+        int maxOffset = math.min(maxLookback, bar_index - activeHighIndex)
+        if maxOffset >= 1
+            for offset = 1 to maxOffset
+                if na(bestLow) or low[offset] < bestLow
+                    bestLow := low[offset]
+                    obTop := useBody ? math.max(open[offset], close[offset]) : high[offset]
+                    obBottom := useBody ? math.min(open[offset], close[offset]) : low[offset]
+                    obTime := time[offset]
+        if not na(obTop) and not na(obBottom)
+            demandTop := obTop
+            demandBottom := obBottom
+            demandTime := obTime
+        highCrossed := true
+    if bearBreak and not na(activeLowIndex)
+        float bestHigh = na
+        float obTop = na
+        float obBottom = na
+        int obTime = na
+        int maxOffset = math.min(maxLookback, bar_index - activeLowIndex)
+        if maxOffset >= 1
+            for offset = 1 to maxOffset
+                if na(bestHigh) or high[offset] > bestHigh
+                    bestHigh := high[offset]
+                    obTop := useBody ? math.max(open[offset], close[offset]) : high[offset]
+                    obBottom := useBody ? math.min(open[offset], close[offset]) : low[offset]
+                    obTime := time[offset]
+        if not na(obTop) and not na(obBottom)
+            supplyTop := obTop
+            supplyBottom := obBottom
+            supplyTime := obTime
+        lowCrossed := true
+    [demandTop, demandBottom, demandTime, supplyTop, supplyBottom, supplyTime]
+
+f_find_bullish_ob(int maxLookback, int barsSinceSweep, bool useBody) =>
+    float obTop = na
+    float obBottom = na
+    int obTime = na
+    int limit = math.min(maxLookback, math.max(barsSinceSweep - 1, 0))
+    if limit >= 1
+        for offset = 1 to limit
+            if close[offset] < open[offset]
+                obTop := useBody ? open[offset] : high[offset]
+                obBottom := useBody ? close[offset] : low[offset]
+                obTime := time[offset]
+                break
+    [obTop, obBottom, obTime]
+
+f_find_bearish_ob(int maxLookback, int barsSinceSweep, bool useBody) =>
+    float obTop = na
+    float obBottom = na
+    int obTime = na
+    int limit = math.min(maxLookback, math.max(barsSinceSweep - 1, 0))
+    if limit >= 1
+        for offset = 1 to limit
+            if close[offset] > open[offset]
+                obTop := useBody ? close[offset] : high[offset]
+                obBottom := useBody ? open[offset] : low[offset]
+                obTime := time[offset]
+                break
+    [obTop, obBottom, obTime]
+
+f_push_zone(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, float top, float bottom, int zoneTime) =>
+    array.unshift(tops, top)
+    array.unshift(bottoms, bottom)
+    array.unshift(times, zoneTime)
+    array.unshift(usedFlags, false)
+    if array.size(tops) > 20
+        array.pop(tops)
+        array.pop(bottoms)
+        array.pop(times)
+        array.pop(usedFlags)
+
+f_remove_zone(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, int idx) =>
+    array.remove(tops, idx)
+    array.remove(bottoms, idx)
+    array.remove(times, idx)
+    array.remove(usedFlags, idx)
+
+f_prune_support_zones(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, float lowValue) =>
+    if array.size(tops) > 0
+        int lastIdx = array.size(tops) - 1
+        for step = 0 to lastIdx
+            int idx = lastIdx - step
+            if lowValue < array.get(bottoms, idx)
+                f_remove_zone(tops, bottoms, times, usedFlags, idx)
+
+f_prune_resistance_zones(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, float highValue) =>
+    if array.size(tops) > 0
+        int lastIdx = array.size(tops) - 1
+        for step = 0 to lastIdx
+            int idx = lastIdx - step
+            if highValue > array.get(tops, idx)
+                f_remove_zone(tops, bottoms, times, usedFlags, idx)
+
+f_stack_top(array<float> tops) =>
+    array.size(tops) > 0 ? array.get(tops, 0) : na
+
+f_stack_bottom(array<float> bottoms) =>
+    array.size(bottoms) > 0 ? array.get(bottoms, 0) : na
+
+f_stack_used(array<bool> usedFlags) =>
+    array.size(usedFlags) > 0 ? array.get(usedFlags, 0) : false
+
+f_bull_sweep_from_stack(array<float> tops, array<float> bottoms, array<bool> usedFlags, float reclaimPos, float penetrationFrac, float minReclaim) =>
+    bool found = false
+    float zoneTop = na
+    float zoneBottom = na
+    int zoneIndex = na
+    if array.size(tops) > 0
+        for idx = 0 to array.size(tops) - 1
+            top = array.get(tops, idx)
+            bottom = array.get(bottoms, idx)
+            width = top - bottom
+            if not array.get(usedFlags, idx) and low <= top and low >= bottom - width * penetrationFrac and close > top and reclaimPos >= minReclaim
+                found := true
+                zoneTop := top
+                zoneBottom := bottom
+                zoneIndex := idx
+                break
+    [found, zoneTop, zoneBottom, zoneIndex]
+
+f_bear_sweep_from_stack(array<float> tops, array<float> bottoms, array<bool> usedFlags, float reclaimPos, float penetrationFrac, float minReclaim) =>
+    bool found = false
+    float zoneTop = na
+    float zoneBottom = na
+    int zoneIndex = na
+    if array.size(tops) > 0
+        for idx = 0 to array.size(tops) - 1
+            top = array.get(tops, idx)
+            bottom = array.get(bottoms, idx)
+            width = top - bottom
+            if not array.get(usedFlags, idx) and high >= bottom and high <= top + width * penetrationFrac and close < bottom and reclaimPos >= minReclaim
+                found := true
+                zoneTop := top
+                zoneBottom := bottom
+                zoneIndex := idx
+                break
+    [found, zoneTop, zoneBottom, zoneIndex]
+
+[tf1SupTopCandidate, tf1SupBottomCandidate, tf1SupTimeCandidate, tf1ResTopCandidate, tf1ResBottomCandidate, tf1ResTimeCandidate] = request.security(syminfo.tickerid, i_tf1, f_htf_smc_zones(i_htf_left, i_htf_right, i_htf_ob_search_bars, i_ob_use_body), lookahead = barmerge.lookahead_off)
+[tf2SupTopCandidate, tf2SupBottomCandidate, tf2SupTimeCandidate, tf2ResTopCandidate, tf2ResBottomCandidate, tf2ResTimeCandidate] = request.security(syminfo.tickerid, i_tf2, f_htf_smc_zones(i_htf_left, i_htf_right, i_htf_ob_search_bars, i_ob_use_body), lookahead = barmerge.lookahead_off)
+
+var array<float> tf1ResTops = array.new<float>()
+var array<float> tf1ResBottoms = array.new<float>()
+var array<int> tf1ResTimes = array.new<int>()
+var array<bool> tf1ResUsedFlags = array.new<bool>()
+var int tf1ResLastTime = na
+var array<float> tf1SupTops = array.new<float>()
+var array<float> tf1SupBottoms = array.new<float>()
+var array<int> tf1SupTimes = array.new<int>()
+var array<bool> tf1SupUsedFlags = array.new<bool>()
+var int tf1SupLastTime = na
+
+var array<float> tf2ResTops = array.new<float>()
+var array<float> tf2ResBottoms = array.new<float>()
+var array<int> tf2ResTimes = array.new<int>()
+var array<bool> tf2ResUsedFlags = array.new<bool>()
+var int tf2ResLastTime = na
+var array<float> tf2SupTops = array.new<float>()
+var array<float> tf2SupBottoms = array.new<float>()
+var array<int> tf2SupTimes = array.new<int>()
+var array<bool> tf2SupUsedFlags = array.new<bool>()
+var int tf2SupLastTime = na
+
+if i_use_tf1 and not na(tf1ResTopCandidate) and not na(tf1ResBottomCandidate) and not na(tf1ResTimeCandidate) and (na(tf1ResLastTime) or tf1ResTimeCandidate != tf1ResLastTime)
+    f_push_zone(tf1ResTops, tf1ResBottoms, tf1ResTimes, tf1ResUsedFlags, tf1ResTopCandidate, tf1ResBottomCandidate, tf1ResTimeCandidate)
+    tf1ResLastTime := tf1ResTimeCandidate
+
+if i_use_tf1 and not na(tf1SupTopCandidate) and not na(tf1SupBottomCandidate) and not na(tf1SupTimeCandidate) and (na(tf1SupLastTime) or tf1SupTimeCandidate != tf1SupLastTime)
+    f_push_zone(tf1SupTops, tf1SupBottoms, tf1SupTimes, tf1SupUsedFlags, tf1SupTopCandidate, tf1SupBottomCandidate, tf1SupTimeCandidate)
+    tf1SupLastTime := tf1SupTimeCandidate
+
+if i_use_tf2 and not na(tf2ResTopCandidate) and not na(tf2ResBottomCandidate) and not na(tf2ResTimeCandidate) and (na(tf2ResLastTime) or tf2ResTimeCandidate != tf2ResLastTime)
+    f_push_zone(tf2ResTops, tf2ResBottoms, tf2ResTimes, tf2ResUsedFlags, tf2ResTopCandidate, tf2ResBottomCandidate, tf2ResTimeCandidate)
+    tf2ResLastTime := tf2ResTimeCandidate
+
+if i_use_tf2 and not na(tf2SupTopCandidate) and not na(tf2SupBottomCandidate) and not na(tf2SupTimeCandidate) and (na(tf2SupLastTime) or tf2SupTimeCandidate != tf2SupLastTime)
+    f_push_zone(tf2SupTops, tf2SupBottoms, tf2SupTimes, tf2SupUsedFlags, tf2SupTopCandidate, tf2SupBottomCandidate, tf2SupTimeCandidate)
+    tf2SupLastTime := tf2SupTimeCandidate
+
+f_prune_support_zones(tf1SupTops, tf1SupBottoms, tf1SupTimes, tf1SupUsedFlags, low)
+f_prune_support_zones(tf2SupTops, tf2SupBottoms, tf2SupTimes, tf2SupUsedFlags, low)
+f_prune_resistance_zones(tf1ResTops, tf1ResBottoms, tf1ResTimes, tf1ResUsedFlags, high)
+f_prune_resistance_zones(tf2ResTops, tf2ResBottoms, tf2ResTimes, tf2ResUsedFlags, high)
+
+tf1ResistanceTop = f_stack_top(tf1ResTops)
+tf1ResistanceBottom = f_stack_bottom(tf1ResBottoms)
+tf1ResistanceSwept = f_stack_used(tf1ResUsedFlags)
+tf1SupportTop = f_stack_top(tf1SupTops)
+tf1SupportBottom = f_stack_bottom(tf1SupBottoms)
+tf1SupportSwept = f_stack_used(tf1SupUsedFlags)
+tf2ResistanceTop = f_stack_top(tf2ResTops)
+tf2ResistanceBottom = f_stack_bottom(tf2ResBottoms)
+tf2ResistanceSwept = f_stack_used(tf2ResUsedFlags)
+tf2SupportTop = f_stack_top(tf2SupTops)
+tf2SupportBottom = f_stack_bottom(tf2SupBottoms)
+tf2SupportSwept = f_stack_used(tf2SupUsedFlags)
+
+tf1ResTopPlot = plot(i_show_levels and i_use_tf1 ? tf1ResistanceTop : na, "TF1 Resistance Top", color = tf1ResistanceSwept ? color.new(i_tf1_res_color, 65) : i_tf1_res_color, linewidth = 1, style = plot.style_stepline)
+tf1ResBottomPlot = plot(i_show_levels and i_use_tf1 ? tf1ResistanceBottom : na, "TF1 Resistance Bottom", color = tf1ResistanceSwept ? color.new(i_tf1_res_color, 65) : i_tf1_res_color, linewidth = 1, style = plot.style_stepline)
+fill(tf1ResTopPlot, tf1ResBottomPlot, color = color.new(i_tf1_res_color, 90), title = "TF1 Resistance Zone")
+
+tf1SupTopPlot = plot(i_show_levels and i_use_tf1 ? tf1SupportTop : na, "TF1 Support Top", color = tf1SupportSwept ? color.new(i_tf1_sup_color, 65) : i_tf1_sup_color, linewidth = 1, style = plot.style_stepline)
+tf1SupBottomPlot = plot(i_show_levels and i_use_tf1 ? tf1SupportBottom : na, "TF1 Support Bottom", color = tf1SupportSwept ? color.new(i_tf1_sup_color, 65) : i_tf1_sup_color, linewidth = 1, style = plot.style_stepline)
+fill(tf1SupTopPlot, tf1SupBottomPlot, color = color.new(i_tf1_sup_color, 90), title = "TF1 Support Zone")
+
+tf2ResTopPlot = plot(i_show_levels and i_use_tf2 ? tf2ResistanceTop : na, "TF2 Resistance Top", color = tf2ResistanceSwept ? color.new(i_tf2_res_color, 65) : i_tf2_res_color, linewidth = 1, style = plot.style_stepline)
+tf2ResBottomPlot = plot(i_show_levels and i_use_tf2 ? tf2ResistanceBottom : na, "TF2 Resistance Bottom", color = tf2ResistanceSwept ? color.new(i_tf2_res_color, 65) : i_tf2_res_color, linewidth = 1, style = plot.style_stepline)
+fill(tf2ResTopPlot, tf2ResBottomPlot, color = color.new(i_tf2_res_color, 90), title = "TF2 Resistance Zone")
+
+tf2SupTopPlot = plot(i_show_levels and i_use_tf2 ? tf2SupportTop : na, "TF2 Support Top", color = tf2SupportSwept ? color.new(i_tf2_sup_color, 65) : i_tf2_sup_color, linewidth = 1, style = plot.style_stepline)
+tf2SupBottomPlot = plot(i_show_levels and i_use_tf2 ? tf2SupportBottom : na, "TF2 Support Bottom", color = tf2SupportSwept ? color.new(i_tf2_sup_color, 65) : i_tf2_sup_color, linewidth = 1, style = plot.style_stepline)
+fill(tf2SupTopPlot, tf2SupBottomPlot, color = color.new(i_tf2_sup_color, 90), title = "TF2 Support Zone")
+
+ltfPivotHigh = ta.pivothigh(high, i_structure_left, i_structure_right)
+ltfPivotLow = ta.pivotlow(low, i_structure_left, i_structure_right)
+
+var float ltfHighLevel = na
+var int ltfHighBar = na
+var bool ltfHighCrossed = false
+var float ltfLowLevel = na
+var int ltfLowBar = na
+var bool ltfLowCrossed = false
+var int ltfTrend = 0
+
+if not na(ltfPivotHigh)
+    ltfHighLevel := ltfPivotHigh
+    ltfHighBar := bar_index[i_structure_right]
+    ltfHighCrossed := false
+
+if not na(ltfPivotLow)
+    ltfLowLevel := ltfPivotLow
+    ltfLowBar := bar_index[i_structure_right]
+    ltfLowCrossed := false
+
+bullBreak = not na(ltfHighLevel) and not ltfHighCrossed and close > ltfHighLevel and nz(close[1], close) <= ltfHighLevel
+bearBreak = not na(ltfLowLevel) and not ltfLowCrossed and close < ltfLowLevel and nz(close[1], close) >= ltfLowLevel
+
+bullChochRaw = bullBreak and ltfTrend == -1
+bearChochRaw = bearBreak and ltfTrend == 1
+
+if bullBreak
+    ltfHighCrossed := true
+    ltfTrend := 1
+
+if bearBreak
+    ltfLowCrossed := true
+    ltfTrend := -1
+
+var bool bullActive = false
+var bool bullChochConfirmed = false
+var float bullSweepLevel = na
+var string bullSweepTf = ""
+var int bullSweepBar = na
+var float bullSweepExtreme = na
+var int bullChochBar = na
+var float bullObTop = na
+var float bullObBottom = na
+var int bullObTime = na
+var box bullObBox = na
+
+var bool bearActive = false
+var bool bearChochConfirmed = false
+var float bearSweepLevel = na
+var string bearSweepTf = ""
+var int bearSweepBar = na
+var float bearSweepExtreme = na
+var int bearChochBar = na
+var float bearObTop = na
+var float bearObBottom = na
+var int bearObTime = na
+var box bearObBox = na
+
+bullSweepEvent = false
+bearSweepEvent = false
+bullChochEvent = false
+bearChochEvent = false
+bullEntryEvent = false
+bearEntryEvent = false
+
+float bullCandidateLevel = na
+string bullCandidateTf = ""
+bool bullCandidateFromTf2 = false
+int bullCandidateIndex = na
+
+float bearCandidateLevel = na
+string bearCandidateTf = ""
+bool bearCandidateFromTf2 = false
+int bearCandidateIndex = na
+
+barRange = math.max(high - low, syminfo.mintick)
+bullReclaimPos = (close - low) / barRange
+bearReclaimPos = (high - close) / barRange
+
+[tf2BullSweepRaw, tf2BullTop, tf2BullBottom, tf2BullIndex] = f_bull_sweep_from_stack(tf2SupTops, tf2SupBottoms, tf2SupUsedFlags, bullReclaimPos, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+[tf1BullSweepRaw, tf1BullTop, tf1BullBottom, tf1BullIndex] = f_bull_sweep_from_stack(tf1SupTops, tf1SupBottoms, tf1SupUsedFlags, bullReclaimPos, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+[tf2BearSweepRaw, tf2BearTop, tf2BearBottom, tf2BearIndex] = f_bear_sweep_from_stack(tf2ResTops, tf2ResBottoms, tf2ResUsedFlags, bearReclaimPos, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+[tf1BearSweepRaw, tf1BearTop, tf1BearBottom, tf1BearIndex] = f_bear_sweep_from_stack(tf1ResTops, tf1ResBottoms, tf1ResUsedFlags, bearReclaimPos, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+tf2BullSweep = i_use_tf2 and tf2BullSweepRaw
+tf1BullSweep = i_use_tf1 and tf1BullSweepRaw
+tf2BearSweep = i_use_tf2 and tf2BearSweepRaw
+tf1BearSweep = i_use_tf1 and tf1BearSweepRaw
+
+if i_prioritize_higher_tf
+    if tf2BullSweep
+        bullCandidateLevel := tf2BullTop
+        bullCandidateTf := f_tf_label(i_tf2)
+        bullCandidateFromTf2 := true
+        bullCandidateIndex := tf2BullIndex
+    else if tf1BullSweep
+        bullCandidateLevel := tf1BullTop
+        bullCandidateTf := f_tf_label(i_tf1)
+        bullCandidateIndex := tf1BullIndex
+
+    if tf2BearSweep
+        bearCandidateLevel := tf2BearBottom
+        bearCandidateTf := f_tf_label(i_tf2)
+        bearCandidateFromTf2 := true
+        bearCandidateIndex := tf2BearIndex
+    else if tf1BearSweep
+        bearCandidateLevel := tf1BearBottom
+        bearCandidateTf := f_tf_label(i_tf1)
+        bearCandidateIndex := tf1BearIndex
+else
+    if tf1BullSweep
+        bullCandidateLevel := tf1BullTop
+        bullCandidateTf := f_tf_label(i_tf1)
+        bullCandidateIndex := tf1BullIndex
+    else if tf2BullSweep
+        bullCandidateLevel := tf2BullTop
+        bullCandidateTf := f_tf_label(i_tf2)
+        bullCandidateFromTf2 := true
+        bullCandidateIndex := tf2BullIndex
+
+    if tf1BearSweep
+        bearCandidateLevel := tf1BearBottom
+        bearCandidateTf := f_tf_label(i_tf1)
+        bearCandidateIndex := tf1BearIndex
+    else if tf2BearSweep
+        bearCandidateLevel := tf2BearBottom
+        bearCandidateTf := f_tf_label(i_tf2)
+        bearCandidateFromTf2 := true
+        bearCandidateIndex := tf2BearIndex
+
+if not na(bullCandidateLevel)
+    bullSweepEvent := true
+    if not na(bullCandidateIndex)
+        if bullCandidateFromTf2
+            array.set(tf2SupUsedFlags, bullCandidateIndex, true)
+        else
+            array.set(tf1SupUsedFlags, bullCandidateIndex, true)
+    if not na(bullObBox)
+        box.delete(bullObBox)
+    bullActive := true
+    bullChochConfirmed := false
+    bullSweepLevel := bullCandidateLevel
+    bullSweepTf := bullCandidateTf
+    bullSweepBar := bar_index
+    bullSweepExtreme := low
+    bullChochBar := na
+    bullObTop := na
+    bullObBottom := na
+    bullObTime := na
+    bullObBox := na
+
+if not na(bearCandidateLevel)
+    bearSweepEvent := true
+    if not na(bearCandidateIndex)
+        if bearCandidateFromTf2
+            array.set(tf2ResUsedFlags, bearCandidateIndex, true)
+        else
+            array.set(tf1ResUsedFlags, bearCandidateIndex, true)
+    if not na(bearObBox)
+        box.delete(bearObBox)
+    bearActive := true
+    bearChochConfirmed := false
+    bearSweepLevel := bearCandidateLevel
+    bearSweepTf := bearCandidateTf
+    bearSweepBar := bar_index
+    bearSweepExtreme := high
+    bearChochBar := na
+    bearObTop := na
+    bearObBottom := na
+    bearObTime := na
+    bearObBox := na
+
+if bullActive and not bullChochConfirmed
+    if close < bullSweepExtreme or bar_index - bullSweepBar > i_max_bars_to_choch
+        bullActive := false
+    else if bullChochRaw and bar_index > bullSweepBar
+        [nextBullObTop, nextBullObBottom, nextBullObTime] = f_find_bullish_ob(i_ob_search_bars, bar_index - bullSweepBar, i_ob_use_body)
+        if not na(nextBullObTop) and not na(nextBullObBottom)
+            bullChochEvent := true
+            bullChochConfirmed := true
+            bullChochBar := bar_index
+            bullObTop := nextBullObTop
+            bullObBottom := nextBullObBottom
+            bullObTime := nextBullObTime
+            if i_show_ob_boxes
+                bullObBox := box.new(bullObTime, bullObTop, time, bullObBottom, xloc = xloc.bar_time, bgcolor = i_bull_ob_color, border_color = color.new(color.lime, 0))
+        else
+            bullActive := false
+
+if bearActive and not bearChochConfirmed
+    if close > bearSweepExtreme or bar_index - bearSweepBar > i_max_bars_to_choch
+        bearActive := false
+    else if bearChochRaw and bar_index > bearSweepBar
+        [nextBearObTop, nextBearObBottom, nextBearObTime] = f_find_bearish_ob(i_ob_search_bars, bar_index - bearSweepBar, i_ob_use_body)
+        if not na(nextBearObTop) and not na(nextBearObBottom)
+            bearChochEvent := true
+            bearChochConfirmed := true
+            bearChochBar := bar_index
+            bearObTop := nextBearObTop
+            bearObBottom := nextBearObBottom
+            bearObTime := nextBearObTime
+            if i_show_ob_boxes
+                bearObBox := box.new(bearObTime, bearObTop, time, bearObBottom, xloc = xloc.bar_time, bgcolor = i_bear_ob_color, border_color = color.new(color.red, 0))
+        else
+            bearActive := false
+
+if bullActive and bullChochConfirmed and not na(bullObBox)
+    box.set_right(bullObBox, time)
+
+if bearActive and bearChochConfirmed and not na(bearObBox)
+    box.set_right(bearObBox, time)
+
+if bullActive and bullChochConfirmed and bar_index > bullChochBar
+    bullObRange = bullObTop - bullObBottom
+    bullRetestClose = bullObBottom + bullObRange * i_retest_close_pos
+    bullTouched = low <= bullObTop and high >= bullObBottom
+    bullInvalid = i_invalidate_on_close ? close < bullObBottom : low < bullObBottom
+    bullExpired = bar_index - bullChochBar > i_retest_valid_bars
+    if bullInvalid or bullExpired
+        bullActive := false
+        bullChochConfirmed := false
+    else if bullTouched and close >= bullRetestClose
+        bullEntryEvent := true
+        bullActive := false
+        bullChochConfirmed := false
+        if not na(bullObBox)
+            box.set_right(bullObBox, time)
+            box.set_bgcolor(bullObBox, color.new(color.lime, 78))
+
+if bearActive and bearChochConfirmed and bar_index > bearChochBar
+    bearObRange = bearObTop - bearObBottom
+    bearRetestClose = bearObTop - bearObRange * i_retest_close_pos
+    bearTouched = high >= bearObBottom and low <= bearObTop
+    bearInvalid = i_invalidate_on_close ? close > bearObTop : high > bearObTop
+    bearExpired = bar_index - bearChochBar > i_retest_valid_bars
+    if bearInvalid or bearExpired
+        bearActive := false
+        bearChochConfirmed := false
+    else if bearTouched and close <= bearRetestClose
+        bearEntryEvent := true
+        bearActive := false
+        bearChochConfirmed := false
+        if not na(bearObBox)
+            box.set_right(bearObBox, time)
+            box.set_bgcolor(bearObBox, color.new(color.red, 78))
+
+plotshape(bullSweepEvent, title = "Bullish Sweep", style = shape.circle, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny, text = "Sweep")
+plotshape(bearSweepEvent, title = "Bearish Sweep", style = shape.circle, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny, text = "Sweep")
+plotshape(bullChochEvent, title = "Bullish CHoCH", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.small, text = "CH")
+plotshape(bearChochEvent, title = "Bearish CHoCH", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.small, text = "CH")
+plotshape(bullEntryEvent, title = "Bullish OB Retest", style = shape.labelup, location = location.belowbar, color = color.new(color.lime, 0), textcolor = color.white, size = size.small, text = "Long")
+plotshape(bearEntryEvent, title = "Bearish OB Retest", style = shape.labeldown, location = location.abovebar, color = color.new(color.red, 0), textcolor = color.white, size = size.small, text = "Short")
+
+if bullSweepEvent and i_show_sweep_labels
+    label.new(time, low, bullSweepTf + " sell-side sweep", xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.lime, 0), textcolor = color.white, size = size.small)
+
+if bearSweepEvent and i_show_sweep_labels
+    label.new(time, high, bearSweepTf + " buy-side sweep", xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+if bullChochEvent and i_show_structure_labels
+    label.new(time, low, "Bull CHoCH", xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
+
+if bearChochEvent and i_show_structure_labels
+    label.new(time, high, "Bear CHoCH", xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+alertcondition(bullSweepEvent, "Bullish HTF sweep", "Bullish sweep of an HTF support level")
+alertcondition(bearSweepEvent, "Bearish HTF sweep", "Bearish sweep of an HTF resistance level")
+alertcondition(bullChochEvent, "Bullish CHoCH after sweep", "Bullish CHoCH confirmed after an HTF sweep")
+alertcondition(bearChochEvent, "Bearish CHoCH after sweep", "Bearish CHoCH confirmed after an HTF sweep")
+alertcondition(bullEntryEvent, "Bullish OB retest entry", "Bullish turtle soup retest entry")
+alertcondition(bearEntryEvent, "Bearish OB retest entry", "Bearish turtle soup retest entry")

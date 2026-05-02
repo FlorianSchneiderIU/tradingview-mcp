@@ -1,0 +1,1169 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Join our channel for more free tools: https://t.me/IndicatorsforTV
+
+// =============================================================================
+// Mitigation Block Quality
+// =============================================================================
+// Detects the moments where price returns to an order block and MITIGATES it,
+// then grades each mitigation reaction as A / B / C based on the strength,
+// speed and follow-through of the bounce. Invalidated blocks are faded out
+// with a dotted extension. A live panel tracks active blocks, the distance
+// to the nearest one, grade distribution, the success rate of the last 20,
+// and the health of the currently-closest block.
+// =============================================================================
+
+//@version=6
+indicator("Mitigation Block Quality",
+     shorttitle       = "MBQ",
+     overlay          = true,
+     max_boxes_count  = 500,
+     max_lines_count  = 500,
+     max_labels_count = 500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AGPro Color Palette
+// ─────────────────────────────────────────────────────────────────────────────
+headerBg      = color.rgb(37, 99, 235)     // #2563EB
+headerText    = color.rgb(245, 247, 250)   // #F5F7FA
+panelBg       = color.rgb(15, 23, 42)      // #0F172A
+panelBorder   = color.rgb(51, 65, 85)      // #334155
+panelLabelCol = color.rgb(148, 163, 184)   // #94A3B8
+panelValueCol = color.rgb(226, 232, 240)   // #E2E8F0
+bullColor     = color.rgb(34, 197, 166)    // #22C5A6
+bearColor     = color.rgb(244, 114, 182)   // #F472B6
+neutralColor  = color.rgb(245, 189, 92)    // #F5BD5C
+accentColor   = color.rgb(129, 140, 248)   // #818CF8
+greyFar       = color.rgb(120, 130, 145)
+whiteLabel    = color.rgb(255, 255, 255)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — Detection
+// ─────────────────────────────────────────────────────────────────────────────
+grpDet = "Detection"
+swingLen     = input.int(5,   "Swing Length",               minval = 2,  maxval = 20, group = grpDet,
+     tooltip = "Pivot lookback used to locate the origin candle of each order block. Lower values produce more blocks; higher values produce fewer but more significant ones.")
+obLookback   = input.int(200, "Block Lifetime (bars)",      minval = 50, maxval = 500, group = grpDet,
+     tooltip = "Maximum age of an order block in bars before it is retired. Prevents stale blocks from cluttering the chart.")
+maxActive    = input.int(8,   "Max Active Blocks / Side",   minval = 3,  maxval = 20, group = grpDet,
+     tooltip = "Upper cap on simultaneously tracked blocks per side. When exceeded, the oldest block is retired first. Lower = cleaner chart.")
+maxDistATR   = input.float(15.0, "Retire Block Beyond (xATR)", minval = 3.0, maxval = 50.0, step = 0.5, group = grpDet,
+     tooltip = "Blocks are automatically retired when price moves this many ATRs away from them. Keeps the chart focused on relevant levels only. Lower = more aggressive cleanup.")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — Quality Scoring
+// ─────────────────────────────────────────────────────────────────────────────
+grpQ = "Quality Scoring"
+reactionBars = input.int(5,    "Reaction Window (bars)",    minval = 2,  maxval = 20, group = grpQ,
+     tooltip = "Number of bars measured after a mitigation event to evaluate the reaction magnitude and grade it A / B / C.")
+atrLen       = input.int(14,   "ATR Length",                minval = 5,  maxval = 50, group = grpQ,
+     tooltip = "ATR length used to normalize reaction strength across different volatility regimes.")
+gradeAThresh = input.float(1.5, "Grade A Threshold (xATR)", minval = 0.5, step = 0.1, group = grpQ,
+     tooltip = "Minimum ATR-normalized reaction required for a Grade A (premium) mitigation. Higher = more selective.")
+gradeBThresh = input.float(0.8, "Grade B Threshold (xATR)", minval = 0.2, step = 0.1, group = grpQ,
+     tooltip = "Minimum ATR-normalized reaction required for a Grade B (solid) mitigation. Reactions below this fall to Grade C.")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — Invalidation
+// ─────────────────────────────────────────────────────────────────────────────
+grpInv = "Invalidation"
+invalidateMode  = input.string("Body Close", "Invalidation Mode", options = ["Body Close", "Wick Break"], group = grpInv,
+     tooltip = "Body Close: the block is invalidated only when a candle body closes beyond it (stricter). Wick Break: any wick beyond the block invalidates (more reactive).")
+showInvalidated = input.bool(false, "Show Invalidated Blocks (dotted)", group = grpInv,
+     tooltip = "Keeps invalidated blocks visible as dotted grey references instead of removing them, so you can see where structure was broken.")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — Visual
+// ─────────────────────────────────────────────────────────────────────────────
+grpVis = "Visual"
+showBullBlocks = input.bool(true, "Show Bullish Blocks", group = grpVis)
+showBearBlocks = input.bool(true, "Show Bearish Blocks", group = grpVis)
+extendBlocks   = input.bool(true, "Extend Blocks to Right", group = grpVis,
+     tooltip = "Keeps the box extending right so the block remains visible as a live reference until mitigated or invalidated.")
+showDottedExt  = input.bool(true, "Dotted Mid-Level Extension", group = grpVis,
+     tooltip = "Draws a dotted horizontal line from the block mid-point as a far-reference level.")
+dottedActiveOnly = input.bool(true, "Dotted Lines on Active Blocks Only", group = grpVis,
+     tooltip = "When ON, the dotted mid-level line is drawn only for active (un-mitigated) blocks. Mitigated blocks keep only the box, which dramatically reduces visual clutter.")
+showLabels     = input.bool(true, "Show Mitigation Labels", group = grpVis,
+     tooltip = "Displays the A/B/C label with age and hit count when mitigation occurs.")
+maxLabels      = input.int(8, "Max Visible Labels", minval = 2, maxval = 20, group = grpVis,
+     tooltip = "Caps the number of on-chart mitigation labels to the most recent N. Keeps the chart premium and uncluttered.")
+onlyALabels    = input.bool(false, "Show Only Grade A Labels", group = grpVis,
+     tooltip = "When ON, only Grade A (premium) mitigation labels are drawn. Grades B and C are suppressed for a cleaner chart.")
+boxAlpha       = input.int(85, "Box Transparency",  minval = 50, maxval = 95, group = grpVis,
+     tooltip = "Transparency of the block fill. Higher = more pastel / less distracting.")
+lineWidthDom   = input.int(3, "Mitigated Border Width", minval = 1, maxval = 5, group = grpVis,
+     tooltip = "Border width for mitigated (graded) blocks — these are the most important blocks on the chart.")
+lineWidthAct   = input.int(2, "Active Border Width",    minval = 1, maxval = 5, group = grpVis,
+     tooltip = "Border width for active un-tested blocks.")
+lineWidthPass  = input.int(1, "Invalidated Border Width", minval = 1, maxval = 5, group = grpVis,
+     tooltip = "Border width for invalidated blocks (dotted style).")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — Premium Visuals (WOW features)
+// ─────────────────────────────────────────────────────────────────────────────
+grpWow = "Premium Visuals"
+showReactionTrail = input.bool(true, "Show Reaction Trail (Grade A)", group = grpWow,
+     tooltip = "Draws a gradient line from the mitigation point to the peak of the reaction — visualizes the bounce strength that earned a Grade A. Makes premium mitigations unmistakable at a glance.")
+showEntryMarker   = input.bool(true, "Show Entry Marker (Grade A)", group = grpWow,
+     tooltip = "Places a diamond marker at the bar where a Grade A mitigation occurred. Signals the exact touch point of a high-quality bounce.")
+showConfluence    = input.bool(true, "Show Confluence Glow", group = grpWow,
+     tooltip = "When 2+ blocks overlap within 0.5 ATR, draws a subtle outer glow around the cluster — highlights high-confluence Points of Interest (POIs) loved by Smart Money traders.")
+showHeatmapBar    = input.bool(true, "Show Quality Heatmap in Panel", group = grpWow,
+     tooltip = "Adds a row in the panel showing the last 20 mitigations as a color heatmap (green=A, amber=B, grey=C). One glance tells you how quality is trending.")
+showSetupBanner   = input.bool(true, "Show Current Setup Banner", group = grpWow,
+     tooltip = "Adds a dynamic banner at the bottom of the panel describing the current price-block relationship (e.g. 'Inside Grade A Demand', 'Approaching Supply').")
+showPulse         = input.bool(true, "Pulse Active Hot Zones", group = grpWow,
+     tooltip = "Makes the border of a Grade A/B block gently pulse (alternating width per bar) when price is currently inside it. Draws the eye to the most urgent zone on the chart.")
+showTimeDecay     = input.bool(true, "Time-based Opacity Decay", group = grpWow,
+     tooltip = "Fades older blocks progressively (higher transparency as they age) so fresh levels command attention and stale ones recede visually.")
+showPriceLabels   = input.bool(true, "Price Scale Labels", group = grpWow,
+     tooltip = "Adds a small label on the right price scale for each active block, tagging its grade and side. Makes key levels visible even when scrolled away from the block origin.")
+showHtfConfluence = input.bool(true, "Higher Timeframe Alignment", group = grpWow,
+     tooltip = "Compares the nearest mitigation block on the current timeframe against the same on a higher timeframe. When both agree on side (bullish/bearish), a high-emphasis alignment banner appears. Signals true multi-timeframe confluence.")
+htfTimeframe      = input.timeframe("240", "HTF for Alignment", group = grpWow,
+     tooltip = "The higher timeframe used to compute multi-timeframe alignment. Common choices: 240 (4H) on a 1H chart, D on a 4H chart, W on a 1D chart.")
+showStreak        = input.bool(true, "Show Win/Loss Streak", group = grpWow,
+     tooltip = "Adds a panel row showing the current consecutive streak of grade outcomes — e.g. '3 Wins (A,B,A)' when the last three mitigations were A or B, or '4 Losses (C,C,C,C)' when they were weak.")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — Panel
+// ─────────────────────────────────────────────────────────────────────────────
+grpPanel = "Panel"
+showPanel     = input.bool(true, "Show Dashboard Panel", group = grpPanel)
+panelLocation = input.string("Top Right", "Panel Location",
+     options = ["Top Right", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Left"], group = grpPanel,
+     tooltip = "Where the dashboard panel is anchored on the chart.")
+panelTheme    = input.string("Dark", "Panel Theme", options = ["Dark", "Light"], group = grpPanel,
+     tooltip = "Dark: slate background for dark charts. Light: soft white background for light charts.")
+panelTextSize = input.string("Normal", "Panel Font Size",
+     options = ["Tiny", "Small", "Normal", "Large"], group = grpPanel,
+     tooltip = "Font size used throughout the dashboard panel.")
+labelTextSize = input.string("Normal", "Label Font Size",
+     options = ["Tiny", "Small", "Normal", "Large"], group = grpPanel,
+     tooltip = "Font size used for on-chart mitigation labels (A / B / C).")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS — Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+grpAlert = "Alerts"
+alertOnA    = input.bool(true,  "Alert on Grade A Mitigation",  group = grpAlert)
+alertOnB    = input.bool(false, "Alert on Grade B Mitigation",  group = grpAlert)
+alertOnInv  = input.bool(true,  "Alert on Block Invalidation",  group = grpAlert)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+f_toSize(string p) =>
+    switch p
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        =>          size.normal
+
+f_panelPos(string p) =>
+    switch p
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Middle Right" => position.middle_right
+        "Middle Left"  => position.middle_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        =>                position.top_right
+
+// Theme-dependent panel colors (evaluate once per bar)
+themeDark = panelTheme == "Dark"
+pBg       = themeDark ? panelBg        : color.rgb(248, 250, 252)
+pBorder   = themeDark ? panelBorder    : color.rgb(203, 213, 225)
+pLabel    = themeDark ? panelLabelCol  : color.rgb(71,  85,  105)
+pValue    = themeDark ? panelValueCol  : color.rgb(15,  23,  42)
+
+pTextSize = f_toSize(panelTextSize)
+lTextSize = f_toSize(labelTextSize)
+
+// ATR
+atrVal    = ta.atr(atrLen)
+atrSafe   = na(atrVal) or atrVal == 0 ? syminfo.mintick : atrVal
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Higher Timeframe Bias — gauges whether HTF structure is bullish or bearish
+// by comparing price to a longer-period moving average on the HTF. Returns
+// +1 (bullish HTF), -1 (bearish HTF), or 0 (neutral / insufficient data).
+// The comparison uses a 50-period SMA relative to the most recent HTF close,
+// offering a robust, lag-controlled structural read.
+// ─────────────────────────────────────────────────────────────────────────────
+[htfClose, htfMa] = request.security(syminfo.tickerid, htfTimeframe,
+     [close, ta.sma(close, 50)], lookahead = barmerge.lookahead_off)
+
+int htfBias = 0
+if not na(htfClose) and not na(htfMa)
+    if htfClose > htfMa
+        htfBias := 1
+    else if htfClose < htfMa
+        htfBias := -1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// User-Defined Type
+// ─────────────────────────────────────────────────────────────────────────────
+type OB
+    float  top
+    float  bot
+    int    startBar
+    bool   isBull
+    bool   mitigated
+    bool   invalidated
+    bool   graded          = false
+    int    hitCount
+    int    mitigationBar
+    float  reactionPeak    = na
+    string grade           = ""
+    box    bx              = na
+    line   ln              = na
+    label  lb              = na
+    line   trail           = na
+    label  entryMark       = na
+    box    glow            = na
+    label  priceLabel      = na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State Arrays
+// ─────────────────────────────────────────────────────────────────────────────
+var array<OB>  bullBlocks    = array.new<OB>()
+var array<OB>  bearBlocks    = array.new<OB>()
+var array<int> last20Grades  = array.new<int>()    // 3=A, 2=B, 1=C
+
+var int totalA       = 0
+var int totalB       = 0
+var int totalC       = 0
+
+// Per-bar alert triggers (reset every bar)
+var int gradeAEvent = 0
+var int gradeBEvent = 0
+var int invEvent    = 0
+gradeAEvent := 0
+gradeBEvent := 0
+invEvent    := 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Block Detection
+// Bullish OB: the last bearish candle immediately preceding a confirmed
+// pivot low forms a demand block (top = high, bottom = low of that candle).
+// Bearish OB: mirror logic — the last bullish candle preceding a pivot high.
+// Pivots confirm `swingLen` bars after the pivot bar, so we scan backward
+// from the pivot to find the source candle.
+// ─────────────────────────────────────────────────────────────────────────────
+pivotHigh = ta.pivothigh(high, swingLen, swingLen)
+pivotLow  = ta.pivotlow (low,  swingLen, swingLen)
+
+if not na(pivotLow) and showBullBlocks
+    int srcBar = na
+    for i = 0 to swingLen * 2
+        idx = swingLen + i
+        if close[idx] < open[idx]
+            srcBar := idx
+            break
+    if not na(srcBar)
+        array.push(bullBlocks, OB.new(
+             top           = high[srcBar],
+             bot           = low[srcBar],
+             startBar      = bar_index - srcBar,
+             isBull        = true,
+             mitigated     = false,
+             invalidated   = false,
+             hitCount      = 0,
+             mitigationBar = 0))
+
+if not na(pivotHigh) and showBearBlocks
+    int srcBar = na
+    for i = 0 to swingLen * 2
+        idx = swingLen + i
+        if close[idx] > open[idx]
+            srcBar := idx
+            break
+    if not na(srcBar)
+        array.push(bearBlocks, OB.new(
+             top           = high[srcBar],
+             bot           = low[srcBar],
+             startBar      = bar_index - srcBar,
+             isBull        = false,
+             mitigated     = false,
+             invalidated   = false,
+             hitCount      = 0,
+             mitigationBar = 0))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cleanup helper — deletes every drawing object tied to an OB
+// ─────────────────────────────────────────────────────────────────────────────
+f_cleanupOB(OB ob) =>
+    if not na(ob.bx)
+        box.delete(ob.bx)
+    if not na(ob.ln)
+        line.delete(ob.ln)
+    if not na(ob.lb)
+        label.delete(ob.lb)
+    if not na(ob.trail)
+        line.delete(ob.trail)
+    if not na(ob.entryMark)
+        label.delete(ob.entryMark)
+    if not na(ob.glow)
+        box.delete(ob.glow)
+    if not na(ob.priceLabel)
+        label.delete(ob.priceLabel)
+    int _ = 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cap active blocks per side (retire oldest first)
+// ─────────────────────────────────────────────────────────────────────────────
+while array.size(bullBlocks) > maxActive
+    OB old = array.shift(bullBlocks)
+    f_cleanupOB(old)
+
+while array.size(bearBlocks) > maxActive
+    OB old = array.shift(bearBlocks)
+    f_cleanupOB(old)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Process each active block: mitigation touch + invalidation + aging.
+// Logic is inlined here (rather than in a helper returning a tuple) because
+// tuple destructuring inside a while loop creates redeclared locals.
+// ─────────────────────────────────────────────────────────────────────────────
+int newInvsTotal = 0
+
+// Bullish blocks
+int iB = 0
+while iB < array.size(bullBlocks)
+    OB ob = array.get(bullBlocks, iB)
+    age = bar_index - ob.startBar
+    bool removeBlock = false
+    // Age-based retire
+    if age > obLookback
+        removeBlock := true
+    // Distance-based retire (price has moved far away)
+    else
+        distAtr = math.min(math.abs(close - ob.top), math.abs(close - ob.bot)) / atrSafe
+        if distAtr > maxDistATR
+            removeBlock := true
+        else
+            invBody = invalidateMode == "Body Close" ? close < ob.bot : low < ob.bot
+            if not ob.invalidated and invBody
+                ob.invalidated := true
+                newInvsTotal  += 1
+            touched = not ob.invalidated and low <= ob.top and high >= ob.bot
+            if touched
+                ob.hitCount += 1
+                if not ob.mitigated
+                    ob.mitigated     := true
+                    ob.mitigationBar := bar_index
+    if removeBlock
+        f_cleanupOB(ob)
+        array.remove(bullBlocks, iB)
+    else
+        iB += 1
+
+// Bearish blocks
+int iBr = 0
+while iBr < array.size(bearBlocks)
+    OB ob = array.get(bearBlocks, iBr)
+    age = bar_index - ob.startBar
+    bool removeBlock = false
+    if age > obLookback
+        removeBlock := true
+    else
+        distAtr = math.min(math.abs(close - ob.top), math.abs(close - ob.bot)) / atrSafe
+        if distAtr > maxDistATR
+            removeBlock := true
+        else
+            invBody = invalidateMode == "Body Close" ? close > ob.top : high > ob.top
+            if not ob.invalidated and invBody
+                ob.invalidated := true
+                newInvsTotal  += 1
+            touched = not ob.invalidated and high >= ob.bot and low <= ob.top
+            if touched
+                ob.hitCount += 1
+                if not ob.mitigated
+                    ob.mitigated     := true
+                    ob.mitigationBar := bar_index
+    if removeBlock
+        f_cleanupOB(ob)
+        array.remove(bearBlocks, iBr)
+    else
+        iBr += 1
+
+if newInvsTotal > 0
+    invEvent := 1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grading: evaluate reaction N bars after mitigationBar.
+// bar_index is mitigationBar + reactionBars when the trigger fires, so the
+// reaction window is offsets 1..reactionBars (most recent N bars).
+// Logic is INLINED in the main scope because UDT field mutation via a helper
+// function was not persisting reliably (graded flag kept resetting).
+// ─────────────────────────────────────────────────────────────────────────────
+for ob in bullBlocks
+    if ob.mitigated and not ob.graded and (bar_index - ob.mitigationBar) >= reactionBars
+        float mx = ob.top
+        for k = 1 to reactionBars
+            h = high[k]
+            if h > mx
+                mx := h
+        react = (mx - ob.top) / atrSafe
+        g = react >= gradeAThresh ? "A" : react >= gradeBThresh ? "B" : "C"
+        ob.grade        := g
+        ob.graded       := true
+        ob.reactionPeak := mx
+        if g == "A"
+            totalA += 1
+            gradeAEvent := 1
+            array.push(last20Grades, 3)
+        else if g == "B"
+            totalB += 1
+            gradeBEvent := 1
+            array.push(last20Grades, 2)
+        else
+            totalC += 1
+            array.push(last20Grades, 1)
+        if array.size(last20Grades) > 20
+            array.shift(last20Grades)
+
+for ob in bearBlocks
+    if ob.mitigated and not ob.graded and (bar_index - ob.mitigationBar) >= reactionBars
+        float mn = ob.bot
+        for k = 1 to reactionBars
+            l = low[k]
+            if l < mn
+                mn := l
+        react = (ob.bot - mn) / atrSafe
+        g = react >= gradeAThresh ? "A" : react >= gradeBThresh ? "B" : "C"
+        ob.grade        := g
+        ob.graded       := true
+        ob.reactionPeak := mn
+        if g == "A"
+            totalA += 1
+            gradeAEvent := 1
+            array.push(last20Grades, 3)
+        else if g == "B"
+            totalB += 1
+            gradeBEvent := 1
+            array.push(last20Grades, 2)
+        else
+            totalC += 1
+            array.push(last20Grades, 1)
+        if array.size(last20Grades) > 20
+            array.shift(last20Grades)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering
+// ─────────────────────────────────────────────────────────────────────────────
+f_stateColor(OB ob) =>
+    ob.invalidated ? greyFar : ob.isBull ? bullColor : bearColor
+
+f_gradeText(string g, int age, int hits) =>
+    base = " (" + str.tostring(age) + "b | " + str.tostring(hits) + "x)"
+    g == "" ? "Active" + base : "Mit " + g + base
+
+f_render(OB ob, bool allowLabel) =>
+    rCol   = f_stateColor(ob)
+
+    // Time-based decay: older blocks fade progressively. Scale up transparency
+    // linearly from the user-chosen boxAlpha baseline up toward ~95 as age
+    // approaches obLookback. Invalidated blocks are not decayed further.
+    age        = bar_index - ob.startBar
+    decayBonus = 0
+    if showTimeDecay and not ob.invalidated
+        ratio      = math.min(1.0, math.max(0.0, age / math.max(1.0, obLookback * 1.0)))
+        maxDecay   = 12
+        decayBonus := int(math.round(ratio * maxDecay))
+    effAlpha  = math.min(95, boxAlpha + decayBonus)
+    fill      = color.new(rCol, effAlpha)
+
+    // Pulse: when price is currently inside a Grade A or B block, alternate
+    // the border width between two values on successive bars to create a
+    // breathing effect that draws the eye to the most urgent zone.
+    insideNow = close >= ob.bot and close <= ob.top
+    pulseActive = showPulse and ob.graded and (ob.grade == "A" or ob.grade == "B") and insideNow and not ob.invalidated
+    baseLw = ob.mitigated ? lineWidthDom : ob.invalidated ? lineWidthPass : lineWidthAct
+    pulseLw = bar_index % 2 == 0 ? baseLw + 1 : baseLw
+    lw     = pulseActive ? pulseLw : baseLw
+
+    endBar = extendBlocks ? bar_index + 10 : ob.startBar + 40
+    ls     = ob.invalidated ? line.style_dotted : line.style_solid
+
+    // Hide if invalidated and user doesn't want them shown
+    if ob.invalidated and not showInvalidated
+        if not na(ob.bx)
+            box.delete(ob.bx)
+            ob.bx := na
+        if not na(ob.ln)
+            line.delete(ob.ln)
+            ob.ln := na
+        if not na(ob.lb)
+            label.delete(ob.lb)
+            ob.lb := na
+        if not na(ob.priceLabel)
+            label.delete(ob.priceLabel)
+            ob.priceLabel := na
+        int _ = 0
+    else
+        // Box
+        if na(ob.bx)
+            ob.bx := box.new(ob.startBar, ob.top, endBar, ob.bot,
+                 border_color = rCol, bgcolor = fill,
+                 border_width = lw, border_style = ls)
+            int _ = 0
+        else
+            box.set_right(ob.bx, endBar)
+            box.set_bgcolor(ob.bx, fill)
+            box.set_border_color(ob.bx, rCol)
+            box.set_border_width(ob.bx, lw)
+            box.set_border_style(ob.bx, ls)
+            int _ = 0
+
+        // Dotted mid-level extension — active blocks only if requested
+        drawDotted = showDottedExt and (not dottedActiveOnly or not ob.mitigated)
+        if drawDotted
+            mid = (ob.top + ob.bot) / 2
+            lnCol = color.new(rCol, 40)
+            if na(ob.ln)
+                ob.ln := line.new(ob.startBar, mid, bar_index + 20, mid,
+                     color = lnCol, style = line.style_dotted, width = 1)
+                int _ = 0
+            else
+                line.set_xy1(ob.ln, ob.startBar, mid)
+                line.set_xy2(ob.ln, bar_index + 20, mid)
+                line.set_color(ob.ln, lnCol)
+                int _ = 0
+        else if not na(ob.ln)
+            line.delete(ob.ln)
+            ob.ln := na
+            int _ = 0
+
+        // Label on mitigation — respect Grade-A-only filter and cap
+        showThisLabel = showLabels and ob.mitigated and allowLabel and (not onlyALabels or ob.grade == "A")
+        if showThisLabel
+            txt    = f_gradeText(ob.grade, age, ob.hitCount)
+            // Full info on hover for premium UX
+            ttype  = ob.isBull ? "Bullish" : "Bearish"
+            tip    = ttype + " mitigation block" +
+                     "\nGrade: " + (ob.grade == "" ? "Pending" : ob.grade) +
+                     "\nAge: " + str.tostring(age) + " bars" +
+                     "\nHits: " + str.tostring(ob.hitCount) + "x"
+            // Anchor label on the RIGHT side of the chart (future area), with
+            // the arrow pointing LEFT back to the block. Placing labels at the
+            // forward edge keeps them out of the candle body and naturally
+            // separates them by block price (no horizontal collision).
+            ypos   = ob.isBull ? ob.top : ob.bot
+            lstyle = label.style_label_left
+            lxpos  = bar_index + 12
+            if na(ob.lb)
+                ob.lb := label.new(lxpos, ypos, txt,
+                     style     = lstyle,
+                     color     = rCol,
+                     textcolor = whiteLabel,
+                     size      = lTextSize,
+                     tooltip   = tip)
+                int _ = 0
+            else
+                label.set_xy(ob.lb, lxpos, ypos)
+                label.set_text(ob.lb, txt)
+                label.set_color(ob.lb, rCol)
+                label.set_style(ob.lb, lstyle)
+                label.set_tooltip(ob.lb, tip)
+                int _ = 0
+        else if not na(ob.lb)
+            label.delete(ob.lb)
+            ob.lb := na
+            int _ = 0
+
+// Price Scale Label — sticky label anchored at the rightmost visible area,
+// using label.style_none so only text shows, yloc.price so it stays anchored
+// to the block mid-price regardless of chart scroll. Rendered only for
+// active (non-invalidated) blocks that are NOT part of a confluence cluster
+// (the glow already signals those zones; duplicate text is noise).
+f_renderPriceLabel(OB ob) =>
+    // Compact form: "A Dem" / "B Sup" / "Act Dem" / "Act Sup"
+    // Skip if this block's glow is drawn (it's part of a confluence cluster)
+    inCluster  = not na(ob.glow)
+    shouldDraw = showPriceLabels and not ob.invalidated and not inCluster
+    if shouldDraw
+        midPrice = (ob.top + ob.bot) / 2
+        side     = ob.isBull ? "Dem" : "Sup"
+        gtxt     = ob.grade == "" ? "Act" : ob.grade
+        txt      = gtxt + " " + side
+        tCol     = f_stateColor(ob)
+        xAnchor  = bar_index + 40
+        if na(ob.priceLabel)
+            ob.priceLabel := label.new(xAnchor, midPrice, txt,
+                 style     = label.style_none,
+                 textcolor = tCol,
+                 size      = size.small)
+            int _ = 0
+        else
+            label.set_xy(ob.priceLabel, xAnchor, midPrice)
+            label.set_text(ob.priceLabel, txt)
+            label.set_textcolor(ob.priceLabel, tCol)
+            int _ = 0
+    else if not na(ob.priceLabel)
+        label.delete(ob.priceLabel)
+        ob.priceLabel := na
+        int _ = 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WOW features — Reaction Trail, Entry Marker, Confluence Glow
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Reaction Trail — gradient line from mitigation bar/price to reaction peak.
+// Only for Grade A mitigations (the most premium signals on the chart).
+f_renderTrail(OB ob) =>
+    shouldDraw = showReactionTrail and ob.graded and ob.grade == "A" and not ob.invalidated and not na(ob.reactionPeak)
+    if shouldDraw
+        startPrice = ob.isBull ? ob.top : ob.bot
+        endBar     = ob.mitigationBar + reactionBars
+        trailCol   = ob.isBull ? bullColor : bearColor
+        if na(ob.trail)
+            ob.trail := line.new(ob.mitigationBar, startPrice, endBar, ob.reactionPeak,
+                 color = color.new(trailCol, 20),
+                 style = line.style_solid,
+                 width = 3)
+            int _ = 0
+        else
+            line.set_xy1(ob.trail, ob.mitigationBar, startPrice)
+            line.set_xy2(ob.trail, endBar, ob.reactionPeak)
+            line.set_color(ob.trail, color.new(trailCol, 20))
+            int _ = 0
+    else if not na(ob.trail)
+        line.delete(ob.trail)
+        ob.trail := na
+        int _ = 0
+
+// Entry Marker — diamond at the mitigation bar, mid-price, for Grade A only.
+// Signals the exact touch point of a premium-quality bounce.
+f_renderEntryMark(OB ob) =>
+    shouldDraw = showEntryMarker and ob.graded and ob.grade == "A" and not ob.invalidated
+    if shouldDraw
+        midPrice = (ob.top + ob.bot) / 2
+        markCol  = ob.isBull ? bullColor : bearColor
+        if na(ob.entryMark)
+            ob.entryMark := label.new(ob.mitigationBar, midPrice, "",
+                 style     = label.style_diamond,
+                 color     = markCol,
+                 textcolor = whiteLabel,
+                 size      = size.tiny,
+                 tooltip   = "Grade A entry — premium bounce")
+            int _ = 0
+        else
+            label.set_xy(ob.entryMark, ob.mitigationBar, midPrice)
+            label.set_color(ob.entryMark, markCol)
+            int _ = 0
+    else if not na(ob.entryMark)
+        label.delete(ob.entryMark)
+        ob.entryMark := na
+        int _ = 0
+
+// Confluence Glow — halo box around clusters of 2+ blocks within 0.5 ATR.
+// Detects when multiple blocks agree on a price zone (high-conviction POI).
+f_renderConfluence() =>
+    if not showConfluence
+        int _ = 0
+    else
+        // For each non-invalidated block, count how many other blocks share
+        // its mid-price within 0.5 ATR. If count >= 2, draw a glow box.
+        thresholdAtr = 0.5
+        // First pass: delete stale glows
+        for ob in bullBlocks
+            if not na(ob.glow)
+                box.delete(ob.glow)
+                ob.glow := na
+        for ob in bearBlocks
+            if not na(ob.glow)
+                box.delete(ob.glow)
+                ob.glow := na
+        // Second pass: detect and draw
+        for ob in bullBlocks
+            if not ob.invalidated
+                mid  = (ob.top + ob.bot) / 2
+                int cnt = 0
+                float lo = ob.bot
+                float hi = ob.top
+                for other in bullBlocks
+                    if not other.invalidated
+                        oMid = (other.top + other.bot) / 2
+                        if math.abs(mid - oMid) <= thresholdAtr * atrSafe
+                            cnt += 1
+                            lo := math.min(lo, other.bot)
+                            hi := math.max(hi, other.top)
+                for other in bearBlocks
+                    if not other.invalidated
+                        oMid = (other.top + other.bot) / 2
+                        if math.abs(mid - oMid) <= thresholdAtr * atrSafe
+                            cnt += 1
+                            lo := math.min(lo, other.bot)
+                            hi := math.max(hi, other.top)
+                if cnt >= 2
+                    padAtr = 0.25 * atrSafe
+                    gCol   = accentColor
+                    ob.glow := box.new(ob.startBar - 2, hi + padAtr,
+                                       bar_index + 14, lo - padAtr,
+                                       border_color = color.new(gCol, 60),
+                                       bgcolor      = color.new(gCol, 92),
+                                       border_width = 1,
+                                       border_style = line.style_dotted)
+                    int _ = 0
+        int _ = 0
+f_labelThreshold() =>
+    array<int> mBars = array.new<int>()
+    for ob in bullBlocks
+        if ob.mitigated and (not onlyALabels or ob.grade == "A")
+            array.push(mBars, ob.mitigationBar)
+    for ob in bearBlocks
+        if ob.mitigated and (not onlyALabels or ob.grade == "A")
+            array.push(mBars, ob.mitigationBar)
+    int thresh = 0
+    if array.size(mBars) > maxLabels
+        array.sort(mBars, order.descending)
+        thresh := array.get(mBars, maxLabels - 1)
+    thresh
+
+// Label Y-collision avoidance helper — nudges labels apart when they share
+// the same X column and sit too close in price. Used for both mitigation
+// labels (bar_index + 12) and price scale labels (bar_index + 40).
+f_nudgeCollisions(array<label> lbs) =>
+    n = array.size(lbs)
+    if n > 1
+        minSepAtr = 0.35
+        nudgeAtr  = 0.4
+        array<float> ys = array.new<float>()
+        for lb in lbs
+            array.push(ys, label.get_y(lb))
+        for i = 0 to n - 1
+            yi = array.get(ys, i)
+            for j = 0 to n - 1
+                if j != i
+                    yj = array.get(ys, j)
+                    sep = math.abs(yi - yj) / atrSafe
+                    if sep < minSepAtr
+                        direction = yi >= yj ? 1.0 : -1.0
+                        yi := yi + direction * nudgeAtr * atrSafe
+                        array.set(ys, i, yi)
+                        label.set_y(array.get(lbs, i), yi)
+    int _ = 0
+
+if barstate.islast
+    int lblThresh = f_labelThreshold()
+    for ob in bullBlocks
+        allow = ob.mitigationBar >= lblThresh
+        f_render(ob, allow)
+        f_renderTrail(ob)
+        f_renderEntryMark(ob)
+    for ob in bearBlocks
+        allow = ob.mitigationBar >= lblThresh
+        f_render(ob, allow)
+        f_renderTrail(ob)
+        f_renderEntryMark(ob)
+    // Confluence glow runs BEFORE priceLabel so priceLabel can skip clustered blocks
+    f_renderConfluence()
+    // Price scale labels — only for blocks NOT in a confluence cluster
+    for ob in bullBlocks
+        f_renderPriceLabel(ob)
+    for ob in bearBlocks
+        f_renderPriceLabel(ob)
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Label Y-collision avoidance: includes BOTH mitigation labels (right edge)
+    // AND price scale labels (far right). Labels sharing the same X column get
+    // sorted by price and nudged apart so their text doesn't overlap.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Collect mitigation labels (bar_index + 12) and run anti-collision
+    array<label> mitLabels = array.new<label>()
+    for ob in bullBlocks
+        if not na(ob.lb)
+            array.push(mitLabels, ob.lb)
+    for ob in bearBlocks
+        if not na(ob.lb)
+            array.push(mitLabels, ob.lb)
+    f_nudgeCollisions(mitLabels)
+
+    // Collect price scale labels (bar_index + 40) and run anti-collision
+    array<label> priceLabels = array.new<label>()
+    for ob in bullBlocks
+        if not na(ob.priceLabel)
+            array.push(priceLabels, ob.priceLabel)
+    for ob in bearBlocks
+        if not na(ob.priceLabel)
+            array.push(priceLabels, ob.priceLabel)
+    f_nudgeCollisions(priceLabels)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel Stats
+// ─────────────────────────────────────────────────────────────────────────────
+f_computeStats() =>
+    int    active        = 0
+    int    tested        = 0
+    int    success       = 0
+    float  nearestDist   = na
+    float  nearestHealth = na
+    bool   nearestInside = false
+    bool   nearestIsBull = false
+    string nearestGrade  = ""
+    float  px            = close
+
+    for ob in bullBlocks
+        if not ob.invalidated
+            active += 1
+            if ob.mitigated
+                tested += 1
+                if ob.grade == "A" or ob.grade == "B"
+                    success += 1
+            inside = px >= ob.bot and px <= ob.top
+            d = inside ? 0.0 : math.min(math.abs(px - ob.top), math.abs(px - ob.bot))
+            if na(nearestDist) or d < nearestDist
+                nearestDist   := d
+                nearestInside := inside
+                nearestIsBull := true
+                nearestGrade  := ob.grade
+                age           = bar_index - ob.startBar
+                agePct        = math.min(100.0, 100.0 * age / obLookback)
+                overhit       = ob.hitCount > 2 ? 20.0 : ob.hitCount > 1 ? 10.0 : 0.0
+                nearestHealth := math.max(0.0, 100.0 - agePct - overhit)
+
+    for ob in bearBlocks
+        if not ob.invalidated
+            active += 1
+            if ob.mitigated
+                tested += 1
+                if ob.grade == "A" or ob.grade == "B"
+                    success += 1
+            inside = px >= ob.bot and px <= ob.top
+            d = inside ? 0.0 : math.min(math.abs(px - ob.top), math.abs(px - ob.bot))
+            if na(nearestDist) or d < nearestDist
+                nearestDist   := d
+                nearestInside := inside
+                nearestIsBull := false
+                nearestGrade  := ob.grade
+                age           = bar_index - ob.startBar
+                agePct        = math.min(100.0, 100.0 * age / obLookback)
+                overhit       = ob.hitCount > 2 ? 20.0 : ob.hitCount > 1 ? 10.0 : 0.0
+                nearestHealth := math.max(0.0, 100.0 - agePct - overhit)
+
+    [active, tested, success, nearestDist, nearestHealth, nearestInside, nearestIsBull, nearestGrade]
+
+f_last20SuccessRate() =>
+    int n = array.size(last20Grades)
+    float result = na
+    if n > 0
+        int good = 0
+        for v in last20Grades
+            if v >= 2
+                good += 1
+        result := 100.0 * good / n
+    result
+
+// Win/Loss streak — scan last20Grades from the newest backward and count the
+// consecutive run of the same outcome class ("Win" = A|B, "Loss" = C).
+// Returns [runLength, isWin, sequence string e.g. "A,B,A"]
+f_streak() =>
+    int   n = array.size(last20Grades)
+    int   runLen = 0
+    bool  isWin  = true
+    string seq   = ""
+    if n > 0
+        // Determine class of the newest
+        latest = array.get(last20Grades, n - 1)
+        firstIsWin = latest >= 2
+        isWin := firstIsWin
+        // Count the consecutive run matching this class, newest-first
+        for k = n - 1 to 0
+            v      = array.get(last20Grades, k)
+            thisIsWin = v >= 2
+            if thisIsWin == firstIsWin
+                runLen += 1
+                letter = v == 3 ? "A" : v == 2 ? "B" : "C"
+                seq := seq == "" ? letter : letter + "," + seq
+            else
+                break
+    [runLen, isWin, seq]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel helpers — ASCII-safe visual bars
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Stacked success bar for all-time: "=== A  ==  B  - C"
+// Uses fixed 10-unit width, distributes A/B/C by proportion.
+f_stackedBar(int a, int b, int c) =>
+    int total = a + b + c
+    string result = ""
+    if total > 0
+        aw = math.round(10.0 * a / total)
+        bw = math.round(10.0 * b / total)
+        cw = math.max(0, 10 - aw - bw)
+        result := str.repeat("=", aw) + str.repeat("-", bw) + str.repeat(".", cw)
+    else
+        result := ".........."
+    result
+
+// Progress bar for Block Health 0-100 ("======----" style)
+f_progressBar(float pct) =>
+    string result = ""
+    if na(pct)
+        result := ".........."
+    else
+        int filled = math.max(0, math.min(10, math.round(pct / 10.0)))
+        result := str.repeat("=", filled) + str.repeat("-", 10 - filled)
+    result
+
+// Last 20 breakdown — returns "A:6 B:7 C:7" style summary
+f_last20Breakdown() =>
+    int a = 0
+    int b = 0
+    int c = 0
+    for v in last20Grades
+        if v == 3
+            a += 1
+        else if v == 2
+            b += 1
+        else if v == 1
+            c += 1
+    int tot = a + b + c
+    tot == 0 ? "no data yet" : "A:" + str.tostring(a) + " B:" + str.tostring(b) + " C:" + str.tostring(c)
+
+// Last 20 breakdown color — semantic based on grade mix
+f_last20BreakdownColor() =>
+    int a = 0
+    int b = 0
+    int c = 0
+    for v in last20Grades
+        if v == 3
+            a += 1
+        else if v == 2
+            b += 1
+        else if v == 1
+            c += 1
+    int tot = a + b + c
+    color result = pLabel
+    if tot == 0
+        result := pLabel
+    else if a >= b + c           // Grade A dominant = best regime
+        result := bullColor
+    else if a + b >= c           // A+B combined majority = neutral-positive
+        result := neutralColor
+    else                         // Grade C heavy = weak regime
+        result := bearColor
+    result
+
+// Setup banner string — describes current price-block relationship
+f_setupBanner(bool inside, float dAtr, bool isBull, string grade) =>
+    if na(dAtr)
+        "No active blocks"
+    else
+        side  = isBull ? "Demand" : "Supply"
+        gtxt  = grade == "" ? "Active" : "Grade " + grade
+        if inside
+            "Inside " + gtxt + " " + side
+        else if dAtr < 0.2
+            "Touching " + gtxt + " " + side
+        else if dAtr < 1.0
+            "Approaching " + gtxt + " " + side
+        else
+            "Clear of " + gtxt + " " + side
+
+f_setupBannerColor(bool inside, float dAtr, bool isBull, string grade) =>
+    // Grade A = vivid, others muted. Inside/touching is hotter.
+    base = isBull ? bullColor : bearColor
+    if na(dAtr)
+        pLabel
+    else if inside or dAtr < 0.2
+        grade == "A" ? base : neutralColor
+    else if dAtr < 1.0
+        color.new(base, 30)
+    else
+        pLabel
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel Render
+// ─────────────────────────────────────────────────────────────────────────────
+var table panel = na
+
+if barstate.islast and showPanel
+    // Panel dimensions: 2 cols, 10 rows max
+    //   0 header (merged)
+    //   1 heatmap (merged, optional)
+    //   2 active / 3 tested / 4 success
+    //   5 nearest
+    //   6 all-time success (with stacked bar)
+    //   7 last 20 success
+    //   8 block health (with progress bar)
+    //   9 streak (Win/Loss run)
+    //  10 HTF alignment
+    //  11 setup banner (merged)
+    if na(panel)
+        panel := table.new(f_panelPos(panelLocation), 2, 12,
+             bgcolor      = pBg,
+             border_color = pBorder,
+             border_width = 1,
+             frame_color  = pBorder,
+             frame_width  = 1)
+
+    [active, tested, success, nearestDist, nearestHealth, nearestInside, nearestIsBull, nearestGrade] = f_computeStats()
+    float sr20 = f_last20SuccessRate()
+    int   totalMits = totalA + totalB + totalC
+    float srAll = totalMits == 0 ? na : 100.0 * (totalA + totalB) / totalMits
+    float distAtrN  = na(nearestDist) ? na : nearestDist / atrSafe
+    [streakRun, streakIsWin, streakSeq] = f_streak()
+
+    // Row 0 — merged blue header
+    table.cell(panel, 0, 0, "AG Pro Mitigation Block Quality",
+         text_color  = headerText,
+         bgcolor     = headerBg,
+         text_size   = pTextSize,
+         text_halign = text.align_center)
+    table.merge_cells(panel, 0, 0, 1, 0)
+
+    // Row 1 — last 20 grade breakdown (A:x B:y C:z), trend-colored
+    if showHeatmapBar
+        bdStr = f_last20Breakdown()
+        bdCol = f_last20BreakdownColor()
+        table.cell(panel, 0, 1, "Last 20: " + bdStr,
+             text_color  = bdCol,
+             bgcolor     = pBg,
+             text_size   = pTextSize,
+             text_halign = text.align_left,
+             tooltip     = "Grade breakdown of the last 20 mitigations. A = premium (strong bounce), B = solid, C = weak. Color reflects the regime: green when A dominates, amber when A+B hold the majority, pink when C is heavy.")
+        table.merge_cells(panel, 0, 1, 1, 1)
+    else
+        table.cell(panel, 0, 1, "", bgcolor = pBg, text_size = pTextSize)
+        table.cell(panel, 1, 1, "", bgcolor = pBg, text_size = pTextSize)
+
+    // Row 2 — active blocks
+    table.cell(panel, 0, 2, "Active Blocks",
+         text_color = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left)
+    table.cell(panel, 1, 2, str.tostring(active),
+         text_color = pValue, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+
+    // Row 3 — tested (current)
+    table.cell(panel, 0, 3, "Tested (current)",
+         text_color = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left)
+    table.cell(panel, 1, 3, str.tostring(tested),
+         text_color = pValue, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+
+    // Row 4 — success (current)
+    table.cell(panel, 0, 4, "Success (current)",
+         text_color = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left)
+    table.cell(panel, 1, 4, str.tostring(success),
+         text_color = bullColor, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+
+    // Row 5 — nearest block
+    distStr  = na(nearestDist) ? "—" :
+                 nearestInside ? "Inside" :
+                 distAtrN < 0.2 ? "Touching" :
+                 str.tostring(distAtrN, "#.##") + " ATR"
+    distCol  = nearestInside ? neutralColor : accentColor
+    table.cell(panel, 0, 5, "Nearest Block",
+         text_color = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left)
+    table.cell(panel, 1, 5, distStr,
+         text_color = distCol, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+
+    // Row 6 — all-time success with stacked bar
+    srAllStr = na(srAll) ? "—" : str.tostring(srAll, "#") + "%"
+    srAllCol = na(srAll) ? pValue : srAll >= 60 ? bullColor : srAll >= 40 ? neutralColor : bearColor
+    barStr   = f_stackedBar(totalA, totalB, totalC)
+    table.cell(panel, 0, 6, "Success " + barStr,
+         text_color  = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left,
+         tooltip     = "All-time success rate with visual distribution: '=' Grade A, '-' Grade B, '.' Grade C. Totals: A=" + str.tostring(totalA) + " B=" + str.tostring(totalB) + " C=" + str.tostring(totalC))
+    table.cell(panel, 1, 6, srAllStr,
+         text_color = srAllCol, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+
+    // Row 7 — last 20 success %
+    srStr = na(sr20) ? "—" : str.tostring(sr20, "#") + "%"
+    srCol = na(sr20) ? pValue : sr20 >= 60 ? bullColor : sr20 >= 40 ? neutralColor : bearColor
+    table.cell(panel, 0, 7, "Last 20 Success",
+         text_color = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left)
+    table.cell(panel, 1, 7, srStr,
+         text_color = srCol, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+
+    // Row 8 — block health with progress bar
+    healthStr = na(nearestHealth) ? "—" : str.tostring(nearestHealth, "#") + "/100"
+    healthCol = na(nearestHealth) ? pValue : nearestHealth >= 70 ? bullColor : nearestHealth >= 40 ? neutralColor : bearColor
+    progStr   = f_progressBar(nearestHealth)
+    table.cell(panel, 0, 8, "Health " + progStr,
+         text_color = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left,
+         tooltip    = "Health score of the nearest active block (0-100). Factors in age and hit count. Higher = more reliable.")
+    table.cell(panel, 1, 8, healthStr,
+         text_color = healthCol, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+
+    // Row 9 — current streak of grade outcomes (Wins or Losses)
+    if showStreak
+        stkLabel = streakRun == 0 ? "Streak" :
+                     (streakIsWin ? "Streak Wins (" : "Streak Losses (") + streakSeq + ")"
+        stkVal   = streakRun == 0 ? "—" : str.tostring(streakRun)
+        stkCol   = streakRun == 0 ? pValue :
+                     streakIsWin ? (streakRun >= 3 ? bullColor : neutralColor) :
+                                   (streakRun >= 3 ? bearColor : neutralColor)
+        table.cell(panel, 0, 9, stkLabel,
+             text_color = pLabel, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_left,
+             tooltip    = "Consecutive run of mitigation outcomes starting from the most recent. Wins = Grade A/B, Losses = Grade C. A long win streak indicates strong structure respect; a long loss streak indicates deteriorating setups.")
+        table.cell(panel, 1, 9, stkVal,
+             text_color = stkCol, bgcolor = pBg, text_size = pTextSize, text_halign = text.align_right)
+    else
+        table.cell(panel, 0, 9, "", bgcolor = pBg, text_size = pTextSize)
+        table.cell(panel, 1, 9, "", bgcolor = pBg, text_size = pTextSize)
+
+    // Row 10 — HTF alignment (merged)
+    if showHtfConfluence
+        // current TF nearest side: +1 bull, -1 bear, 0 none
+        int curSide = na(nearestDist) ? 0 : (nearestIsBull ? 1 : -1)
+        aligned  = curSide != 0 and htfBias != 0 and curSide == htfBias
+        string htfTxt = ""
+        color  htfCol = pLabel
+        color  htfBg  = pBg
+        if curSide == 0 or htfBias == 0
+            htfTxt := "HTF Align: —"
+            htfCol := pLabel
+        else if aligned
+            dir    = curSide == 1 ? "Bullish" : "Bearish"
+            htfTxt := "HTF Aligned: " + dir
+            htfCol := curSide == 1 ? bullColor : bearColor
+            htfBg  := color.new(htfCol, 82)
+        else
+            ctf = curSide == 1 ? "Bullish" : "Bearish"
+            htf = htfBias == 1 ? "Bullish" : "Bearish"
+            htfTxt := "HTF Conflict: " + ctf + " vs " + htf
+            htfCol := neutralColor
+        table.cell(panel, 0, 10, htfTxt,
+             text_color  = htfCol,
+             bgcolor     = htfBg,
+             text_size   = pTextSize,
+             text_halign = text.align_center,
+             tooltip     = "Compares the nearest block's side on the current chart with the structural bias of the higher timeframe (" + htfTimeframe + "). Aligned = high-conviction setup. Conflict = wait for clearer context.")
+        table.merge_cells(panel, 0, 10, 1, 10)
+    else
+        table.cell(panel, 0, 10, "", bgcolor = pBg, text_size = pTextSize)
+        table.cell(panel, 1, 10, "", bgcolor = pBg, text_size = pTextSize)
+
+    // Row 11 — current setup banner (merged)
+    if showSetupBanner
+        banTxt = f_setupBanner(nearestInside, distAtrN, nearestIsBull, nearestGrade)
+        banCol = f_setupBannerColor(nearestInside, distAtrN, nearestIsBull, nearestGrade)
+        banBg  = nearestInside or (not na(distAtrN) and distAtrN < 0.2) ?
+                     color.new(banCol, 85) : color.new(pBorder, 50)
+        table.cell(panel, 0, 11, "Setup: " + banTxt,
+             text_color  = banCol,
+             bgcolor     = banBg,
+             text_size   = pTextSize,
+             text_halign = text.align_center,
+             tooltip     = "Dynamic description of the current price-block relationship. Background highlights when price is inside or touching a block.")
+        table.merge_cells(panel, 0, 11, 1, 11)
+    else
+        table.cell(panel, 0, 11, "", bgcolor = pBg, text_size = pTextSize)
+        table.cell(panel, 1, 11, "", bgcolor = pBg, text_size = pTextSize)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(gradeAEvent == 1 and alertOnA,  "Grade A Mitigation",
+     "Premium (Grade A) mitigation detected on {{ticker}} {{interval}}")
+alertcondition(gradeBEvent == 1 and alertOnB,  "Grade B Mitigation",
+     "Solid (Grade B) mitigation detected on {{ticker}} {{interval}}")
+alertcondition(invEvent == 1 and alertOnInv,   "Block Invalidation",
+     "Order block invalidated on {{ticker}} {{interval}}")
+
+

@@ -1,0 +1,565 @@
+//@version=5
+
+
+strategy(
+  'AlgoX - Non-Repainting',
+  overlay                 = true,
+  explicit_plot_zorder    = true,
+  pyramiding              = 0,
+  default_qty_value       = 3,
+  calc_on_every_tick      = true,
+  process_orders_on_close = true,
+  max_bars_back           = 500,
+  initial_capital         = 10000,
+  commission_type         = strategy.commission.cash_per_contract,
+  commission_value        = 2,
+  use_bar_magnifier       = true
+  )
+
+//Truncate Function
+truncate(number, decimals) =>
+    factor = math.pow(10, decimals)
+    int(number * factor) / factor
+
+//
+// === INPUTS ===
+TPSType = input.string('ATR',   'What TPS should be taken : ', options = ['ATR', 'Trailing', 'Options'])
+setupType = input.string('Renko', title='What Trading Setup should be taken : ', options=['Open/Close', 'Renko'])
+scolor = input(true, title='Show coloured Bars to indicate Trend?')
+almaRibbon = input(false, title='Enable Ribbon?')
+
+// Constants colours that include fully non-transparent option.
+green100 = #008000FF
+lime100 = #00FF00FF
+red100 = #FF0000FF
+blue100 = #0000FFFF
+aqua100 = #00FFFFFF
+darkred100 = #8B0000FF
+gray100 = #808080FF
+
+// Create non-repainting security function
+rp_security(_symbol, _res, _src) =>
+    request.security(_symbol, _res, _src[1],barmerge.gaps_off,barmerge.lookahead_off)
+
+//
+f_tfInMinutes() =>
+    _tfInMinutes = timeframe.period == '1' ? '3' : timeframe.period == '3' ? '5' : timeframe.period == '5' ? '15' : timeframe.period == '15' ? '30' : timeframe.period == '30' ? '60' : timeframe.period == '60' ? '240' : 'D'
+    _tfInMinutes
+my_time1 = f_tfInMinutes()
+
+tfmult = input.int(18, "Input Timeframe Multiplier")
+
+f_resInMinutes() => 
+    _resInMinutes = timeframe.multiplier * (
+      timeframe.isseconds ? 1. / 60. :
+      timeframe.isminutes ? 1.       :
+      timeframe.isdaily   ? 1440.    :
+      timeframe.isweekly  ? 10080.   :
+      timeframe.ismonthly ? 43800.   : na)
+my_time = str.tostring(f_resInMinutes()*tfmult)
+
+useSource = input.string('Close',   'What Source to be used?', options = ['Close', 'HL2'])
+
+
+filter1 = 'Filter with Atr'
+filter2 = 'Filter with RSI'
+filter3 = 'Atr or RSI'
+filter4 = 'Atr and RSI'
+filter5 = 'No Filtering'
+filter6 = 'Entry Only in sideways market(By ATR or RSI)'
+filter7 = 'Entry Only in sideways market(By ATR and RSI)'
+typefilter = input.string(filter5, title='Sideways Filtering Input', options=[filter1, filter2, filter3, filter4, filter5, filter6, filter7], group='Strategy Options')
+
+RSI = truncate(ta.rsi(close, input.int(7, group='RSI Filterring')), 2)
+toplimitrsi = input.int(45, title='TOP Limit', group='RSI Filterring')
+botlimitrsi = input.int(10, title='BOT Limit', group='RSI Filterring')
+
+
+
+atrfiltLen = 5 //input.int(5, minval=1, title='atr Length', group='Sideways Filtering Input')
+atrMaType = 'EMA' //input.string('EMA', options=['SMA', 'EMA'], group='Sideways Filtering Input', title='atr Moving Average Type')
+atrMaLen = 5 //input.int(5, minval=1, title='atr MA Length', group='Sideways Filtering Input')
+
+//filtering
+atra = request.security(syminfo.tickerid, '', ta.atr(atrfiltLen)[1],barmerge.gaps_off,barmerge.lookahead_off)
+atrMa = atrMaType == 'EM' ? ta.ema(atra, atrMaLen) : ta.sma(atra, atrMaLen)
+updm = ta.change(high)
+downdm = -ta.change(low)
+plusdm = na(updm) ? na : updm > downdm and updm > 0 ? updm : 0
+minusdm = na(downdm) ? na : downdm > updm and downdm > 0 ? downdm : 0
+
+cndSidwayss1 = atra >= atrMa
+cndSidwayss2 = RSI > toplimitrsi or RSI < botlimitrsi
+cndSidways = cndSidwayss1 or cndSidwayss2
+cndSidways1 = cndSidwayss1 and cndSidwayss2
+Sidwayss1 = atra <= atrMa
+Sidwayss2 = RSI < toplimitrsi and RSI > botlimitrsi
+Sidways = Sidwayss1 or Sidwayss2
+Sidways1 = Sidwayss1 and Sidwayss2
+
+trendType = typefilter == filter1 ? cndSidwayss1 : typefilter == filter2 ? cndSidwayss2 : typefilter == filter3 ? cndSidways : typefilter == filter4 ? cndSidways1 : typefilter == filter5 ? RSI > 0 : typefilter == filter6 ? Sidways : typefilter == filter7 ? Sidways1 : na
+
+// === /INPUTS ===
+use_mytime = input.bool(true, "Use Current Timeframe")
+tf = use_mytime ? my_time : input.timeframe('',"Alternate Timefrae")
+
+openSeriesAlt = request.security(ticker.heikinashi(syminfo.tickerid), tf, open[1],barmerge.gaps_off,barmerge.lookahead_off)
+closeSeriesAlt = request.security(ticker.heikinashi(syminfo.tickerid), tf, close[1],barmerge.gaps_off,barmerge.lookahead_off)
+//openP = plot(almaRibbon ? openSeriesAlt : na, color=color.new(color.lime, 0), linewidth=3)
+//closeP = plot(almaRibbon ? closeSeriesAlt : na, color=color.new(color.red, 0), linewidth=3)
+
+BUYOC = ta.crossover(closeSeriesAlt, openSeriesAlt) and setupType == "Open/Close" and trendType
+SELLOC = ta.crossunder(closeSeriesAlt, openSeriesAlt) and setupType == "Open/Close" and trendType
+
+
+atrLen = input.int(3, title="Renko ATR", group = "Renko Settings")
+isATR = input.bool(true, title="Renko - USE ATR", group = "Renko Settings")
+tradLen1 = input.int(1000, title="Renko - Tradtional", group = "Renko Settings")
+
+
+
+tradLen = tradLen1 * 1
+
+param = isATR ? ticker.renko(syminfo.tickerid, "ATR", atrLen) : ticker.renko(syminfo.tickerid, "Traditional", tradLen)
+
+renko_close = request.security(param, my_time, close[1],barmerge.gaps_off,barmerge.lookahead_off)
+renko_open = request.security(param, my_time, open[1],barmerge.gaps_off,barmerge.lookahead_off)
+
+
+//============================================
+//EMA_CROSS-------------------------------------------------------------------------------------------------------------------------------- // Signal 4
+//============================================
+
+EMA1_length=input.int(2, "EMA1_length", group = "Renko Settings")
+EMA2_length=input.int(10, "EMA2_length", group = "Renko Settings")
+
+a = ta.ema(renko_close, EMA1_length)
+b = ta.ema(renko_close, EMA2_length)
+
+// Determine long and short conditions
+BUYR = ta.crossover(a, b) and setupType == "Renko" and trendType
+SELLR = ta.crossunder(a, b) and setupType == "Renko" and trendType
+
+sel_color = setupType == "Open/Close" ? closeSeriesAlt < openSeriesAlt : setupType == "Renko" ? renko_close < renko_open : na
+buy_color = setupType == "Open/Close" ? closeSeriesAlt > openSeriesAlt : setupType == "Renko" ? renko_close > renko_open : na
+
+sel_entry = setupType == "Open/Close" ? SELLOC : setupType == "Renko" ? SELLR : na
+buy_entry = setupType == "Open/Close" ? BUYOC : setupType == "Renko" ? BUYR : na
+
+trendColour = buy_color ? color.green : color.red
+bcolour = buy_color ? lime100 : red100
+barcolor(scolor ? bcolour : na, title='Bar Colours')
+
+p11=plot(almaRibbon and setupType == "Open/Close" ? closeSeriesAlt : almaRibbon and setupType == "Renko" ? renko_close : na, style=plot.style_circles, linewidth=1, color=color.new(trendColour, 80), title="RENKO_1")
+p22=plot(almaRibbon and setupType == "Open/Close" ? openSeriesAlt : almaRibbon and setupType == "Renko" ? renko_open : na, style=plot.style_circles, linewidth=1, color=color.new(trendColour, 80), title="RENKO_2")
+fill(p11, p22, color=color.new(trendColour, 50), title="RENKO_fill")
+
+//<triggers>
+lxTrigger    = false
+sxTrigger    = false
+leTrigger    = buy_entry
+seTrigger    = sel_entry
+
+// === /ALERT conditions.
+buy = leTrigger //ta.crossover(closeSeriesAlt, openSeriesAlt)
+sell = seTrigger //ta.crossunder(closeSeriesAlt, openSeriesAlt)
+
+varip wasLong = false
+varip wasShort = false
+
+if barstate.isconfirmed
+    wasLong := false
+else 
+    if buy
+        wasLong := true
+
+
+if barstate.isconfirmed
+    wasShort := false
+else 
+    if sell
+        wasShort := true
+
+
+//plotshape(almaRibbon ? buy : na,  title = "Buy",  text = 'Buy',  style = shape.labelup,   location = location.belowbar, color= #39ff14, textcolor = #FFFFFF, size = size.tiny)
+//plotshape(almaRibbon ? sell : na, title = "Exit", text = 'Exit', style = shape.labeldown, location = location.abovebar, color= #ff1100, textcolor = #FFFFFF, size = size.tiny)
+
+// === STRATEGY ===
+i_alert_txt_entry_long = "Short Exit" //input.text_area(defval = "Short Exit", title = "Long Entry Message", group = "Alerts")
+i_alert_txt_exit_long = "Long Exit" //input.text_area(defval = "Long Exit", title = "Long Exit Message", group = "Alerts")
+i_alert_txt_entry_short = "Go Short" //input.text_area(defval = "Go Short", title = "Short Entry Message", group = "Alerts")
+i_alert_txt_exit_short = "Go Long" //input.text_area(defval = "Go Long", title = "Short Exit Message", group = "Alerts")
+// Entries and Exits with TP/SL
+
+
+
+G_RISK       = 'Risk Management'
+
+//ATR SL Settings
+atrLength = input.int(20, minval=1, title='ATR Length')
+profitFactor = input(2.5, title='Take Profit Factor')
+stopFactor = input(1.0, title='Stop Loss Factor')
+
+// Calculate ATR
+tpatrValue = ta.atr(atrLength)
+
+// Calculate take profit and stop loss levels for buy signals
+takeProfit1_buy = 1 * profitFactor * tpatrValue //close + profitFactor * atrValue
+takeProfit2_buy = 2 * profitFactor * tpatrValue //close + 2 * profitFactor * atrValue
+takeProfit3_buy = 3 * profitFactor * tpatrValue //close + 3 * profitFactor * atrValue
+stopLoss_buy = close - takeProfit1_buy //stopFactor * tpatrValue
+
+// Calculate take profit and stop loss levels for sell signals
+takeProfit1_sell = 1 * profitFactor * tpatrValue //close - profitFactor * atrValue
+takeProfit2_sell = 2 * profitFactor * tpatrValue //close - 2 * profitFactor * atrValue
+takeProfit3_sell = 3 * profitFactor * tpatrValue //close - 3 * profitFactor * atrValue
+stopLoss_sell = close + takeProfit1_sell //stopFactor * tpatrValue
+
+// ——————————— <constant_declarations>
+//Tooltip
+T_LVL        = '(%) Exit Level'
+T_QTY        = '(%) Adjust trade exit volume'
+T_MSG        = 'Paste JSON message for your bot'
+//Webhook Message
+O_LEMSG      = 'Long Entry'
+O_LXMSGSL    = 'Long SL'
+O_LXMSGTP1   = 'Long TP1'
+O_LXMSGTP2   = 'Long TP2'
+O_LXMSGTP3   = 'Long TP3'
+O_LXMSG      = 'Long Exit'
+O_SEMSG      = 'Short Entry'
+O_SXMSGSL    = 'Short SL'
+O_SXMSGA     = 'Short TP1'
+O_SXMSGB     = 'Short TP2'
+O_SXMSGC     = 'Short TP3'
+O_SXMSGX     = 'Short Exit'
+
+// on whole pips) for forex currency pairs.
+pip_size = syminfo.mintick * (syminfo.type == "forex" ? 10 : 1)
+
+
+i_lxLvlTP1   = leTrigger ? takeProfit1_buy : seTrigger ? takeProfit1_sell : na //input.float     (1,         'Level TP1'                     , group = G_RISK,     tooltip =                   T_LVL)
+i_lxQtyTP1   = input.float (50,        'Qty   TP1'                     , group = G_RISK,     tooltip =                   T_QTY)
+i_lxLvlTP2   = leTrigger ? takeProfit2_buy : seTrigger ? takeProfit2_sell : na //input.float     (1.5,       'Level TP2'                     , group = G_RISK,     tooltip =                   T_LVL)
+i_lxQtyTP2   = input.float (30,        'Qty   TP2'                     , group = G_RISK,     tooltip =                   T_QTY)
+i_lxLvlTP3   = leTrigger ? takeProfit3_buy : seTrigger ? takeProfit3_sell : na //input.float     (2,         'Level TP3'                     , group = G_RISK,     tooltip =                   T_LVL)
+i_lxQtyTP3   = input.float (20,        'Qty   TP3'                     , group = G_RISK,     tooltip =                   T_QTY)
+i_lxLvlSL    = leTrigger ? takeProfit1_buy : seTrigger ? takeProfit1_sell : na //input.float     (0.5,       'Stop Loss'                     , group = G_RISK,     tooltip =                   T_LVL)
+
+i_sxLvlTP1   = i_lxLvlTP1
+i_sxQtyTP1   = i_lxQtyTP1
+i_sxLvlTP2   = i_lxLvlTP2
+i_sxQtyTP2   = i_lxQtyTP2
+i_sxLvlTP3   = i_lxLvlTP3
+i_sxQtyTP3   = i_lxQtyTP3
+i_sxLvlSL    = i_lxLvlSL
+
+G_MSG        = '■ ' + 'Webhook Message'
+i_leMsg      = O_LEMSG //input.string     (O_LEMSG   ,'Long Entry'                   , group = G_MSG, tooltip = T_MSG)
+i_lxMsgSL    = O_LXMSGSL //input.string     (O_LXMSGSL ,'Long SL'                      , group = G_MSG, tooltip = T_MSG)
+i_lxMsgTP1   = O_LXMSGTP1 //input.string     (O_LXMSGTP1,'Long TP1'                     , group = G_MSG, tooltip = T_MSG)
+i_lxMsgTP2   = O_LXMSGTP2 //input.string     (O_LXMSGTP2,'Long TP2'                     , group = G_MSG, tooltip = T_MSG)
+i_lxMsgTP3   = O_LXMSGTP3 //input.string     (O_LXMSGTP3,'Long TP3'                     , group = G_MSG, tooltip = T_MSG)
+i_lxMsg      = O_LXMSG //input.string     (O_LXMSG   ,'Long Exit'                    , group = G_MSG, tooltip = T_MSG)
+i_seMsg      = O_SEMSG //input.string     (O_SEMSG   ,'Short Entry'                  , group = G_MSG, tooltip = T_MSG)
+i_sxMsgSL    = O_SXMSGSL //input.string     (O_SXMSGSL ,'Short SL'                     , group = G_MSG, tooltip = T_MSG)
+i_sxMsgTP1   = O_SXMSGA //input.string     (O_SXMSGA  ,'Short TP1'                    , group = G_MSG, tooltip = T_MSG)
+i_sxMsgTP2   = O_SXMSGB //input.string     (O_SXMSGB  ,'Short TP2'                    , group = G_MSG, tooltip = T_MSG)
+i_sxMsgTP3   = O_SXMSGC //input.string     (O_SXMSGC  ,'Short TP3'                    , group = G_MSG, tooltip = T_MSG)
+i_sxMsg      = O_SXMSGX //input.string     (O_SXMSGX  ,'Short Exit'                   , group = G_MSG, tooltip = T_MSG)
+i_src        = close
+
+G_DISPLAY    = 'Display'
+//<display>
+i_alertOn    = true //input.bool       (true,      'Alert Labels On/Off'          , group = G_DISPLAY)
+i_barColOn   = true //input.bool       (true,      'Bar Color On/Off'             , group = G_DISPLAY)
+
+// ——————————— <function_declarations>
+// @function        Calculate the Take Profit line, and the crossover or crossunder
+f_tp(_condition, _conditionValue, _leTrigger, _seTrigger, _src, _lxLvlTP, _sxLvlTP)=>
+    var float _tpLine = 0.0
+    _topLvl     = _src + _lxLvlTP //TPSType == "Fixed %" ? _src + (_src * (_lxLvlTP / 100)) : _src + _lxLvlTP
+    _botLvl     = _src - _lxLvlTP //TPSType == "Fixed %" ? _src - (_src * (_sxLvlTP / 100)) : _src - _sxLvlTP
+    _tpLine    := _condition[1] !=  _conditionValue and _leTrigger ? _topLvl :
+                  _condition[1] != -_conditionValue and _seTrigger ? _botLvl :
+                  nz(_tpLine[1])
+    [_tpLine]
+
+// @function        Similar to "ta.crossover" or "ta.crossunder"
+f_cross(_scr1, _scr2, _over)=>
+    _cross   = _over ? _scr1 > _scr2 and _scr1[1] < _scr2[1] :
+                       _scr1 < _scr2 and _scr1[1] > _scr2[1]
+
+// ——————————— <calculations>
+//<set initial values>
+var float condition = 0.0
+var float slLine    = 0.0
+var float entryLine = 0.0
+
+//<entry & exit orders>
+entryLine   := leTrigger and condition[1] <=  0.0 ? close :
+               seTrigger and condition[1] >=  0.0 ? close : nz(entryLine[1])
+//<SL>
+slTopLvl    = TPSType == "Fixed %" ? i_src + (i_src * (i_lxLvlSL / 100)) : i_src + i_lxLvlSL
+slBotLvl    = TPSType == "Fixed %" ? i_src - (i_src * (i_sxLvlSL / 100)) : i_src - i_lxLvlSL
+slLine     := condition[1] <=  0.0 and leTrigger ? slBotLvl :
+              condition[1] >=  0.0 and seTrigger ? slTopLvl : nz(slLine[1])
+slLong      = f_cross(low,  slLine, false)
+slShort     = f_cross(high, slLine, true )
+//<TP1, TP2 & TP3>
+[tp3Line]    = f_tp(condition, 1.2,leTrigger, seTrigger, i_src, i_lxLvlTP3, i_sxLvlTP3)
+[tp2Line]    = f_tp(condition, 1.1,leTrigger, seTrigger, i_src, i_lxLvlTP2, i_sxLvlTP2)
+[tp1Line]    = f_tp(condition, 1.0,leTrigger, seTrigger, i_src, i_lxLvlTP1, i_sxLvlTP1)
+tp3Long      = f_cross(high, tp3Line, true )
+tp3Short     = f_cross(low,  tp3Line, false)
+tp2Long      = f_cross(high, tp2Line, true )
+tp2Short     = f_cross(low,  tp2Line, false)
+tp1Long      = f_cross(high, tp1Line, true )
+tp1Short     = f_cross(low,  tp1Line, false)
+
+switch
+    leTrigger and condition[1] <=  0.0 => condition :=  1.0
+    seTrigger and condition[1] >=  0.0 => condition := -1.0
+    tp3Long   and condition[1] ==  1.2 => condition :=  1.3
+    tp3Short  and condition[1] == -1.2 => condition := -1.3
+    tp2Long   and condition[1] ==  1.1 => condition :=  1.2
+    tp2Short  and condition[1] == -1.1 => condition := -1.2
+    tp1Long   and condition[1] ==  1.0 => condition :=  1.1
+    tp1Short  and condition[1] == -1.0 => condition := -1.1
+    slLong    and condition[1] >=  1.0 => condition :=  0.0
+    slShort   and condition[1] <= -1.0 => condition :=  0.0
+    lxTrigger and condition[1] >=  1.0 => condition :=  0.0
+    sxTrigger and condition[1] <= -1.0 => condition :=  0.0
+
+longE        = leTrigger and condition[1] <=  0.0 and condition ==  1.0
+shortE       = seTrigger and condition[1] >=  0.0 and condition == -1.0
+longX        = lxTrigger and condition[1] >=  1.0 and condition ==  0.0
+shortX       = sxTrigger and condition[1] <= -1.0 and condition ==  0.0
+longSL       = slLong    and condition[1] >=  1.0 and condition ==  0.0
+shortSL      = slShort   and condition[1] <= -1.0 and condition ==  0.0
+longTP3      = tp3Long   and condition[1] ==  1.2 and condition ==  1.3
+shortTP3     = tp3Short  and condition[1] == -1.2 and condition == -1.3
+longTP2      = tp2Long   and condition[1] ==  1.1 and condition ==  1.2
+shortTP2     = tp2Short  and condition[1] == -1.1 and condition == -1.2
+longTP1      = tp1Long   and condition[1] ==  1.0 and condition ==  1.1
+shortTP1     = tp1Short  and condition[1] == -1.0 and condition == -1.1
+
+// Strategy 
+//Long Orders
+if longE
+    strategy.entry('Long',strategy.long, alert_message = '{' +'"ticker": "ES", ' +'"action": "buy", ' + '"quantity": 3'+'}')
+    strategy.exit('L-TP1', 'Long',      qty_percent      = i_lxQtyTP1, limit = tp1Line, alert_message = '{' +'"ticker": "ES", ' +'"action": "sell", ' + '"quantity": 1, ' + '"orderType": "limit", ' + '"limitPrice": '+str.tostring(math.round_to_mintick(tp1Line),'##.##')+    '}')
+    strategy.exit('L-TP2', 'Long',      qty_percent      = i_lxQtyTP2, limit = tp2Line, alert_message = '{' +'"ticker": "ES", ' +'"action": "sell", ' + '"quantity": 1'+'}')
+    strategy.exit('L-TP3', 'Long',      qty_percent      = i_lxQtyTP3, limit = tp3Line, alert_message = '{' +'"ticker": "ES", ' +'"action": "sell", ' + '"quantity": 1'+'}')
+    strategy.exit('L-Stop Loss', 'Long', qty_percent = 100, stop = slLine, alert_message = '{' +'"ticker": "ES", ' +'"action": "exit"'+'}')
+
+
+//Short Orders
+if shortE
+    strategy.entry('Short', strategy.short, alert_message = '{' +'"ticker": "ES", ' +'"action": "sell", ' + '"quantity": 3'+'}')
+    strategy.exit('S-TP1', 'Short', qty_percent = i_sxQtyTP1, limit = tp1Line, alert_message = '{' +'"ticker": "ES", ' +'"action": "buy", ' + '"quantity": 1'+'}')
+    strategy.exit('S-TP2', 'Short', qty_percent = i_sxQtyTP2, limit = tp2Line, alert_message = '{' +'"ticker": "ES", ' +'"action": "buy", ' + '"quantity": 1'+'}')
+    strategy.exit('S-TP3', 'Short', qty_percent = i_sxQtyTP3, limit = tp3Line, alert_message = '{' +'"ticker": "ES", ' +'"action": "buy", ' + '"quantity": 1'+'}')
+    strategy.exit('S-Stop Loss', 'Short', qty_percent = 100, stop = slLine, alert_message = '{' +'"ticker": "ES", ' +'"action": "exit"'+'}')
+
+
+if condition == 0.0 and strategy.position_size != 0
+    strategy.close_all("Stop Loss", alert_message = '{' +'"ticker": "ES", ' +'"action": "exit"'+'}')
+
+// ——————————— <visuals>
+c_tp         = leTrigger or seTrigger ? na :
+               condition == 0.0       ? na : color.green
+c_entry      = leTrigger or seTrigger ? na :
+               condition == 0.0       ? na : color.blue
+c_sl         = leTrigger or seTrigger ? na :
+               condition == 0.0       ? na : color.red
+p_tp1Line    = plot (  condition ==  1.0 or  condition == -1.0  ?  tp1Line : na,  title      = "TP Line 1",  color      = c_tp,  linewidth  = 1,  style      = plot.style_linebr)
+p_tp2Line    = plot (  condition ==  1.0 or  condition == -1.0 or    condition ==  1.1 or  condition == -1.1  ? tp2Line : na,  title      = "TP Line 2",  color      = c_tp,  linewidth  = 1,  style      = plot.style_linebr)
+p_tp3Line    = plot (  condition ==  1.0 or  condition == -1.0 or    condition ==  1.1 or  condition == -1.1 or  condition ==  1.2 or  condition == -1.2  ? tp3Line : na,  title      = "TP Line 3",  color      = c_tp,  linewidth  = 1,  style      = plot.style_linebr)
+p_entryLine  = plot (  condition >=  1.0 or  condition <= -1.0  ? entryLine : na,  title      = "Entry Line",  color      = c_entry,  linewidth  = 1,  style      = plot.style_linebr)
+p_slLine     = plot (  condition ==  1.0 or  condition == -1.0 or    condition ==  1.1 or  condition == -1.1 or  condition ==  1.2 or  condition == -1.2  ? slLine : na,  title      = "SL Line",  color      = c_sl,  linewidth  = 1,  style      = plot.style_linebr)
+
+fill(  p_tp3Line, p_entryLine,  color      = leTrigger or seTrigger ? na :color.new(color.green, 95))
+fill(  p_entryLine, p_slLine,  color      = leTrigger or seTrigger ? na :color.new(color.red, 95))
+
+//<alerts labels>
+plotshape(  i_alertOn and longE,  title      = 'Long',  text       = 'Long',  textcolor  = color.white,  color      = color.green,  style      = shape.labelup,  size       = size.tiny,  location   = location.belowbar)
+plotshape(  i_alertOn and shortE,  title      = 'Short',  text       = 'Short',  textcolor  = color.white,  color      = color.red,  style      = shape.labeldown,  size       = size.tiny,  location   = location.abovebar)
+plotshape(  i_alertOn and (longX or shortX) ? close : na,  title      = 'Close',  text       = 'Close',  textcolor  = color.white,  color      = color.gray,  style      = shape.labelup,  size       = size.tiny,  location   = location.absolute)
+l_tp         = i_alertOn and (longTP1 or shortTP1) ? close : na
+
+plotshape(  l_tp,  title      = "TP1 Cross",  text       = "TP1",  textcolor  = color.white,  color      = color.olive,  style      = shape.labelup,  size       = size.tiny,  location   = location.absolute)
+plotshape(  i_alertOn and (longTP2 or shortTP2) ? close : na,  title      = "TP2 Cross",  text       = "TP2",  textcolor  = color.white,  color      = color.olive,  style      = shape.labelup,  size       = size.tiny,  location   = location.absolute)
+plotshape(  i_alertOn and (longTP3 or shortTP3) ? close : na,  title      = "TP3 Cross",  text       = "TP3",  textcolor  = color.white,  color      = color.olive,  style      = shape.labelup,  size       = size.tiny,  location   = location.absolute)
+plotshape(  i_alertOn and (longSL or shortSL) ? close : na,  title      = "SL Cross",  text       = "SL",  textcolor  = color.white,  color      = color.maroon,  style      = shape.labelup,  size       = size.tiny,  location   = location.absolute)
+
+//<debug>
+plot(  na,  title      = "─── <debug> ───",  editable   = false,  display    = display.data_window)
+plot(  condition,  title      = "condition",  editable   = false,  display    = display.data_window)
+plot(  strategy.position_size * 100,  title      = ".position_size",  editable   = false,  display    = display.data_window)
+//#endregion }
+// ——————————— <↑↑↑ G_RISK ↑↑↑>
+
+//#region ———— <↓↓↓ G_SCRIPT02 ↓↓↓> {
+// @function        Queues a new element in an array and de-queues its first element.
+f_qDq(_array, _val) =>
+    array.push(_array, _val)
+    _return = array.shift(_array)
+    _return
+
+var line[]  a_slLine     = array.new_line(1)
+var line[]  a_entryLine  = array.new_line(1)
+var line[]  a_tp3Line    = array.new_line(1)
+var line[]  a_tp2Line    = array.new_line(1)
+var line[]  a_tp1Line    = array.new_line(1)
+var label[] a_slLabel    = array.new_label(1)
+var label[] a_tp3label   = array.new_label(1)
+var label[] a_tp2label   = array.new_label(1)
+var label[] a_tp1label   = array.new_label(1)
+var label[] a_entryLabel = array.new_label(1)
+
+newEntry     = longE or shortE
+entryIndex   = 1
+entryIndex   := newEntry ? bar_index : nz(entryIndex[1])
+lasTrade     = bar_index >= entryIndex
+l_right      = 10
+
+if TPSType == "ATR"
+    line.delete(  f_qDq(a_slLine,  line.new(   entryIndex,   slLine,   last_bar_index + l_right,   slLine,   style = line.style_solid,   color = c_sl))) 
+
+if TPSType == "ATR"
+    line.delete(  f_qDq(a_entryLine,  line.new(   entryIndex,   entryLine,   last_bar_index + l_right,   entryLine,   style = line.style_solid,   color = color.blue)))
+
+if TPSType == "ATR"
+    line.delete(  f_qDq(a_tp3Line,  line.new(   entryIndex,   tp3Line,   last_bar_index + l_right,   tp3Line,   style = line.style_solid,   color = c_tp)))
+
+if TPSType == "ATR"
+    line.delete(  f_qDq(a_tp2Line,  line.new(   entryIndex,   tp2Line,   last_bar_index + l_right,   tp2Line,   style = line.style_solid,   color = c_tp)))
+
+if TPSType == "ATR"
+    line.delete(  f_qDq(a_tp1Line,  line.new(   entryIndex,   tp1Line,   last_bar_index + l_right,   tp1Line,   style = line.style_solid,   color = c_tp)))
+
+if TPSType == "ATR"
+    label.delete(  f_qDq(a_slLabel,  label.new(   last_bar_index + l_right,   slLine,   'SL: ' + str.tostring(slLine, '##.##'),   style = label.style_label_left,   textcolor  = color.white,   color = c_sl)))
+
+if TPSType == "ATR"
+    label.delete(  f_qDq(a_entryLabel,  label.new(   last_bar_index + l_right,   entryLine,   'Entry: ' + str.tostring(entryLine, '##.##'),   style = label.style_label_left,   textcolor  = color.white,   color = color.blue)))
+
+if TPSType == "ATR"
+    label.delete(  f_qDq(a_tp3label,  label.new(   last_bar_index + l_right,   tp3Line,   'TP3: ' + str.tostring(tp3Line, '##.##'),   style = label.style_label_left,   textcolor  = color.white,   color = c_tp)))
+
+if TPSType == "ATR"
+    label.delete(  f_qDq(a_tp2label,  label.new(   last_bar_index + l_right,   tp2Line,   'TP2: ' + str.tostring(tp2Line, '##.##'),   style = label.style_label_left,   textcolor  = color.white,   color = c_tp)))
+
+if TPSType == "ATR"
+    label.delete(  f_qDq(a_tp1label,  label.new(   last_bar_index + l_right,   tp1Line,   'TP1: ' + str.tostring(tp1Line, '##.##'),   style = label.style_label_left,   textcolor  = color.white,   color = c_tp)))
+
+
+if longE or shortE or longX or shortX
+    alert(message = 'Any Alert',   freq = alert.freq_once_per_bar_close)
+if longE
+    alert(message = 'Long Entry',  freq = alert.freq_once_per_bar_close)
+if shortE
+    alert(message = 'Short Entry', freq = alert.freq_once_per_bar_close)
+if longX
+    alert(message = 'Long Exit',   freq = alert.freq_once_per_bar_close)
+if shortX
+    alert(message = 'Short Exit',  freq = alert.freq_once_per_bar_close)
+
+
+hide = timeframe.isintraday
+
+// Input for EMA period
+emaPeriod = 48 //input.int(48, title="EMA Period")
+emaPeriod2 = 2 //input.int(2, title="EME Period 2")
+emaPeriod3 = 21 //input.int(21, title="EMA Period")
+
+// Input to toggle EMA Cloud 
+showcloud = input.bool(true, title="Plot EMA?", group='EMA & ATR', inline="Show EMA's & ATR")
+useHTF = input.bool(true, title = "Use Higher Time Frame?")
+
+matimeframe = useHTF ? my_time1 : ''
+
+// EMA calculations
+ema = request.security(syminfo.tickerid, matimeframe, ta.ema(close, emaPeriod)[1],barmerge.gaps_off,barmerge.lookahead_off)
+ema2 = request.security(syminfo.tickerid, matimeframe, ta.ema(close,emaPeriod2)[1],barmerge.gaps_off,barmerge.lookahead_off)
+ema3 = request.security(syminfo.tickerid, matimeframe,ta.ema(close, emaPeriod3)[1],barmerge.gaps_off,barmerge.lookahead_off)
+emaColor = close > ema3 ? color.new(color.rgb(56, 142, 60, 63), 50) : color.new(color.rgb(147, 40, 51, 38), 50)
+
+// Plotting EMA's 
+plot_ema1 = plot(hide ? ema : na, style=plot.style_line, color=color.new(color.rgb(255, 255, 255, 100), 50), title="EMA", linewidth=2)
+plot_ema2 = plot(hide ? ema2 : na, style=plot.style_line, color=color.new(color.rgb(255, 255, 255, 100), 50), title="EMA", linewidth=1)
+plot_ema3 = plot(ema3, style=plot.style_line, color=emaColor, title="EMA", linewidth=1)
+
+// EMA Cloud
+cloudColor = ema2 > ema ? color.new(#0f8513, 80) : color.new(#a81414, 80)
+cloudColor2 = ema2 > ema3 ? color.new(#0f8513, 50) : color.new(#a81414, 50)
+cloudColor := showcloud ? cloudColor : na
+fill(plot_ema1, plot_ema2, color=cloudColor, title="EMA Cloud")
+fill(plot_ema3, plot_ema2, color=cloudColor, title="EMA Cloud")
+
+
+import TradingView/ta/8 as ta
+
+
+
+// Define User Inputs
+simple bool       showAtr                 =        input.bool(true, "Plot Dema?", group='EMA & ATR', inline="Show EMA's & ATR")
+simple bool       haCandles               =        true //input.bool(true, "Use HA Candles?")
+simple int        periodDema              =        7 //input.int(7, "Dema Period", group = "Dema Atr")
+series float      sourceDema              =        close //input.source(close, "Calculation Source", group = "Dema Atr")
+simple int        periodAtr               =        14 //input.int(14, "Period", group = "Dema Atr")
+simple float      factorAtr               =        1.7 //input.float(1.7, "Factor", step = 0.01, group = "Dema Atr")
+simple color      longColour              =       #00ff00
+simple color      shortColour             =       #ff0000
+/////////////////////////////////////////////////////////////// © BackQuant ///////////////////////////////////////////////////////////////
+// Use HA Candles?
+heikinashi_close = request.security(
+ symbol = ticker.heikinashi(syminfo.tickerid),
+ timeframe =  timeframe.period,
+ expression = close[1], 
+ gaps = barmerge.gaps_off, 
+ lookahead = barmerge.lookahead_off
+ )
+
+var series float source = close
+if haCandles == true
+    source := heikinashi_close
+if haCandles == false
+    source := sourceDema 
+/////////////////////////////////////////////////////////////// © BackQuant ///////////////////////////////////////////////////////////////
+// Function
+DemaAtrWithBands(periodDema, source, lookback, atrFactor)=>
+    demaOut = ta.dema(source,  periodDema)
+
+    atr = ta.atr(lookback)
+    trueRange = atr * atrFactor 
+
+    DemaAtr = demaOut 
+    DemaAtr := nz(DemaAtr[1], DemaAtr)
+
+    trueRangeUpper = demaOut + trueRange
+    trueRangeLower  = demaOut - trueRange 
+
+    if trueRangeLower > DemaAtr 
+        DemaAtr := trueRangeLower
+    if trueRangeUpper < DemaAtr 
+        DemaAtr := trueRangeUpper
+    DemaAtr 
+
+// Function Out
+DemaAtr = DemaAtrWithBands(periodDema, source, periodAtr, factorAtr)
+/////////////////////////////////////////////////////////////// © BackQuant ///////////////////////////////////////////////////////////////
+// Conditions
+DemaAtrLong = DemaAtr > DemaAtr[1] 
+DemaAtrShort = DemaAtr < DemaAtr[1]
+
+// Colour Condtions
+var color Trendcolor = #ffffff
+if DemaAtrLong
+    Trendcolor := longColour
+if DemaAtrShort
+    Trendcolor := shortColour
+
+// Plotting
+plot( showAtr ? DemaAtr : na,  "ATR",  color=Trendcolor,  linewidth = 2 )

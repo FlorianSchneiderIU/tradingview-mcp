@@ -1,0 +1,861 @@
+//@version=5
+// Telegram Join Us >> https://t.me/eyops
+//...................../´¯¯/)
+//...................,/¯.../
+//.................../..../
+//.............../´¯/'..'/´¯¯`·¸
+//.........../'/.../..../....../¨¯\
+//..........('(....´...´... ¯~/'..')
+//...........\..............'...../
+//............\....\.........._.·´
+//.............\..............(
+//..............\..............\
+//----
+//---------
+// Telegram Join Us >> https://t.me/eyops
+indicator("💎 Diamond Algo 💎", overlay = true)
+
+// Get user input
+// Dashboard
+showDashboard     = input(true, "Smart Panel", group = 'Dashboard Settings')
+locationDashboard = input.string("Bottom Right", "Location", ["Top Right", "Middle Right", "Bottom Right", "Top Center", "Middle Center", "Bottom Center", "Top Left", "Middle Left", "Bottom Left"], group = 'Dashboard Settings', inline = 'agfh1')
+sizeDashboard     = input.string("Small", "Size", ["Large", "Normal", "Small", "Tiny"], group = 'Dashboard Settings', inline = 'agfh1')
+
+// Signals
+nbuysell   = input.bool(true, 'Show Signals', inline = "BSNM",group='BUY AND SELL SIGNALS SETTINGS')
+nsensitivity = input.float(defval=2, title="Sensitivity", minval=1, maxval=20, group='BUY AND SELL SIGNALS SETTINGS')
+smartsignalsonly   = input.bool(false, 'Smart Signals Only',group='BUY AND SELL SIGNALS SETTINGS')
+barcoloringmode  = input.string("Trend", "Bar Coloring", ["Gradient", "Trend"], inline="levels", group = 'BUY AND SELL SIGNALS SETTINGS')
+//candlecolor   = input.bool(true, 'Buy/Sell Signal', inline = "BSNM",group='BUY/SELL SIGNAL')
+
+
+ema200con = ta.ema(close,200)
+
+// Risk Management
+
+levels      = input.bool(false, "Take Profit/ Stop-Loss Areas" , group = "RISK MANAGEMENT SETTINGS" , inline = "MMDB2")
+lvlLines    = true
+linesStyle  = "DASHED"
+lvlDistance = input.int(20, "Distance", 1, inline="levels2", group = "RISK MANAGEMENT SETTINGS")
+lvlDecimals = input.int(2, "   Decimals", 1, 8, inline="levels2", group = "RISK MANAGEMENT SETTINGS")
+atrRisk     = input.int(1, "Risk % ", 1, group = "RISK MANAGEMENT SETTINGS" , inline="levels3")
+atrLen      = input.int(14, "  ATR Length", 1, group = "RISK MANAGEMENT SETTINGS" , inline="levels3")
+decimals  = lvlDecimals == 1 ? "#.#" : lvlDecimals == 2 ? "#.##" : lvlDecimals == 3 ? "#.###" : lvlDecimals == 4 ? "#.####" : lvlDecimals == 5 ? "#.#####" : lvlDecimals == 6 ? "#.######" : lvlDecimals == 7 ? "#.#######" : "#.########"
+// Trend Features
+LongTrendAverage  = input(false, 'Trend Cloud', group='INDICATOR OVERLAY', inline = '1')
+TrendFollower     = input(false, 'Trend Follower', group='INDICATOR OVERLAY', inline = '1')
+ShowComulus       = input(false, 'Comulus Cloud', group='INDICATOR OVERLAY', inline = '2')
+CirrusCloud       = input(false, 'Cirrus Cloud', group='INDICATOR OVERLAY', inline = '2')
+ShowSmartTrail = input(false,'Smart Trail', group='INDICATOR OVERLAY', inline = '3')
+Showtrendlines = input(false,'Trend Lines', group='INDICATOR OVERLAY', inline = '3')
+showsr = input(false, title="Support & Resistance", group = 'INDICATOR OVERLAY', inline = '4')
+
+// Input settings
+history_of_demand_to_keep = 20
+show_zigzag = false
+show_price_action_labels = false
+swing_length = 8
+box_width = 4
+box_extend_option = "Both"
+res = ''
+s1 = request.security(syminfo.tickerid, res, showsr, gaps=barmerge.gaps_on)
+demand_color = #0395ff4d
+supply_color = #ff00024d
+
+
+// Signal Generation
+supertrend(_close, factor, atrLen) =>
+	atr = ta.atr(atrLen)
+	upperBand = _close + factor * atr
+	lowerBand = _close - factor * atr
+	prevLowerBand = nz(lowerBand[1])
+	prevUpperBand = nz(upperBand[1])
+	lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
+	upperBand := upperBand < prevUpperBand or close[1] > prevUpperBand ? upperBand : prevUpperBand
+	int direction = na
+	float superTrend = na
+	prevSuperTrend = superTrend[1]
+	if na(atr[1])
+		direction := 1
+	else if prevSuperTrend == prevUpperBand
+		direction := close > upperBand ? -1 : 1
+	else
+		direction := close < lowerBand ? 1 : -1
+	superTrend := direction == -1 ? lowerBand : upperBand
+	[superTrend, direction] 
+	
+
+
+// SMA 
+ocAvg       = math.avg(open, close)
+sma4        = ta.sma(close, 50)
+sma5        = ta.sma(close, 200)
+sma9        = ta.sma(close, 13)
+psar        = ta.sar(0.02, 0.02, 0.2)
+
+//*in Easy Words Super Trend + SMA = Signals
+[supertrend, direction] = supertrend(close, nsensitivity*2, 11)
+
+
+source = close, period = 150
+
+// Colors
+green       = #0395ff, green2   = #0395ff
+red         = #ff0002, red2     = #ff0002
+
+adxlen = 15
+dilen = 15
+dirmov(len) =>
+    up = ta.change(high)
+    down = -ta.change(low)
+    plusDM = na(up) ? na : up > down and up > 0 ? up : 0
+    minusDM = na(down) ? na : down > up and down > 0 ? down : 0
+    truerange = ta.rma(ta.tr, len)
+    plus = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+adx(dilen, adxlen) =>
+    [plus, minus] = dirmov(dilen)
+    sum = plus + minus
+    adx = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adxlen)
+    adx
+sig = adx(dilen, adxlen)
+
+// range ADX threshold
+sidewaysThreshold = 15
+
+// boolean expression to see if the ADX is below tehe sideways threshold
+bool isSideways = sig < sidewaysThreshold
+
+
+// adding the option to color the bars when in a trading range
+useBarColor = true
+bColor = isSideways ? color.new(#4b148d, 0) : na
+//barcolor(isSideways and barcoloringmode == "Trend" ? bColor : na)
+
+
+trendbarcolor = isSideways and barcoloringmode == "Trend" ? color.new(#4b148d, 0) : close > supertrend ? #0395ff : #ff0002
+barcolor(trendbarcolor)
+
+// High Lows
+y1 = low - (ta.atr(30) * 2), y1B = low - ta.atr(30)
+y2 = high + (ta.atr(30) * 2), y2B = high + ta.atr(30)
+
+bull = ta.crossover(close, supertrend) and close >= sma9
+bear = ta.crossunder(close, supertrend) and close <= sma9
+
+
+// Plots
+
+windowsize = 100
+offset = 0.9
+sigma = 6
+//plot(ta.alma(source, windowsize, offset, sigma))
+
+
+windowsize2 = 310
+offset2 = 0.85
+sigma2 = 32
+//plot(ta.alma(source, windowsize2, offset2, sigma2))
+
+
+
+// Chart Features
+
+smoothrng(x, t, m) =>
+    wper  = t * 2 - 1
+    avrng = ta.ema(math.abs(x - x[1]), t)
+    smoothrng = ta.ema(avrng, wper) * m
+    smoothrng
+smrng     = smoothrng(close, 22, 6)
+
+rngfilt(x, r) =>
+    rngfilt = x
+    rngfilt := x > nz(rngfilt[1]) ? x - r < nz(rngfilt[1]) ? nz(rngfilt[1]) : x - r : x + r > nz(rngfilt[1]) ? nz(rngfilt[1]) : x + r
+    rngfilt
+filt = rngfilt(close, smrng)
+
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 
+
+upward = 0.0
+upward := filt > filt[1] ? nz(upward[1]) + 1 : filt < filt[1] ? 0 : nz(upward[1])
+downward = 0.0
+downward := filt < filt[1] ? nz(downward[1]) + 1 : filt > filt[1] ? 0 : nz(downward[1])
+
+
+filtcolor = upward > 0 ? color.new(#00e2ff, 50) : downward > 0 ? color.new(#fe0100, 50) : color.new(#56328f, 0)
+
+plot(TrendFollower ? filt : na, color=filtcolor, linewidth=1, title='Trend Tracer')
+
+// Trend Cloud
+tclength = 600
+hullma = ta.wma(2*ta.wma(close, tclength/2)-ta.wma(close, tclength), math.floor(math.sqrt(tclength)))
+plot(LongTrendAverage ? hullma : na, 'Trend Cloud', linewidth=4, color=close[8] > hullma ? color.new(#00e2ff, 65) : color.new(#fe0100, 65))
+
+// Comulus Cloud
+candle  = ta.alma(source, windowsize2, offset2, sigma2)
+reach   = ta.alma(source, windowsize, offset, sigma)
+candlep = plot(ShowComulus ? candle : na, color=color.new(color.white, 100))
+reachp  = plot(ShowComulus ? reach  : na, color=color.new(color.white, 100))
+fill(reachp, candlep, color= candle > reach ? color.new(#fe0100, 85) : color.new(#00e2ff, 85))
+
+// Chart Features
+
+x1 = 22
+x2 = 9
+
+x3 = 15
+x4 = 5
+
+
+
+smoothrngX1(x, t, m) =>
+    wper  = t * 2 - 1
+    avrng = ta.ema(math.abs(x - x[1]), t)
+    smoothrngX1 = ta.ema(avrng, wper) * m
+    smoothrngX1
+smrngx1x     = smoothrngX1(close, x1, x2)
+smrngx1x2     = smoothrngX1(close, x3, x4)
+
+rngfiltx1x1(x, r) =>
+    rngfiltx1x1 = x
+    rngfiltx1x1 := x > nz(rngfiltx1x1[1]) ? x - r < nz(rngfiltx1x1[1]) ? nz(rngfiltx1x1[1]) : x - r : x + r > nz(rngfiltx1x1[1]) ? nz(rngfiltx1x1[1]) : x + r
+    rngfiltx1x1
+filtx1 = rngfiltx1x1(close, smrngx1x)
+filtx12 = rngfiltx1x1(close, smrngx1x2)
+
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 
+
+upwardx1 = 0.0
+upwardx1 := filtx1 > filtx1[1] ? nz(upwardx1[1]) + 1 : filtx1 < filtx1[1] ? 0 : nz(upwardx1[1])
+downwardx1 = 0.0
+downwardx1 := filtx1 < filtx1[1] ? nz(downwardx1[1]) + 1 : filtx1 > filtx1[1] ? 0 : nz(downwardx1[1])
+
+
+filtx1colorx1 = color.rgb(0, 187, 212, 100)
+xxx1 = plot(CirrusCloud ? filtx1 : na, color=filtx1colorx1, linewidth=1, title='Trend Tracer', editable = false)
+xxx2 = plot(CirrusCloud ? filtx12 : na, color=filtx1colorx1, linewidth=1, title='Trend Tracer', editable = false)
+
+fill(xxx1, xxx2, color= filtx1 > filtx12 ? color.new(#fd0205, 65) : color.new(#0395fc, 65))
+
+
+buy  =  bull and nbuysell and smartsignalsonly == false ? label.new(bar_index, y1, close > ema200con ? "Smart\nBuy" : "Buy", xloc.bar_index, yloc.price, #0395fc, label.style_label_up, color.white, size.normal) : na
+sell =  bear and nbuysell and smartsignalsonly == false ? label.new(bar_index, y2, close < ema200con ? "Smart\nSell" : "Sell", xloc.bar_index, yloc.price, #fd0205, label.style_label_down, color.white, size.normal) : na
+SmartBuy  =  bull and nbuysell and close > ema200con and smartsignalsonly == true ? label.new(bar_index, y1, close > ema200con ? "Smart\nBuy" : "Buy", xloc.bar_index, yloc.price, #0395fc, label.style_label_up, color.white, size.normal) : na
+SmartSell =  bear and nbuysell and close < ema200con and smartsignalsonly == true ? label.new(bar_index, y2, close < ema200con ? "Smart\nSell" : "Sell", xloc.bar_index, yloc.price, #fd0205, label.style_label_down, color.white, size.normal) : na
+
+// Other initializations
+avg_volume = ta.sma(volume, 20)
+very_weak_multiplier = 0.5
+weak_multiplier = 1
+strong_multiplier = 1.5
+
+// Rejection handling
+var int[] demandRejections = array.new_int(history_of_demand_to_keep, 0)
+var int[] supplyRejections = array.new_int(history_of_demand_to_keep, 0)
+var int[] demandCreationBars = array.new_int(history_of_demand_to_keep, na)
+var int[] supplyCreationBars = array.new_int(history_of_demand_to_keep, na)
+
+var box[] current_demand_box = array.new_box(history_of_demand_to_keep, na)
+var box[] current_supply_box = array.new_box(history_of_demand_to_keep, na)
+
+
+f_check_demand_rejections() =>
+    for i = 0 to history_of_demand_to_keep - 1
+        if not na(array.get(demandCreationBars, i))
+            if bar_index - array.get(demandCreationBars, i) > 15 and bar_index - array.get(demandCreationBars, i) % 15 == 0
+                label.new(bar_index, high, "Checking demand rejection", color=#fd0205)
+                dBox = array.get(current_demand_box, i)
+                if (na(dBox))
+                    continue
+                withinBox = (high >= box.get_bottom(dBox) and high <= box.get_top(dBox)) or (close >= box.get_bottom(dBox) and close <= box.get_top(dBox))
+                bearishCandlesCount = math.sum(close < open ? 1 : 0, 15)
+                if withinBox and bearishCandlesCount >= 7
+                    label.new(bar_index, low, "Bearish count > 7", color=#0395fc)
+                    array.set(demandRejections, i, array.get(demandRejections, i) + 1)
+
+f_check_supply_rejections() =>
+    for i = 0 to history_of_demand_to_keep - 1
+        if not na(array.get(supplyCreationBars, i))
+            if bar_index - array.get(supplyCreationBars, i) > 15 and bar_index - array.get(supplyCreationBars, i) % 15 == 0
+                label.new(bar_index, low, "Checking supply rejection", color=#fd0205)
+                sBox = array.get(current_supply_box, i)
+                if (na(sBox))
+                    continue
+                withinBox = (low <= box.get_top(sBox) and low >= box.get_bottom(sBox)) or (close <= box.get_top(sBox) and close >= box.get_bottom(sBox))
+                bullishCandlesCount = math.sum(close > open ? 1 : 0, 15)
+                if withinBox and bullishCandlesCount >= 7
+                    label.new(bar_index, high, "Bullish count > 7", color=#0395fc)
+                    array.set(supplyRejections, i, array.get(supplyRejections, i) + 1)
+
+
+
+
+
+
+f_array_add_pop(array, new_value_to_add) =>
+    array.unshift(array, new_value_to_add)
+    array.pop(array)
+
+f_sh_sl_labels(array, swing_type) =>
+    var string label_text = na
+    if swing_type == 1
+        if array.get(array, 0) >= array.get(array, 1)
+            label_text := 'HH'
+        else
+            label_text := 'LH'
+        label.new(bar_index - swing_length, array.get(array,0), text = label_text, style=label.style_label_down, textcolor = color.white, color = color.new(color.white, 100), size = size.tiny)
+    else if swing_type == -1
+        if array.get(array, 0) >= array.get(array, 1)
+            label_text := 'HL'
+        else
+            label_text := 'LL'
+        label.new(bar_index - swing_length, array.get(array,0), text = label_text, style=label.style_label_up, textcolor = color.white, color = color.new(color.white, 100), size = size.tiny)
+
+f_check_overlapping(new_poi, box_array, atr) =>
+    atr_threshold = atr * 2
+    okay_to_draw = true
+    for i = 0 to array.size(box_array) - 1
+        top = box.get_top(array.get(box_array, i))
+        bottom = box.get_bottom(array.get(box_array, i))
+        poi = (top + bottom) / 2
+        upper_boundary = poi + atr_threshold
+        lower_boundary = poi - atr_threshold
+        if new_poi >= lower_boundary and new_poi <= upper_boundary
+            okay_to_draw := false
+            break
+        else 
+            okay_to_draw := true
+    okay_to_draw
+
+f_supply_demand(value_array, bn_array, box_array, label_array, box_type, atr) =>
+    atr_buffer = atr * (box_width / 10)
+    box_left = array.get(bn_array, 0)
+    box_right = bar_index + 20
+    var float box_top = 0.00
+    var float box_bottom = 0.00
+    var float poi = 0.00
+    if box_type == 1
+        box_top := array.get(value_array, 0)
+        box_bottom := box_top - atr_buffer
+        poi := (box_top + box_bottom) / 2
+    else if box_type == -1
+        box_bottom := array.get(value_array, 0)
+        box_top := box_bottom + atr_buffer
+        poi := (box_top + box_bottom) / 2
+    okay_to_draw = f_check_overlapping(poi, box_array, atr)
+    swing_volume = volume[swing_length]
+    var string strength_text = ""
+    
+    highest_volume_last_20 = ta.highest(volume, 20)
+    volume_percentage = math.round(swing_volume / highest_volume_last_20 * 100) 
+    volume_percentage := math.min(volume_percentage, 100)  // Cap the volume percentage to 100
+    
+
+
+    var extend_option = extend.right
+    if box_extend_option == "Right"
+        extend_option := extend.right
+    else if box_extend_option == "Both"
+        extend_option := extend.both
+    if box_type == 1 and okay_to_draw and s1
+        box.delete( array.get(box_array, array.size(box_array) - 5) )
+        f_array_add_pop(box_array, box.new( left = box_left, top = box_top, right = box_right, bottom = box_bottom, border_color = #fd020580, border_width=1,
+             bgcolor = supply_color, extend = extend_option, text = strength_text, text_halign = text.align_right, text_valign = text.align_center, text_color = color.white, text_size = size.small, xloc = xloc.bar_index))
+        box.delete( array.get(label_array, array.size(label_array) - 5) )
+        f_array_add_pop(label_array, box.new( left = box_left, top = poi, right = box_right, bottom = poi, border_color = #fd020580, border_width=1, border_style=line.style_dotted,
+             bgcolor = color.new(color.black,100), extend = extend_option,  text = '', text_halign = text.align_left, text_valign = text.align_center, text_color = color.white, text_size = size.small, xloc = xloc.bar_index))
+    else if box_type == -1 and okay_to_draw and s1
+        box.delete( array.get(box_array, array.size(box_array) - 5) )
+        f_array_add_pop(box_array, box.new( left = box_left, top = box_top, right = box_right, bottom = box_bottom, border_color = #0395fc80, border_width=1,
+             bgcolor = demand_color, extend = extend_option,  text = strength_text, text_halign = text.align_right, text_valign = text.align_center, text_color = color.white, text_size = size.small, xloc = xloc.bar_index))
+        box.delete( array.get(label_array, array.size(label_array) - 5) )
+        f_array_add_pop(label_array, box.new( left = box_left, top = poi, right = box_right, bottom = poi, border_color = #0395fc80, border_width=1, border_style=line.style_dotted,
+             bgcolor = color.new(color.black,100), extend = extend_option,  text = '', text_halign = text.align_left, text_valign = text.align_center, text_color = color.white, text_size = size.small, xloc = xloc.bar_index))
+
+f_sd_to_bos(box_array, bos_array, label_array, zone_type) =>
+    if zone_type == 1
+        for i = 0 to array.size(box_array) - 1
+            level_to_break = box.get_top(array.get(box_array,i))
+            if close >= level_to_break
+                box.delete(array.get(box_array, i))
+                box.delete(array.get(label_array, i))
+    if zone_type == -1
+        for i = 0 to array.size(box_array) - 1
+            level_to_break = box.get_bottom(array.get(box_array,i))
+            if close <= level_to_break
+                box.delete(array.get(box_array, i))
+                box.delete(array.get(label_array, i))
+
+f_extend_box_endpoint(box_array) =>
+    for i = 0 to array.size(box_array) - 1
+        box.set_right(array.get(box_array, i), bar_index + 30) // Extend only 20 bars
+
+atr567 = ta.atr(50)
+swing_high = ta.pivothigh(high, swing_length, swing_length)
+swing_low = ta.pivotlow(low, swing_length, swing_length)
+var swing_high_values = array.new_float(5,0.00)
+var swing_low_values = array.new_float(5,0.00)
+var swing_high_bns = array.new_int(5,0)
+var swing_low_bns = array.new_int(5,0)
+var current_supply_poi = array.new_box(history_of_demand_to_keep, na)
+var current_demand_poi = array.new_box(history_of_demand_to_keep, na)
+var supply_bos = array.new_box(5, na)
+var demand_bos = array.new_box(5, na)
+if not na(swing_high)
+    f_array_add_pop(swing_high_values, swing_high)
+    f_array_add_pop(swing_high_bns, bar_index[swing_length])
+    if show_price_action_labels
+        f_sh_sl_labels(swing_high_values, 1)
+    f_supply_demand(swing_high_values, swing_high_bns, current_supply_box, current_supply_poi, 1, atr567)
+else if not na(swing_low)
+    f_array_add_pop(swing_low_values, swing_low)
+    f_array_add_pop(swing_low_bns, bar_index[swing_length])
+    if show_price_action_labels
+        f_sh_sl_labels(swing_low_values, -1)
+    f_supply_demand(swing_low_values, swing_low_bns, current_demand_box, current_demand_poi, -1, atr567)
+f_sd_to_bos(current_supply_box, supply_bos, current_supply_poi, 1)
+f_sd_to_bos(current_demand_box, demand_bos, current_demand_poi, -1)
+f_extend_box_endpoint(current_supply_box)
+f_extend_box_endpoint(current_demand_box)
+
+
+
+
+// Inside the main execution, after the box is drawn, check for rejections
+if not na(swing_low)
+    f_array_add_pop(swing_low_values, swing_low)
+    f_array_add_pop(swing_low_bns, bar_index[swing_length])
+    if show_price_action_labels
+        f_sh_sl_labels(swing_low_values, -1)
+    f_supply_demand(swing_low_values, swing_low_bns, current_demand_box, current_demand_poi, -1, atr567)
+    f_check_demand_rejections()
+
+if not na(swing_high)
+    f_array_add_pop(swing_high_values, swing_high)
+    f_array_add_pop(swing_high_bns, bar_index[swing_length])
+    if show_price_action_labels
+        f_sh_sl_labels(swing_high_values, 1)
+    f_supply_demand(swing_high_values, swing_high_bns, current_supply_box, current_supply_poi, 1, atr567)
+    f_check_supply_rejections()
+
+
+
+trigger2 = bull ? 1 : 0
+countBull = ta.barssince(bull)
+countBear = ta.barssince(bear)
+trigger   = nz(countBull, bar_index) < nz(countBear, bar_index) ? 1 : 0
+atrBand = ta.atr(atrLen) * atrRisk
+atrStop = trigger == 1 ? low - atrBand : high + atrBand
+currentposition = countBull > countBear ?  'Sell' : 'Buy'
+
+
+
+lastTrade(close) => ta.valuewhen(bull or bear , close, 0)
+
+
+entry = levels ? label.new(time, close, "ENTRY " + str.tostring(lastTrade(close), decimals), xloc.bar_time, yloc.price, color.orange, label.style_label_left, color.white, size.normal) : na
+label.set_x(entry, label.get_x(entry) + math.round(ta.change(time) * lvlDistance))
+label.set_y(entry, lastTrade(close))
+label.delete(entry[1])
+
+
+
+stop_y = lastTrade(atrStop)
+stop  = levels ? label.new(time, close, "SL " + str.tostring(stop_y, decimals), xloc.bar_time, yloc.price, red2, label.style_label_left, color.white, size.normal) : na
+label.set_x(stop, label.get_x(stop) + math.round(ta.change(time) * lvlDistance))
+label.set_y(stop, stop_y)
+label.delete(stop[1])
+
+tp1Rl_y = (lastTrade(close)-lastTrade(atrStop))*1 + lastTrade(close)
+tp1Rl   = levels ? label.new(time, close, "1:1 TP " + str.tostring(tp1Rl_y, decimals), xloc.bar_time, yloc.price, green2, label.style_label_left, color.white, size.normal ) : na
+label.set_x(tp1Rl, label.get_x(tp1Rl) + math.round(ta.change(time) * lvlDistance))
+label.set_y(tp1Rl, tp1Rl_y)
+label.delete(tp1Rl[1])
+
+tp2RL_y = (lastTrade(close)-lastTrade(atrStop))*2 + lastTrade(close)
+tp2RL   = levels ? label.new(time, close, "2:1 TP " + str.tostring(tp2RL_y, decimals), xloc.bar_time, yloc.price, green2, label.style_label_left, color.white, size.normal) : na
+label.set_x(tp2RL, label.get_x(tp2RL) + math.round(ta.change(time) * lvlDistance))
+label.set_y(tp2RL, tp2RL_y)
+label.delete(tp2RL[1])
+
+tp3RL_y = (lastTrade(close)-lastTrade(atrStop))*3 + lastTrade(close)
+tp3RL   = levels ? label.new(time, close, "3:1 TP " + str.tostring(tp3RL_y, decimals), xloc.bar_time, yloc.price, green2, label.style_label_left, color.white, size.normal) : na
+label.set_x(tp3RL, label.get_x(tp3RL) + math.round(ta.change(time) * lvlDistance))
+label.set_y(tp3RL, tp3RL_y)
+label.delete(tp3RL[1])
+
+style = linesStyle == "SOLID" ? line.style_solid : linesStyle == "DASHED" ? line.style_dashed : line.style_dotted
+lineEntry = levels and lvlLines ? line.new(bar_index - (trigger == 0 ? countBull : countBear), lastTrade(close), bar_index + lvlDistance, lastTrade(close), xloc.bar_index, extend.none, color.orange, style, 2) : na, line.delete(lineEntry[1])
+lineStop  = levels and lvlLines ? line.new(bar_index - (trigger == 0 ? countBull : countBear), stop_y, bar_index + lvlDistance, stop_y, xloc.bar_index, extend.none, #fe0100, style, 2) : na, line.delete(lineStop[1])
+lineTp1Rl   = levels and lvlLines ? line.new(bar_index - (trigger == 0 ? countBull : countBear), tp1Rl_y, bar_index + lvlDistance, tp1Rl_y, xloc.bar_index, extend.none, green2, style, 2) : na, line.delete(lineTp1Rl[1])
+lineTp2RL   = levels and lvlLines ? line.new(bar_index - (trigger == 0 ? countBull : countBear), tp2RL_y, bar_index + lvlDistance, tp2RL_y, xloc.bar_index, extend.none, green2, style, 2) : na, line.delete(lineTp2RL[1])
+lineTp3RL   = levels and lvlLines ? line.new(bar_index - (trigger == 0 ? countBull : countBear), tp3RL_y, bar_index + lvlDistance, tp3RL_y, xloc.bar_index, extend.none, green2, style, 2) : na, line.delete(lineTp3RL[1])
+
+
+
+
+alertcondition(bull, title='Buy Signal', message = "BUY")
+alertcondition(bear, title='Buy Signal', message = "BUY") 
+
+
+
+
+
+//import protradingart/pta_plot/6 as pp 
+//pp.peakprofit(bull, bear)
+//
+////////////////////////////////////////////////////////////////////////////////////////////////
+// Functions
+// Functions
+f_chartTfInMinutes() =>
+    float _resInMinutes = timeframe.multiplier * (
+      timeframe.isseconds ? 1. / 60             :
+      timeframe.isminutes ? 1.                  :
+      timeframe.isdaily   ? 60. * 24            :
+      timeframe.isweekly  ? 60. * 24 * 7        :
+      timeframe.ismonthly ? 60. * 24 * 30.4375  : na)
+
+// Get components
+
+vosc = ta.obv - ta.ema(ta.obv, 20)
+bs   = ta.ema(nz(math.abs((open - close) / (high - low) * 100)), 3)
+ema  = ta.ema(close, 200)
+emaBull = close > ema
+equal_tf(res) => str.tonumber(res) == f_chartTfInMinutes()
+higher_tf(res) => str.tonumber(res) > f_chartTfInMinutes()
+too_small_tf(res) => (timeframe.isweekly and res=="1") or (timeframe.ismonthly and str.tonumber(res) < 10)
+securityNoRep(sym, res, src) =>
+    bool bull = na
+    bull := equal_tf(res) ? src : bull
+    bull := higher_tf(res) ? request.security(sym, res, src, barmerge.gaps_off, barmerge.lookahead_on) : bull
+    bull_array = request.security_lower_tf(syminfo.tickerid, higher_tf(res) ? str.tostring(f_chartTfInMinutes()) : too_small_tf(res) ? (timeframe.isweekly ? "3" : "10") : res, src)
+    if array.size(bull_array) > 1 and not equal_tf(res) and not higher_tf(res)
+        bull := array.pop(bull_array)
+    array.clear(bull_array)
+    bull
+
+TF1Bull   = securityNoRep(syminfo.tickerid, "1"   , emaBull)
+//TF3Bull   = securityNoRep(syminfo.tickerid, "3"   , emaBull)
+TF5Bull   = securityNoRep(syminfo.tickerid, "5"   , emaBull)
+//TF10Bull  = securityNoRep(syminfo.tickerid, "10"  , emaBull)
+TF15Bull  = securityNoRep(syminfo.tickerid, "15"  , emaBull)
+TF30Bull  = securityNoRep(syminfo.tickerid, "30"  , emaBull)
+TF60Bull  = securityNoRep(syminfo.tickerid, "60"  , emaBull)
+//TF120Bull = securityNoRep(syminfo.tickerid, "120" , emaBull)
+TF240Bull = securityNoRep(syminfo.tickerid, "240" , emaBull)
+//TF720Bull = securityNoRep(syminfo.tickerid, "720" , emaBull)
+TFDBull   = securityNoRep(syminfo.tickerid, "1440", emaBull)
+indicatorTF = "Chart"
+// Functions
+sqz(bbLen, bbMult, kcLen, kcMult, source) =>
+    upperBB = ta.sma(source, bbLen) + ta.stdev(source, bbLen) * bbMult
+    lowerBB = ta.sma(source, bbLen) - ta.stdev(source, bbLen) * bbMult
+    upperKC = ta.sma(source, kcLen) + ta.sma(ta.tr, kcLen) * kcMult
+    lowerKC = ta.sma(source, kcLen) - ta.sma(ta.tr, kcLen) * kcMult
+    sqzOn   = lowerBB > lowerKC and upperBB < upperKC
+    sqzOff  = lowerBB < lowerKC and upperBB > upperKC
+    [sqzOn, sqzOff]
+qqe(rsiLen, rsiSmooth, factor, source, bbLen, bbMult) =>
+    rsiMa     = ta.ema(ta.rsi(source, rsiLen), rsiSmooth)
+    delta     = ta.ema(ta.ema(math.abs(ta.mom(rsiMa, 1)), rsiLen * 2 - 1), rsiLen * 2 - 1) * factor
+    longBand  = 0.0, longBand  := rsiMa > longBand[1]  and rsiMa[1] > longBand[1]  ? math.max(longBand[1],  rsiMa - delta) : rsiMa - delta
+    shortBand = 0.0, shortBand := rsiMa < shortBand[1] and rsiMa[1] < shortBand[1] ? math.min(shortBand[1], rsiMa + delta) : rsiMa + delta
+    cross1    = ta.cross(rsiMa, shortBand[1])
+    cross2    = ta.cross(rsiMa, longBand[1])
+    trend     = 0.0, trend := cross1 ? 1 : cross2 ? -1 : nz(trend[1], 1)
+    fastDelta = trend == 1 ? longBand : shortBand
+    _hist     = rsiMa - 50
+    _line     = fastDelta - 50
+    [_, upper, lower] = ta.bb(_line, bbLen, bbMult)
+    [_hist, _line, upper, lower]
+
+// Get components
+cond(_offset) =>
+    top    = ta.highest(high, 10)
+    bot    = ta.lowest(low, 10)
+    osc    = ta.ema(hlc3, 5) - ta.ema(ohlc4, 20)
+    oscRis = osc > osc[1]
+    oscFal = osc < osc[1]
+    oscA0  = osc > 0
+    oscB0  = osc < 0
+    oscTop = oscFal and oscRis[1]
+    oscBot = oscRis and oscFal[1]
+    bullR  = oscB0 and oscBot and ((osc > ta.valuewhen(oscB0 and oscBot, osc, 1) and bot < ta.valuewhen(oscB0 and oscBot, bot, 1)))
+    bearR  = oscA0 and oscTop and ((osc < ta.valuewhen(oscA0 and oscTop, osc, 1) and top > ta.valuewhen(oscA0 and oscTop, top, 1)))
+    bullH  = oscB0 and oscBot and ((osc < ta.valuewhen(oscB0 and oscBot, osc, 1) and bot > ta.valuewhen(oscB0 and oscBot, bot, 1)))
+    bearH  = oscA0 and oscTop and ((osc > ta.valuewhen(oscA0 and oscTop, osc, 1) and top < ta.valuewhen(oscA0 and oscTop, top, 1)))
+    [sqzOn, sqzOff] = sqz(20, 2, 20, 2, close)
+    [_hist1, _line1, upper1, lower1] = qqe(6, 6, 3, close, 50, 0.001)
+    [_hist2, _line2, upper2, lower2] = qqe(6, 5, 1.618, close, 50, 1)
+    [_, _, tvr] = ta.dmi(14, 14)
+    [osc[_offset], oscRis[_offset], oscFal[_offset], oscA0[_offset], oscB0[_offset], oscTop[_offset], oscBot[_offset], bullR[_offset], bearR[_offset], bullH[_offset], bearH[_offset], sqzOn[_offset], sqzOff[_offset], _hist1[_offset], upper1[_offset], lower1[_offset], _hist2[_offset], _line2[_offset], tvr[_offset]]
+tf = indicatorTF == "Chart" ? timeframe.period : indicatorTF == "1 minute" ? "1" : indicatorTF == "3 minutes" ? "3" : indicatorTF == "5 minutes" ? "5" : indicatorTF == "10 minutes" ? "10" : indicatorTF == "15 minutes" ? "15" : indicatorTF == "30 minutes" ? "30" : indicatorTF == "45 minutes" ? "45" : indicatorTF == "1 hour" ? "60" : indicatorTF == "2 hours" ? "120" : indicatorTF == "3 hours" ? "180" : indicatorTF == "4 hours" ? "240" : indicatorTF == "12 hours" ? "720" : indicatorTF == "1 day" ? "1D" : indicatorTF == "1 week" ? "1W" : indicatorTF == "1 month" ? "1M" : na
+[osc, oscRis, oscFal, oscA0, oscB0, oscTop, oscBot, bullR, bearR, bullH, bearH, sqzOn, sqzOff, _hist1, upper1, lower1, _hist2, _line2, tvr] = request.security(syminfo.tickerid, tf, cond(indicatorTF != "Chart" and barstate.isrealtime ? 1 : 0))
+//colorTVR = tvr < 15 ? #F6525F : tvr > 15 and tvr < 25 ? #B2B5BE : #66BB6A
+// Plots
+//plot(Presets == "Money Moves TrendVR" ? tvr : na, "", colorTVR, editable=false)
+TrendText = "Trending"
+if tvr < 15 and tvr < 25
+    TrendText := "No trend"
+
+if tvr > 15 and tvr < 25
+    TrendText := "Ranging"
+//------------------------------------------------------------------------------------------------------- Volatitiry 
+//Calculates Volatility for Dashboard
+atrr = 3 * ta.atr(10)
+stdAtr = 2 * ta.stdev(atrr, 20)
+smaAtr = ta.sma(atrr, 20)
+topAtrDev = smaAtr + stdAtr
+bottomAtrDev = smaAtr - stdAtr
+calcDev = (atrr - bottomAtrDev) / (topAtrDev - bottomAtrDev)
+percentVol = 40 * calcDev + 30
+AvrLength = 21
+PercentFilter = 144
+xAavrVolume = ta.rma(volume, AvrLength)
+nResLess = volume * 100 / xAavrVolume < PercentFilter ? 0 : volume
+nRes = nResLess 
+clr = close < open ? #b2b5be : #00dbff
+//plot(nRes, color=clr, style=plot.style_columns, title='Volume Filter', transp=20)
+VolitiText = "Inactive"
+if nRes
+    VolitiText := "Active"
+//////////////////////////////////////////
+ema69 = ta.ema(close, 9)
+totalSentTxt = ema69 > ema69[2] ? 'Bullish' : ema69 < ema69[2] ? 'Bearish' : 'Flat'
+// INputs
+//Timezones
+tz_incr = 0
+use_exchange = false
+//------------------------------------------------------------------------------
+//Settings
+//-----------------------------------------------------------------------------{
+//Session A
+NYSes = true
+NYTxt = 'New York'
+NYTime = '1300-2200'
+//Session B
+LDSes = true
+sesb_txt = 'London'
+sesb_ses = '0700-1600'
+//Session C
+show_sesc = true
+sesc_txt = 'Tokyo'
+sesc_ses = '0000-0900'
+//Session D
+show_sesd = true
+sesd_txt = 'Sydney'
+sesd_ses = '2100-0600'
+//-----------------------------------------------------------------------------}
+//Sessions
+//-----------------------------------------------------------------------------{
+tff = timeframe.period
+
+var tz = use_exchange ? syminfo.timezone :
+  str.format('UTC{0}{1}', tz_incr >= 0 ? '+' : '-', math.abs(tz_incr))
+
+is_sesa = math.sign(nz(time(tff, NYTime, tz)))
+is_sesb = math.sign(nz(time(tff, sesb_ses, tz)))
+is_sesc = math.sign(nz(time(tff, sesc_ses, tz)))
+is_sesd = math.sign(nz(time(tff, sesd_ses, tz)))
+////////////////////////////////////////////
+SessionText = "Default"
+
+if is_sesd
+    SessionText := sesd_txt
+if is_sesc
+    SessionText := sesc_txt
+if is_sesb
+    SessionText := sesb_txt
+if is_sesa
+    SessionText := NYTxt
+if is_sesd and is_sesc
+    SessionText := "Sydney/Tokyo"
+if is_sesb and is_sesc
+    SessionText := "Tokyo/London"
+if is_sesb and is_sesa
+    SessionText := "London/Newyork"
+if is_sesa and is_sesd
+    SessionText := "Newyork/Sydney"
+//-----------------------------------------------------------------------------}
+//Overlays  color.green : color.red
+// 
+var dashboard_loc  = locationDashboard == "Top Right" ? position.top_right : locationDashboard == "Middle Right" ? position.middle_right : locationDashboard == "Bottom Right" ? position.bottom_right : locationDashboard == "Top Center" ? position.top_center : locationDashboard == "Middle Center" ? position.middle_center : locationDashboard == "Bottom Center" ? position.bottom_center : locationDashboard == "Top Left" ? position.top_left : locationDashboard == "Middle Left" ? position.middle_left : position.bottom_left
+var dashboard_size = sizeDashboard == "Large" ? size.large : sizeDashboard == "Normal" ? size.normal : sizeDashboard == "Small" ? size.small : size.tiny
+var dashboard      = showDashboard ? table.new(dashboard_loc, 3, 8, color.rgb(30, 34, 45 , 60), #3d384300, 2, color.rgb(30, 34, 45 , 60), 1) : na
+dashboard_cell(column, row, txt, signal=false) => table.cell(dashboard, column, row, txt, 0, 0, signal ? #000000 : color.white, text_size=dashboard_size)
+dashboard_cell_bg(column, row, col) => table.cell_set_bgcolor(dashboard, column, row, col)
+if barstate.islast and showDashboard
+// MTF Trend 
+    dashboard_cell(0, 0 , "MTF")
+    dashboard_cell(0, 1 , "M1") , dashboard_cell_bg(0, 1 , TF1Bull  ? #0395fc : #fd0205)
+    dashboard_cell(0, 2 , "M5") , dashboard_cell_bg(0, 2 , TF5Bull  ? #0395fc : #fd0205)
+    dashboard_cell(0, 3 , "M15") , dashboard_cell_bg(0, 3 , TF15Bull  ? #0395fc : #fd0205)
+    dashboard_cell(0, 4 , "M30") , dashboard_cell_bg(0, 4 , TF30Bull  ? #0395fc : #fd0205)
+    dashboard_cell(0, 5 , "1H") , dashboard_cell_bg(0, 5 , TF60Bull  ? #0395fc : #fd0205)
+    dashboard_cell(0, 6 , "4H") , dashboard_cell_bg(0, 6 , TF240Bull  ? #0395fc : #fd0205)
+    dashboard_cell(0, 7 , "D1") , dashboard_cell_bg(0, 7 , TFDBull  ? #0395fc : #fd0205)
+// Middel part
+    dashboard_cell(1, 0 , "💎 Diamond Algo 💎")  
+    dashboard_cell(1, 1 , "👉 Current Position           ") 
+    dashboard_cell(1, 2 , "🔎 Current Sensitivity        ") 
+    dashboard_cell(1, 3 , "🔥 Market State               ") 
+    dashboard_cell(1, 4 , "⚠️ Volatility                    ") 
+    dashboard_cell(1, 5 , "🏦 Institutional Activity    ") 
+    dashboard_cell(1, 6 , "🕒 Current Session (UTC)  ") 
+    dashboard_cell(1, 7 , "🌊 Trend Pressure           ") 
+// End part
+    dashboard_cell(2, 0 , "")
+    dashboard_cell(2, 1 , str.tostring(currentposition)) 
+    dashboard_cell(2, 2 , str.tostring(nsensitivity)) 
+    dashboard_cell(2, 3 , TrendText) 
+    dashboard_cell(2, 4 , str.tostring(percentVol, '##.##') + '%') 
+    dashboard_cell(2, 5 , VolitiText) 
+    dashboard_cell(2, 6 , SessionText) 
+    dashboard_cell(2, 7 , totalSentTxt) 
+
+// Other Features
+// inputs //
+//{
+trailType = 'modified'
+ATRPeriod = 14
+ATRFactor = 6
+smoothing = 8
+
+norm_o = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, open)
+norm_h = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, high)
+norm_l = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, low)
+norm_c = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, close)
+//}
+
+//////// FUNCTIONS //////////////
+//{
+// Wilders ma //
+Wild_ma(_src, _malength) =>
+    _wild = 0.0
+    _wild := nz(_wild[1]) + (_src - nz(_wild[1])) / _malength
+    _wild
+
+/////////// TRUE RANGE CALCULATIONS ///////////////// 
+HiLo = math.min(norm_h - norm_l, 1.5 * nz(ta.sma(norm_h - norm_l, ATRPeriod)))
+
+HRef = norm_l <= norm_h[1] ? norm_h - norm_c[1] : norm_h - norm_c[1] - 0.5 * (norm_l - norm_h[1])
+
+LRef = norm_h >= norm_l[1] ? norm_c[1] - norm_l : norm_c[1] - norm_l - 0.5 * (norm_l[1] - norm_h)
+
+trueRange = trailType == 'modified' ? math.max(HiLo, HRef, LRef) : math.max(norm_h - norm_l, math.abs(norm_h - norm_c[1]), math.abs(norm_l - norm_c[1]))
+//}
+
+
+/////////// TRADE LOGIC ////////////////////////
+//{
+loss = ATRFactor * Wild_ma(trueRange, ATRPeriod)
+
+Up = norm_c - loss
+Dn = norm_c + loss
+
+TrendUp = Up
+TrendDown = Dn
+Trend = 1
+
+TrendUp := norm_c[1] > TrendUp[1] ? math.max(Up, TrendUp[1]) : Up
+TrendDown := norm_c[1] < TrendDown[1] ? math.min(Dn, TrendDown[1]) : Dn
+
+Trend := norm_c > TrendDown[1] ? 1 : norm_c < TrendUp[1] ? -1 : nz(Trend[1], 1)
+trail = Trend == 1 ? TrendUp : TrendDown
+
+ex = 0.0
+ex := ta.crossover(Trend, 0) ? norm_h : ta.crossunder(Trend, 0) ? norm_l : Trend == 1 ? math.max(ex[1], norm_h) : Trend == -1 ? math.min(ex[1], norm_l) : ex[1]
+//}
+
+// //////// PLOT TP and SL /////////////
+
+////// FIBONACCI LEVELS ///////////
+//{
+state = Trend == 1 ? 'long' : 'short'
+
+fib1Level = 61.8
+fib2Level = 78.6
+fib3Level = 88.6
+
+f1 = ex + (trail - ex) * fib1Level / 100
+f2 = ex + (trail - ex) * fib2Level / 100
+f3 = ex + (trail - ex) * fib3Level / 100
+l100 = trail + 0
+
+fill(plot(ShowSmartTrail ? (ta.sma(trail, smoothing)) : na, 'Trailingstop', style=plot.style_line, color=Trend == 1 ? color.new(#2157f9, 0) : Trend == -1 ? color.new(#ff1100, 0) : na),
+ plot( ShowSmartTrail ? (ta.sma(f2, smoothing)) : na, 'Fib 2', style=plot.style_line, display=display.none),
+ color=state == 'long' ? color.new(#2157f9, 80) : state == 'short' ? color.new(#ff1100, 80) : na)
+//}
+// Trend Lines
+shortPeriod = 30
+longPeriod = 100
+
+if barstate.islast
+    float lowest_y2 = 60000
+    float lowest_x2 = 0
+
+    float highest_y2 = 0
+    float highest_x2 = 0
+
+
+    for i = 1 to shortPeriod by 1
+        if low[i] < lowest_y2
+            lowest_y2 := low[i]
+            lowest_x2 := i
+            lowest_x2
+        if high[i] > highest_y2
+            highest_y2 := high[i]
+            highest_x2 := i
+            highest_x2
+
+    float lowest_y1 = 60000
+    float lowest_x1 = 0
+
+    float highest_y1 = 0
+    float highest_x1 = 0
+
+    for j = shortPeriod + 1 to longPeriod by 1
+        if low[j] < lowest_y1
+            lowest_y1 := low[j]
+            lowest_x1 := j
+            lowest_x1
+        if high[j] > highest_y1
+            highest_y1 := high[j]
+            highest_x1 := j
+            highest_x1
+
+    sup = Showtrendlines == true ? line.new(x1=bar_index[lowest_x1], y1=lowest_y1, x2=bar_index[lowest_x2], y2=lowest_y2, extend=extend.right, width=2, color=#0598ff) : na
+    res = Showtrendlines == true ? line.new(x1=bar_index[highest_x1], y1=highest_y1, x2=bar_index[highest_x2], y2=highest_y2, extend=extend.right, width=2, color=#fe0101) : na
+    line.delete(sup[1])
+    line.delete(res[1])
+    if ta.crossunder(close, line.get_price(sup, bar_index[0]))
+        alert('break down trendline', freq=alert.freq_once_per_bar_close)
+
+    if ta.crossover(close, line.get_price(res, bar_index[0]))
+        alert('break upper trendline', freq=alert.freq_once_per_bar_close)
+
+// Alerts
+
+buyalert     = input(true, "Buy Alert", group = 'Alerts')
+sellalert     = input(true, "Sell Alert", group = 'Alerts')
+
+if bull and buyalert
+    alert("Buy Alert",alert.freq_once_per_bar_close)
+
+if bear and sellalert
+    alert("Sell Alert",alert.freq_once_per_bar_close)
+// Telegram Join Us >> https://t.me/eyops
+//...................../´¯¯/)
+//...................,/¯.../
+//.................../..../
+//.............../´¯/'..'/´¯¯`·¸
+//.........../'/.../..../....../¨¯\
+//..........('(....´...´... ¯~/'..')
+//...........\..............'...../
+//............\....\.........._.·´
+//.............\..............(
+//..............\..............\
+//----
+//---------
+// Telegram Join Us >> https://t.me/eyops

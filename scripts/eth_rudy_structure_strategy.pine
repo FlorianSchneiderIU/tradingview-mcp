@@ -1,0 +1,235 @@
+//@version=6
+strategy(
+    title                 = "ETH Rudy Structure Retest RR+",
+    shorttitle            = "ETHRudy",
+    overlay               = true,
+    pyramiding            = 0,
+    initial_capital       = 10000,
+    default_qty_type      = strategy.percent_of_equity,
+    default_qty_value     = 10,
+    commission_type       = strategy.commission.percent,
+    commission_value      = 0.06,
+    slippage              = 2,
+    calc_on_every_tick    = false,
+    process_orders_on_close = false,
+    max_bars_back         = 3000
+)
+
+// This strategy is a compact, non-repainting derivative of the Rudy baseline ideas:
+// confirmed structure breaks, higher-timeframe bias, and displacement-gap retests.
+// Recommended chart timeframe: 15m on BINANCE:ETHUSDT.
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+grp_exec = "Execution"
+i_use_session = input.bool(false, "Use UTC session filter", group = grp_exec)
+i_session = input.session("0600-2100", "Session (UTC)", group = grp_exec)
+i_cooldown_bars = input.int(6, "Cooldown bars", minval = 1, maxval = 200, group = grp_exec)
+i_allow_longs = input.bool(true, "Enable longs", group = grp_exec)
+i_allow_shorts = input.bool(true, "Enable shorts", group = grp_exec)
+
+grp_bias = "Higher Timeframe Bias"
+i_htf = input.timeframe("60", "Bias timeframe", group = grp_bias)
+i_htf_ema_len = input.int(100, "HTF EMA length", minval = 20, maxval = 400, group = grp_bias)
+i_htf_rsi_len = input.int(14, "HTF RSI length", minval = 2, maxval = 50, group = grp_bias)
+i_htf_rsi_bull = input.int(52, "HTF RSI bull threshold", minval = 45, maxval = 70, group = grp_bias)
+i_htf_rsi_bear = input.int(48, "HTF RSI bear threshold", minval = 30, maxval = 55, group = grp_bias)
+
+grp_structure = "Structure"
+i_swing_len = input.int(3, "Swing length", minval = 2, maxval = 20, group = grp_structure)
+i_break_window = input.int(8, "Max bars between BOS and gap", minval = 1, maxval = 40, group = grp_structure)
+i_zone_life = input.int(18, "Retest window (bars)", minval = 2, maxval = 80, group = grp_structure)
+i_gap_atr = input.float(0.10, "Min gap size (ATR)", minval = 0.05, step = 0.01, group = grp_structure)
+i_impulse_atr = input.float(0.30, "Min impulse body (ATR)", minval = 0.1, step = 0.05, group = grp_structure)
+i_reclaim_pct = input.float(0.45, "Close-through zone ratio", minval = 0.1, maxval = 1.0, step = 0.05, group = grp_structure)
+
+grp_filter = "Filters"
+i_fast_ema = input.int(21, "Fast EMA", minval = 5, maxval = 100, group = grp_filter)
+i_slow_ema = input.int(55, "Slow EMA", minval = 20, maxval = 200, group = grp_filter)
+i_adx_len = input.int(14, "ADX length", minval = 5, maxval = 50, group = grp_filter)
+i_adx_min = input.float(12.0, "Min ADX", minval = 5.0, step = 0.5, group = grp_filter)
+i_vol_len = input.int(20, "Volume SMA length", minval = 5, maxval = 100, group = grp_filter)
+i_vol_mult = input.float(0.85, "Min volume / SMA", minval = 0.5, step = 0.05, group = grp_filter)
+i_rsi_len = input.int(14, "LTF RSI length", minval = 2, maxval = 50, group = grp_filter)
+i_long_rsi_max = input.int(72, "Max RSI for longs", minval = 50, maxval = 90, group = grp_filter)
+i_short_rsi_min = input.int(28, "Min RSI for shorts", minval = 10, maxval = 50, group = grp_filter)
+
+grp_risk = "Risk"
+i_rr = input.float(1.5, "Target RR", minval = 1.5, step = 0.1, group = grp_risk)
+i_stop_atr = input.float(0.35, "ATR stop buffer", minval = 0.05, step = 0.05, group = grp_risk)
+
+//------------------------------------------------------------------------------
+// Core calculations
+//------------------------------------------------------------------------------
+in_session = not i_use_session or not na(time(timeframe.period, i_session, "UTC"))
+
+atr = ta.atr(14)
+rsi = ta.rsi(close, i_rsi_len)
+ema_fast = ta.ema(close, i_fast_ema)
+ema_slow = ta.ema(close, i_slow_ema)
+[_, _, adx] = ta.dmi(i_adx_len, i_adx_len)
+vol_sma = ta.sma(volume, i_vol_len)
+
+trend_bull = close > ema_fast and ema_fast > ema_slow
+trend_bear = close < ema_fast and ema_fast < ema_slow
+vol_ok = volume >= vol_sma * i_vol_mult
+adx_ok = adx >= i_adx_min
+
+// Use only completed higher-timeframe bars to avoid cross-timeframe repaint.
+htf_close = request.security(syminfo.tickerid, i_htf, close[1], lookahead = barmerge.lookahead_off)
+htf_ema = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_htf_ema_len)[1], lookahead = barmerge.lookahead_off)
+htf_rsi = request.security(syminfo.tickerid, i_htf, ta.rsi(close, i_htf_rsi_len)[1], lookahead = barmerge.lookahead_off)
+
+bias_bull = htf_close > htf_ema and htf_rsi >= i_htf_rsi_bull
+bias_bear = htf_close < htf_ema and htf_rsi <= i_htf_rsi_bear
+
+//------------------------------------------------------------------------------
+// Confirmed structure points
+//------------------------------------------------------------------------------
+pivot_high = ta.pivothigh(high, i_swing_len, i_swing_len)
+pivot_low = ta.pivotlow(low, i_swing_len, i_swing_len)
+
+var float last_swing_high = na
+var float last_swing_low = na
+var int last_swing_high_bar = na
+var int last_swing_low_bar = na
+var int last_bull_bos_bar = na
+var int last_bear_bos_bar = na
+
+if not na(pivot_high)
+    last_swing_high := pivot_high
+    last_swing_high_bar := bar_index - i_swing_len
+
+if not na(pivot_low)
+    last_swing_low := pivot_low
+    last_swing_low_bar := bar_index - i_swing_len
+
+bull_bos = barstate.isconfirmed and not na(last_swing_high) and close > last_swing_high and bar_index > nz(last_swing_high_bar, bar_index)
+bear_bos = barstate.isconfirmed and not na(last_swing_low) and close < last_swing_low and bar_index > nz(last_swing_low_bar, bar_index)
+
+if bull_bos
+    last_bull_bos_bar := bar_index
+
+if bear_bos
+    last_bear_bos_bar := bar_index
+
+//------------------------------------------------------------------------------
+// Displacement gap zones
+//------------------------------------------------------------------------------
+body_size = math.abs(close - open)
+
+bull_gap_now = barstate.isconfirmed and low > high[2] and (low - high[2]) >= atr * i_gap_atr and body_size >= atr * i_impulse_atr
+bear_gap_now = barstate.isconfirmed and high < low[2] and (low[2] - high) >= atr * i_gap_atr and body_size >= atr * i_impulse_atr
+
+var float bull_zone_high = na
+var float bull_zone_low = na
+var float bull_zone_stop_ref = na
+var int bull_zone_bar = na
+
+var float bear_zone_high = na
+var float bear_zone_low = na
+var float bear_zone_stop_ref = na
+var int bear_zone_bar = na
+
+recent_bull_bos = not na(last_bull_bos_bar) and (bar_index - last_bull_bos_bar) <= i_break_window
+recent_bear_bos = not na(last_bear_bos_bar) and (bar_index - last_bear_bos_bar) <= i_break_window
+
+if i_allow_longs and bull_gap_now and recent_bull_bos and bias_bull and trend_bull and adx_ok and vol_ok and rsi <= i_long_rsi_max
+    bull_zone_high := low
+    bull_zone_low := high[2]
+    bull_zone_stop_ref := nz(last_swing_low, low[2])
+    bull_zone_bar := bar_index
+
+if i_allow_shorts and bear_gap_now and recent_bear_bos and bias_bear and trend_bear and adx_ok and vol_ok and rsi >= i_short_rsi_min
+    bear_zone_high := low[2]
+    bear_zone_low := high
+    bear_zone_stop_ref := nz(last_swing_high, high[2])
+    bear_zone_bar := bar_index
+
+bull_zone_valid = not na(bull_zone_bar) and bar_index > bull_zone_bar and (bar_index - bull_zone_bar) <= i_zone_life
+bear_zone_valid = not na(bear_zone_bar) and bar_index > bear_zone_bar and (bar_index - bear_zone_bar) <= i_zone_life
+
+bull_zone_range = bull_zone_valid ? bull_zone_high - bull_zone_low : na
+bear_zone_range = bear_zone_valid ? bear_zone_high - bear_zone_low : na
+
+bull_reclaim_level = bull_zone_valid ? bull_zone_low + bull_zone_range * i_reclaim_pct : na
+bear_reclaim_level = bear_zone_valid ? bear_zone_high - bear_zone_range * i_reclaim_pct : na
+
+var int last_signal_bar = na
+cooldown_ok = na(last_signal_bar) or (bar_index - last_signal_bar) >= i_cooldown_bars
+
+long_retest = bull_zone_valid and low <= bull_zone_high and close >= bull_reclaim_level and close > open
+short_retest = bear_zone_valid and high >= bear_zone_low and close <= bear_reclaim_level and close < open
+
+long_signal = i_allow_longs and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and bias_bull and trend_bull and adx_ok and vol_ok and rsi <= i_long_rsi_max and long_retest
+short_signal = i_allow_shorts and barstate.isconfirmed and in_session and cooldown_ok and strategy.position_size == 0 and bias_bear and trend_bear and adx_ok and vol_ok and rsi >= i_short_rsi_min and short_retest
+
+//------------------------------------------------------------------------------
+// Order staging
+//------------------------------------------------------------------------------
+var int pending_direction = 0
+var float pending_stop = na
+var float active_stop = na
+var float active_target = na
+
+if long_signal
+    stop_candidate = math.min(bull_zone_low, bull_zone_stop_ref) - atr * i_stop_atr
+    if close - stop_candidate > syminfo.mintick * 2
+        pending_direction := 1
+        pending_stop := stop_candidate
+        last_signal_bar := bar_index
+        strategy.entry("Long", strategy.long)
+        bull_zone_bar := na
+
+if short_signal
+    stop_candidate = math.max(bear_zone_high, bear_zone_stop_ref) + atr * i_stop_atr
+    if stop_candidate - close > syminfo.mintick * 2
+        pending_direction := -1
+        pending_stop := stop_candidate
+        last_signal_bar := bar_index
+        strategy.entry("Short", strategy.short)
+        bear_zone_bar := na
+
+new_long_fill = strategy.position_size > 0 and strategy.position_size[1] <= 0
+new_short_fill = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+if new_long_fill
+    active_stop := math.min(pending_stop, strategy.position_avg_price - syminfo.mintick)
+    risk = strategy.position_avg_price - active_stop
+    active_target := strategy.position_avg_price + risk * i_rr
+    pending_direction := 0
+    pending_stop := na
+
+if new_short_fill
+    active_stop := math.max(pending_stop, strategy.position_avg_price + syminfo.mintick)
+    risk = active_stop - strategy.position_avg_price
+    active_target := strategy.position_avg_price - risk * i_rr
+    pending_direction := 0
+    pending_stop := na
+
+if strategy.position_size > 0 and not na(active_stop) and not na(active_target)
+    strategy.exit("Long-X", "Long", stop = active_stop, limit = active_target)
+
+if strategy.position_size < 0 and not na(active_stop) and not na(active_target)
+    strategy.exit("Short-X", "Short", stop = active_stop, limit = active_target)
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    active_stop := na
+    active_target := na
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+plot(ema_fast, "EMA Fast", color = color.new(color.orange, 0))
+plot(ema_slow, "EMA Slow", color = color.new(color.red, 10))
+
+plot(bull_zone_valid ? bull_zone_high : na, "Bull FVG High", color = color.new(color.lime, 35), style = plot.style_linebr)
+plot(bull_zone_valid ? bull_zone_low : na, "Bull FVG Low", color = color.new(color.lime, 65), style = plot.style_linebr)
+plot(bear_zone_valid ? bear_zone_high : na, "Bear FVG High", color = color.new(color.red, 65), style = plot.style_linebr)
+plot(bear_zone_valid ? bear_zone_low : na, "Bear FVG Low", color = color.new(color.red, 35), style = plot.style_linebr)
+
+plotshape(long_signal, title = "Long Signal", style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny, text = "L")
+plotshape(short_signal, title = "Short Signal", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny, text = "S")
+
+bgcolor(in_session ? na : color.new(color.gray, 92), title = "Out of Session")

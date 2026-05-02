@@ -1,0 +1,83 @@
+//@version=5
+indicator("VOLKAN 30DK KRİPTO", overlay=true)
+
+// === ALMA Hesaplaması ===
+alma_length = 20
+alma_offset = 0.85
+alma_sigma = 6
+alma = ta.alma(close, alma_length, alma_offset, alma_sigma)
+
+// === Stoch RSI (3, 3, 14, 14) Hesaplaması ===
+stoch_rsi_length = 14
+stoch_rsi_k_length = 3
+stoch_rsi_d_length = 3
+rsi_length = 14
+
+// RSI hesaplama
+rsi = ta.rsi(close, rsi_length)
+
+// RSI'nın en yüksek ve en düşük değerleri
+rsi_high = ta.highest(rsi, stoch_rsi_length)
+rsi_low = ta.lowest(rsi, stoch_rsi_length)
+
+// Stoch RSI hesaplama
+stoch_rsi = (rsi - rsi_low) / (rsi_high - rsi_low) * 100
+stoch_rsi_k = ta.sma(stoch_rsi, stoch_rsi_k_length) // %K
+stoch_rsi_d = ta.sma(stoch_rsi_k, stoch_rsi_d_length) // %D
+
+// === Alış Koşulları ===
+price_above_alma = ta.crossover(close, alma)  // Fiyat ALMA'yı yukarı kesiyor
+stoch_k_above_20 = ta.crossover(stoch_rsi_k, 20) // Stoch RSI %K 20'yi yukarı kesiyor
+k_above_d = stoch_rsi_k > stoch_rsi_d // %K, %D'den büyük
+
+// Al sinyali için koşul
+buy_signal = price_above_alma and stoch_k_above_20 and k_above_d
+
+// === Satış Koşulları ===
+price_below_alma = ta.crossunder(close, alma)  // Fiyat ALMA'yı aşağı kesiyor
+stoch_k_below_80 = ta.crossunder(stoch_rsi_k, 80) // Stoch RSI %K 80'i aşağı kesiyor
+k_below_d = stoch_rsi_k < stoch_rsi_d // %K, %D'den küçük
+
+// Sat sinyali için koşul
+sell_signal = price_below_alma and stoch_k_below_80 and k_below_d
+
+// === Al Sinyali ve TP Seviyeleri ===
+if buy_signal
+    // AL sinyali yukarı ok
+    label.new(bar_index, low, "▲", style=label.style_label_up, color=#fc08cf, textcolor=color.white, size=size.normal)
+
+    // TP seviyeleri hesaplama (Alış için)
+    tp1 = close * 1.005 // %0.5 kar hedefi
+    tp2 = close * 1.01  // %1 kar hedefi
+    tp3 = close * 1.015 // %1.5 kar hedefi
+    tp4 = close * 1.02  // %2 kar hedefi
+
+    // TP seviyelerini çizme
+    line.new(x1=bar_index, y1=tp1, x2=bar_index + 1, y2=tp1, width=1, color=#fb05ad, style=line.style_solid)
+    line.new(x1=bar_index, y1=tp2, x2=bar_index + 1, y2=tp2, width=1, color=#fb05ad, style=line.style_solid)
+    line.new(x1=bar_index, y1=tp3, x2=bar_index + 1, y2=tp3, width=1, color=#fb05ad, style=line.style_solid)
+    line.new(x1=bar_index, y1=tp4, x2=bar_index + 1, y2=tp4, width=1, color=#fb05ad, style=line.style_solid)
+
+    // Alarm oluşturma
+    alert("AL sinyali oluştu!", alert.freq_once_per_bar)
+
+
+// === Sat Sinyali ve TP Seviyeleri ===
+if sell_signal
+    // SAT sinyali aşağı ok
+    label.new(bar_index, high, "▼", style=label.style_label_down, color=#08fcfc, textcolor=color.white, size=size.normal)
+
+    // TP seviyeleri hesaplama (Satış için)
+    tp1 = close * 0.995 // %0.5 kar hedefi
+    tp2 = close * 0.99  // %1 kar hedefi
+    tp3 = close * 0.985 // %1.5 kar hedefi
+    tp4 = close * 0.98  // %2 kar hedefi
+
+    // TP seviyelerini çizme
+    line.new(x1=bar_index, y1=tp1, x2=bar_index + 1, y2=tp1, width=1, color=#05fdfd, style=line.style_solid)
+    line.new(x1=bar_index, y1=tp2, x2=bar_index + 1, y2=tp2, width=1, color=#05fdfd, style=line.style_solid)
+    line.new(x1=bar_index, y1=tp3, x2=bar_index + 1, y2=tp3, width=1, color=#05fdfd, style=line.style_solid)
+    line.new(x1=bar_index, y1=tp4, x2=bar_index + 1, y2=tp4, width=1, color=#05fdfd, style=line.style_solid)
+
+    // Alarm oluşturma
+    alert("SAT sinyali oluştu!", alert.freq_once_per_bar)

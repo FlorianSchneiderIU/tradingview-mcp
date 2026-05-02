@@ -1,0 +1,250 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Steversteves
+//        _            _          _         _                        _          _      _          _      _               _                      _           _        
+//       / /\         / /\       /\ \     /\ \                      /\ \       /\ \   /\ \    _ / /\   / /\             /\ \                   /\ \       / /\       
+//      / /  \       / /  \      \_\ \   /  \ \                    /  \ \     /  \ \__\ \ \  /_/ / /__/ /  \           /  \ \                  \_\ \   __/ /  \      
+//     / / /\ \__   / / /\ \     /\__ \ / /\ \ \     ____         / /\ \ \   / /\ \___\\ \ \ \___\//___/ /\ \         / /\ \ \                 /\__ \ /___/ /\ \     
+//    / / /\ \___\ / / /\_\/    / /_ \ \\/_/\ \ \  /\____/\      / / /\ \_\ / / /\/___// / /  \ \ \\___\/\ \ \       / / /\ \_\               / /_ \ \\___\/\ \ \    
+//    \ \ \ \/___// / /        / / /\ \ \    \ \ \ \/____\/     / /_/_ \/_// / /       \ \ \   \_\ \      \ \ \     / /_/_ \/_/              / / /\ \ \      \ \ \   
+//     \ \ \      \ \ \   _   / / /  \/_/_   / / / /\____/\    / /____/\  / / /         \ \ \  / / /       \ \ \   / /____/\                / / /  \/_/       \ \ \  
+// _    \ \ \      \ \ \/ /\ / / /      /\ \/ / /  \/____\/   / /\____\/ / / /           \ \ \/ / /         \ \ \ / /\____\/___________    / / /               \ \ \ 
+///_/\__/ / /       \ \ \/ // / /       \ \/ / /             / / /______ \ \ \__          \ \ \/ /        __/ / // / /  ___/__________/\  / / /              __/ / / 
+//\ \/___/ /         \ \  //_/ /         \  / /             / / /_______\ \ \___\          \ \  /        /___/ // / /  /__________    \ \/_/ /              /___/ /  
+// \_____\/           \_\/ \_\/           \/_/              \/__________/  \/___/           \_\/         \___\/ \/_/   \____\/    \____\/\_\/               \___\/   
+
+
+//@version=6
+indicator("Machine Learning Pivot Points (KNN) [SS]", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+g1 = "Pivots" 
+g2 = "Machine Learning Parameters" 
+g3 = "Helper Tables" 
+
+//User inputs 
+user_pivs = input.int(10, "Bars Left/Right", group = g1) 
+knn_clusters = input.int(2, "KNN Clusters", group = g2, tooltip = "The more clusters, the more strict the algorithm will be, suggested is 2.")
+len = input.int(20, "Pivot Window", group = g2, tooltip = "This determines the similarity lookback. As a rule, it should be at least double your pivot length. So if you are using 10 bars left/right, you should be looking at 20 bars min.")
+show_direction_helper = input.bool(true, "Show Directional Helper (Top Right)", group = g3, tooltip = "Gives you the current directional bias and confidence level.")
+show_stats = input.bool(true, "Show backtest table")
+
+// Regression metrics 
+get_historical_slope(float src, int start_index, int window_len) =>
+    float sumX  = 0.0
+    float sumY  = 0.0
+    float sumXY = 0.0
+    float sumX2 = 0.0
+
+    for i = start_index to (start_index + window_len - 1)
+        float x = i // Bar index or relative index
+        float y = src[i]
+        sumX  += x
+        sumY  += y
+        sumXY += x * y
+        sumX2 += x * x
+        
+    float slope = (window_len * sumXY - sumX * sumY) / (window_len * sumX2 - math.pow(sumX, 2))
+    slope
+
+// Defining pivots 
+piv_hi = ta.pivothigh(high, 10, 10)
+piv_lo = ta.pivotlow(low, 10, 10)
+
+// Array for regressions 
+var piv_hi_slopes = array.new_float()
+var piv_lo_slopes = array.new_float()
+
+
+if not na(piv_hi)
+    float slope_sig = get_historical_slope(high, 10, len)
+    array.push(piv_hi_slopes, slope_sig)
+
+
+if not na(piv_lo)
+    float slope_sig = get_historical_slope(low, 10, len)
+    array.push(piv_lo_slopes, slope_sig)
+    
+
+// Calculating the current slope of the pa # helper function 
+f_rolling_slope(float src, int len) =>
+    y_hat_0 = ta.linreg(src, len, 0)
+    y_hat_1 = ta.linreg(src, len, 1)
+    float slope = y_hat_0 - y_hat_1
+    slope
+
+// Calculate the slope based on user def inputs 
+current_slope = f_rolling_slope(close, len)
+
+
+// KNN ML 
+f_knn_k4_dist(float current_val, float[] history_array) =>
+    float avg_dist = 1000000.0
+    int k = knn_clusters
+    if array.size(history_array) >= k
+        float[] distances = array.new_float(0)
+        for i = 0 to array.size(history_array) - 1
+            array.push(distances, math.abs(current_val - array.get(history_array, i)))
+        array.sort(distances, order.ascending)
+        
+
+        float sum = 0.0
+        for i = 0 to k - 1
+            sum += array.get(distances, i)
+        avg_dist := sum / k
+    else if array.size(history_array) > 0
+        avg_dist := math.abs(current_val - array.get(history_array, 0))
+    
+    avg_dist
+
+// Classify knn logic 
+dist_to_hi = f_knn_k4_dist(current_slope, piv_hi_slopes)
+dist_to_lo = f_knn_k4_dist(current_slope, piv_lo_slopes)
+
+// Confidence metrics from knn 
+float total_dist = dist_to_hi + dist_to_lo
+confidence = total_dist > 0 ? 100 * (1 - (dist_to_hi / total_dist)) : 0.0
+
+
+// arbitrator 
+string knn_class = "Neutral"
+
+
+if dist_to_hi < dist_to_lo
+    knn_class := "Approaching Pivot High"
+    confidence := 100 * (1 - (dist_to_hi / (dist_to_hi + dist_to_lo)))
+else if dist_to_lo < dist_to_hi
+    knn_class := "Approaching Pivot Low"
+    confidence := 100 * (1 - (dist_to_lo / (dist_to_hi + dist_to_lo)))
+
+var table data = table.new(position.top_right, 5, 5, bgcolor = color.gray)
+table.cell(data, 1, 1, text = "Current Sitch: " + str.tostring(knn_class))
+atr = ta.atr(14) 
+lowest = ta.lowest(low, 4) 
+highest = ta.highest(high, 4) 
+
+var float last_predicted_high = 0 
+var float last_predicted_low = 0 
+
+if knn_class[1] == "Neutral" and knn_class == "Approaching Pivot High"
+    pointsArray = array.new<chart.point>()
+    pointsArray.push(chart.point.from_index(bar_index - 4, high + atr))
+    pointsArray.push(chart.point.from_index(bar_index + 4, high + atr))
+    pointsArray.push(chart.point.from_index(bar_index, high))
+    last_predicted_high := high 
+    
+    //doing polyline triangle things 
+    polyline.new(pointsArray, closed = true, line_color = color.new(color.red, 0), line_width = 1, fill_color = color.new(color.red, 75))
+    polyline.new(pointsArray, closed = true, line_color = color.new(color.red, 60), line_width = 4, fill_color = na)
+    polyline.new(pointsArray, closed = true, line_color = color.new(color.red, 85), line_width = 10, fill_color = na)
+    
+    label.new(bar_index, high + atr, "Pivot High \n" + str.tostring(confidence, "Conf: #.###"), color = na, textcolor = color.white, style = label.style_none)
+
+//Plot the polys 
+if knn_class[1] == "Neutral" and knn_class == "Approaching Pivot Low"
+    last_predicted_low := low 
+    pointsArrayLow = array.new<chart.point>()
+    pointsArrayLow.push(chart.point.from_index(bar_index - 4, low - atr))
+    pointsArrayLow.push(chart.point.from_index(bar_index + 4, low - atr))
+    pointsArrayLow.push(chart.point.from_index(bar_index, low))
+    
+
+    polyline.new(pointsArrayLow, closed = true, line_color = color.new(color.lime, 0), line_width = 1, fill_color = color.new(color.lime, 75))
+
+    polyline.new(pointsArrayLow, closed = true, line_color = color.new(color.lime, 60), line_width = 4, fill_color = na)
+
+    polyline.new(pointsArrayLow, closed = true, line_color = color.new(color.lime, 85), line_width = 10, fill_color = na)
+    label.new(bar_index, low - (atr * 1.5), "Pivot Low \n" + str.tostring(confidence, "Conf: #.###"), color = na, textcolor = color.white, style = label.style_none)
+// bt logic 
+pivot_low_ar = array.new<float>() 
+pivot_high_ar = array.new<float>() 
+bool is_historical = (last_bar_index - bar_index) > 500
+bool transition_low = knn_class[1] == "Neutral" and knn_class == "Approaching Pivot Low"
+bool transition_high = knn_class[1] == "Neutral" and knn_class == "Approaching Pivot High"
+for i = 0 to 1000 
+    if transition_low[i]
+        pivot_low_ar.push(last_predicted_high - low[i])
+    if transition_high[i]
+        pivot_high_ar.push((high[i] - last_predicted_low) / last_predicted_low * 100)
+
+int piv_lo_pass = 0 
+int piv_lo_inst = 0 
+int piv_hi_pass = 0 
+avg_hi_move = array.new<float>() 
+avg_lo_move = array.new<float>() 
+if array.size(pivot_low_ar) > 0 
+    for i = 0 to array.size(pivot_low_ar) - 1 
+        if array.get(pivot_low_ar, i) > 0 
+            piv_lo_pass += 1 
+            array.push(avg_hi_move, array.get(pivot_low_ar, i)) 
+if array.size(pivot_high_ar) > 0 
+    for i = 0 to array.size(pivot_high_ar) - 1
+        if array.get(pivot_high_ar, i) > 0 
+            array.push(avg_lo_move, array.get(pivot_high_ar, i))
+            piv_hi_pass += 1 
+
+low_success = math.abs((piv_lo_pass / array.size(pivot_low_ar) - 1) * 100)
+high_success = math.abs((piv_hi_pass / array.size(pivot_high_ar) - 1) * 100) 
+avg_low = array.avg(avg_lo_move)
+avg_high = array.avg(avg_hi_move)
+
+// initalize stats table 
+float low_succ_val  = array.size(pivot_low_ar)  > 0 ? math.abs((piv_lo_pass / array.size(pivot_low_ar) - 1) * 100) : 0.0
+float high_succ_val = array.size(pivot_high_ar) > 0 ? math.abs((piv_hi_pass / array.size(pivot_high_ar) - 1) * 100) : 0.0
+float avg_low_val   = nz(array.avg(avg_lo_move), 0.0)
+float avg_high_val  = nz(array.avg(avg_hi_move), 0.0)
+
+
+var table stats_hud = table.new(position.bottom_right, 2, 5)
+
+color neon_pink   = #ff00ff 
+color neon_purple = #9d00ff 
+color glow_bg     = color.new(neon_purple, 92) // Deep transparent purple
+
+if barstate.islast and show_stats 
+    // plot the stats table 
+    table.cell(stats_hud, 0, 0, "KNN METRICS", text_color = neon_pink,   bgcolor = color.new(neon_pink, 80), text_size = size.small)
+    table.cell(stats_hud, 1, 0, "VALUE",       text_color = neon_pink,   bgcolor = color.new(neon_pink, 80), text_size = size.small)
+    table.cell(stats_hud, 0, 1, "Low Success",  text_color = color.white, bgcolor = glow_bg, text_halign = text.align_left)
+    table.cell(stats_hud, 1, 1, str.tostring(low_succ_val, "#.#") + "%", text_color = neon_pink, bgcolor = glow_bg)
+    table.cell(stats_hud, 0, 2, "Avg Low Move", text_color = color.white, bgcolor = glow_bg, text_halign = text.align_left)
+    table.cell(stats_hud, 1, 2, str.tostring(avg_low_val, "$"),       text_color = neon_purple, bgcolor = glow_bg)
+    table.cell(stats_hud, 0, 3, "High Success", text_color = color.white, bgcolor = glow_bg, text_halign = text.align_left)
+    table.cell(stats_hud, 1, 3, str.tostring(high_succ_val, "#.#") + "%", text_color = neon_pink, bgcolor = glow_bg)
+    table.cell(stats_hud, 0, 4, "Avg High Move",text_color = color.white, bgcolor = glow_bg, text_halign = text.align_left)
+    table.cell(stats_hud, 1, 4, str.tostring(avg_high_val, "$"), text_color = neon_purple, bgcolor = glow_bg)
+    table.set_border_color(stats_hud, neon_pink)
+    table.set_border_width(stats_hud, 2)
+    table.set_frame_color(stats_hud, neon_purple)
+    table.set_frame_width(stats_hud, 3)
+
+plotshape(transition_high and is_historical, title="Old High", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 40), size=size.small)
+plotshape(transition_low and is_historical,  title="Old Low",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 40), size=size.small)
+
+
+// 1. Logic for the Visuals
+string arrow_icon   = "WAIT"
+color  hud_color    = color.gray
+float  display_conf = nz(confidence, 0.0) // nz handles 'na' values safely
+
+if knn_class == "Approaching Pivot High"
+    arrow_icon := "▼"
+    hud_color  := color.red
+else if knn_class == "Approaching Pivot Low"
+    arrow_icon := "▲"
+    hud_color  := color.lime
+
+
+var table knn_status = table.new(position.top_right, 1, 1)
+
+// Directional helper right of screen 
+if barstate.islast and show_direction_helper
+    table.cell(knn_status, 0, 0, 
+         text       = arrow_icon + "\n" + str.tostring(display_conf, "#.#") + "%", 
+         bgcolor    = color.new(hud_color, 85), 
+         text_color = hud_color, // Fixed underscore here
+         text_size  = size.large, 
+         width      = 6, 
+         height     = 8)
+    
+    // Aesthetic: Add a neon border frame
+    table.set_border_color(knn_status, hud_color)
+    table.set_border_width(knn_status, 2)

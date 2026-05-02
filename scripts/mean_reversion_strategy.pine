@@ -1,0 +1,79 @@
+//@version=6
+strategy(
+    title             = "Mean Reversion + Volume Breakout - XAUUSD",
+    overlay           = false,
+    default_qty_type  = strategy.percent_of_equity,
+    default_qty_value = 2,
+    commission_type   = strategy.commission.percent,
+    commission_value  = 0.01,
+    slippage          = 2,
+    initial_capital   = 10000,
+    currency          = currency.USD,
+    max_bars_back     = 500
+)
+
+// Sessions
+grp_kz = "Kill Zones (UTC)"
+i_london = input.bool(true, "London 07:00-11:00 UTC", group=grp_kz)
+i_ny     = input.bool(true, "NY 12:00-16:00 UTC", group=grp_kz)
+
+// Mean Reversion
+grp_mr = "Mean Reversion"
+i_bb_len = input.int(20, "Bollinger Band length", minval=5, maxval=50, group=grp_mr)
+i_bb_dev = input.float(2.0, "BB Std Dev", minval=1.0, step=0.5, group=grp_mr)
+i_rsi_oob = input.int(30, "RSI overbought/oversold threshold", minval=10, maxval=45, group=grp_mr)
+
+// Risk
+grp_risk = "Risk"
+i_rr     = input.float(2.0, "R:R target", minval=1.0, step=0.25, group=grp_risk)
+i_sl_pct = input.float(1.5, "SL % of ATR", minval=0.5, step=0.1, group=grp_risk)
+i_cooldown_bars = input.int(3, "Cooldown bars", minval=1, maxval=20, group=grp_risk)
+
+// Session state
+london_active = not na(time(timeframe.period, "0700-1100", "UTC"))
+ny_active     = not na(time(timeframe.period, "1200-1600", "UTC"))
+in_kz = (i_london and london_active) or (i_ny and ny_active)
+
+// Indicators
+atr = ta.atr(14)
+rsi = ta.rsi(close, 14)
+
+// Bollinger Bands
+bb_basis = ta.sma(close, i_bb_len)
+bb_dev_upper = ta.stdev(close, i_bb_len)
+bb_upper = bb_basis + (bb_dev_upper * i_bb_dev)
+bb_lower = bb_basis - (bb_dev_upper * i_bb_dev)
+
+// Volume confirmation
+vol_sma = ta.sma(volume, 20)
+vol_ok = volume >= vol_sma * 0.8
+
+// Mean Reversion Entry: Touch lower BB + RSI oversold + in KZ
+touch_lower_bb = low <= bb_lower
+rsi_oversold = rsi <= (50 - i_rsi_oob)
+entry_long = barstate.isconfirmed and in_kz and touch_lower_bb and rsi_oversold and vol_ok
+
+// Cooldown
+var int last_trade_bar = na
+cooldown_ok = na(last_trade_bar) or (bar_index - last_trade_bar) >= i_cooldown_bars
+
+long_sig = entry_long and strategy.position_size == 0 and cooldown_ok
+
+if long_sig
+    sl = bb_lower - i_sl_pct * atr
+    tp = close + (close - sl) * i_rr
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long-X", "Long", stop=sl, limit=tp)
+    last_trade_bar := bar_index
+
+// Visuals
+bgcolor(london_active and i_london ? color.new(color.blue, 90) : na, title="London KZ")
+bgcolor(ny_active and i_ny ? color.new(color.green, 90) : na, title="NY KZ")
+bgcolor(long_sig ? color.new(color.lime, 65) : na, title="Entry")
+
+plot(bb_basis, "BB Basis", color=color.new(color.gray, 50))
+plot(bb_upper, "BB Upper", color=color.new(color.red, 50))
+plot(bb_lower, "BB Lower", color=color.new(color.green, 50))
+plot(rsi, "RSI", color=color.new(color.orange, 40))
+hline(50 - i_rsi_oob, "RSI Oversold", color.orange, linestyle=hline.style_dashed)
+hline(50, "RSI Mid", color.gray, linestyle=hline.style_dotted)

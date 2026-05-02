@@ -1,0 +1,197 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Alex_CG
+
+//@version=5
+indicator('Joe Green')
+
+use = input.string(defval='Stoch RSI', options=['Stoch', 'CCI', 'RSI', 'Stoch CCI', 'Stoch RSI', 'MFI', 'VFI', 'OBV', 'Momentum'])
+useStoch = use == 'Stoch'
+useRSI = use == 'RSI'
+useCCI = use == 'CCI'
+useStochCCI = use == 'Stoch CCI'
+useStochRSI = use == 'Stoch RSI'
+useMFI = use == 'MFI'
+useVFI = use == 'VFI'
+useOBV = use == 'OBV'
+useMOM = use == 'Momentum'
+
+
+source = input(close)
+smoothK = input.int(3, minval=1, title='Smooth K')
+smoothD = input.int(3, minval=1, title='smooth D')
+// useKorD = input(defval="K", options=["K", "D"], title="Use K or D")
+
+// Time Frames
+_m0 = input(true, '----Resolutions----')
+res1 = input.timeframe(title='Resolution 1', defval='5')
+res2 = input.timeframe(title='Resolution 2', defval='15')
+res3 = input.timeframe(title='Resolution 3', defval='30')
+res4 = input.timeframe(title='Resolution 4', defval='120')
+res5 = input.timeframe(title='Resolution 5', defval='240')
+
+
+// Stochastic Input
+_m1 = input(true, '----Stochastic----')
+
+stochLen = input.int(14, minval=1, title='Stoch Length')
+stochK = input.int(3, minval=1, title='Stoch K')
+stochD = input.int(3, minval=1, title='Stoch D')
+stochOver = input(80, title='Stoch Over')
+stochUnder = input(20, title='Stoch Under')
+
+// CCI Input
+_m2 = input(true, '----CCI----')
+cciLen = input.int(20, minval=1, title='CCI Length')
+cciOver = input(100, title='CCI Over')
+cciUnder = input(-100, title='CCI Under')
+
+// RSI Input
+_m3 = input(true, '----RSI----')
+rsiLen = input.int(14, minval=1, title='RSI Length')
+rsiOver = input(70, title='RSI Over')
+rsiUnder = input(30, title='RSI under')
+
+// Stoch CCI
+_m4 = input(true, '----Stochastic CCI----')
+StochCCI_CCILen = input(28, 'Stoch CCI, CCI Length')
+stochCCI_StochLen = input(28, 'Stoch CCI, Stoch Length')
+stochCCIOver = input(80, title='Stoch CCI Over')
+stochCCIUnder = input(20, title='Stoch CCI Under')
+
+// Stoch RSI
+_m5 = input(true, '----Stochastic RSI----')
+StochRSI_RSILen = input(14, 'Stoch RSI, RSI Length')
+stochRSI_StochLen = input(14, 'Stoch RSI, Stoch Length')
+stochRSIOver = input(80, title='Stoch RSI Over')
+stochRSIUnder = input(20, title='Stoch RSI Under')
+
+// MFI
+_m6 = input(true, '----MFI----')
+mfiLen = input(14, 'MFI Length')
+mfiOver = input(80, title='MFI Over')
+mfiUnder = input(20, title='MFI Under')
+mfiSource = input(hlc3, title='MFI Source')
+
+// VFI
+_m7 = input(true, '----VFI----')
+vfiLen = input(130, 'VFI Length')
+vfiSignalLength = input(5, 'Signal Length')
+vfiCoef = input(0.2, title='VFI Coef')
+vfiVCoef = input(2.5, title='Max. vol. cutoff')
+vfiSource = input(hlc3, title='VFI Source')
+vfiSmooth = input(false)
+vfiUnder = input(0, title='VFI Under')
+vfiOver = input(0, title='VFI Over')
+
+// OBV
+_m8 = input(true, '----OBV----')
+obvSource = input(close, title='OBV Source')
+
+// Momentum
+_m9 = input(true, '----Momentum----')
+momLen = input(10, title='Momentum Length')
+
+
+// Function to securely and simply call `security()` so that it never repaints and never looks ahead.
+f_secureSecurity(_symbol, _res, _src) =>
+    request.security(_symbol, _res, _src, lookahead=barmerge.lookahead_on)
+//sec10 = f_secureSecurity(syminfo.tickerid, higherTf, data)
+
+
+// ————— Converts current chart resolution into a float minutes value.
+f_resInMinutes() =>
+    _resInMinutes = timeframe.multiplier * (timeframe.isseconds ? 1. / 60 : timeframe.isminutes ? 1. : timeframe.isdaily ? 60. * 24 : timeframe.isweekly ? 60. * 24 * 7 : timeframe.ismonthly ? 60. * 24 * 30.4375 : na)
+    _resInMinutes
+
+// ————— Returns the float minutes value of the string _res.
+f_tfResInMinutes(_res) =>
+    request.security(syminfo.tickerid, _res, f_resInMinutes())
+
+// —————————— Determine if current timeframe is smaller that higher timeframe selected in Inputs.
+currentTfInMinutes = f_resInMinutes()
+
+// Stoch
+stoK = ta.sma(ta.stoch(close, high, low, stochLen), stochK)
+
+// CCI
+cciK = ta.cci(source, cciLen)
+
+// RSI
+rsiK = ta.rsi(source, rsiLen)
+
+// rsi1 = rsi(source, rsiLen)
+// rsiK = sma(stoch(rsi1, rsi1, rsi1, rsiLen), smoothK)
+// rsiD = sma(rsiK, smoothD)
+
+// Stoch CCI
+stocci_cci = ta.cci(source, StochCCI_CCILen)
+stocciK = ta.sma(ta.stoch(stocci_cci, stocci_cci, stocci_cci, stochCCI_StochLen), smoothK)
+stocciD = ta.sma(stocciK, smoothD)
+
+// Stoch RSI
+rsi2 = ta.rsi(source, StochRSI_RSILen)
+storsiK = ta.sma(ta.stoch(rsi2, rsi2, rsi2, stochRSI_StochLen), smoothK)
+
+// MFI
+mfiK = ta.mfi(mfiSource, mfiLen)
+
+// VFI
+ma(x, y) =>
+    vfiSmooth ? ta.sma(x, y) : x
+
+typical = vfiSource
+inter = math.log(typical) - math.log(typical[1])
+vinter = ta.stdev(inter, 30)
+cutoff = vfiCoef * vinter * close
+vave = ta.sma(volume, vfiLen)[1]
+vmax = vave * vfiVCoef
+vc = volume < vmax ? volume : vmax  //min( volume, vmax )
+mf = typical - typical[1]
+iff_1 = mf < -cutoff ? -vc : 0
+vcp = mf > cutoff ? vc : iff_1
+
+vfiK = ma(math.sum(vcp, vfiLen) / vave, 3)
+
+// OBV
+obvK = ta.cum(math.sign(ta.change(obvSource)) * volume)
+
+// Momentum
+momK = source - source[momLen]
+
+// User Selection 
+f_useDefault(stoV, rsiV, cciV, stocciV, storsiV, mfiV, vfiV, obvV, momV, def) =>
+    useStoch ? stoV : useRSI ? rsiV : useCCI ? cciV : useStochCCI ? stocciV : useStochRSI ? storsiV : useMFI ? mfiV : useVFI ? vfiV : useOBV ? obvV : useMOM ? momV : def
+
+k = f_useDefault(stoK, rsiK, cciK, stocciK, storsiK, mfiK, vfiK, obvK, momK, 0)
+// d = stoK
+
+over = useStoch ? stochOver : useCCI ? cciOver : useRSI ? rsiOver : useStochCCI ? stochCCIOver : useStochRSI ? stochRSIOver : useMFI ? mfiOver : useVFI ? vfiOver : 0
+under = useStoch ? stochUnder : useCCI ? cciUnder : useRSI ? rsiUnder : useStochCCI ? stochCCIUnder : useStochRSI ? stochRSIUnder : useMFI ? mfiUnder : useVFI ? vfiUnder : 0
+
+
+//
+f_defaultSecurity(timeframe, def) =>
+    timeframe.period == timeframe ? def : f_secureSecurity(syminfo.tickerid, timeframe, def)
+
+outK1 = f_defaultSecurity(res1, k)
+outK2 = f_defaultSecurity(res2, k)
+outK3 = f_defaultSecurity(res3, k)
+outK4 = f_defaultSecurity(res4, k)
+outK5 = f_defaultSecurity(res5, k)
+
+f_colorPicker(out, default) =>
+    out >= over ? color.lime : out <= under ? color.red : default
+
+// Plot Lines
+plot(outK1, title='Resolution 1', style=plot.style_line, linewidth=2, color=color.new(color.green, 70))
+plot(outK2, title='Resolution 2', style=plot.style_line, linewidth=3, color=color.new(color.purple, 70))
+plot(outK3, title='Resolution 3', style=plot.style_line, linewidth=3, color=color.new(color.orange, 0))
+plot(outK4, title='Resolution 4', style=plot.style_line, linewidth=4, color=color.new(color.green, 0))
+plot(outK5, title='Resolution 5', style=plot.style_line, linewidth=5, color=color.new(color.purple, 0))
+
+// Plot Tresholds
+hline((over + under) / 2)
+p1 = hline(over, title='Overbuy', color=#FF0000, linestyle=hline.style_dotted, linewidth=2)
+p2 = hline(under, title='Oversell', color=#00FF00, linestyle=hline.style_dotted, linewidth=2)
+fill(p1, p2, color=color.new(color.fuchsia, 80), title='Background')
+

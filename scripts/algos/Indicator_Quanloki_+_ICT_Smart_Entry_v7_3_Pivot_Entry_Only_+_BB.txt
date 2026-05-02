@@ -1,0 +1,103 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Join our channel for more free tools: https://t.me/simpleforextools
+
+//@version=6
+indicator("Quanloki + ICT Smart Entry (v7.3 Pivot Entry Only + BB)", overlay=true)
+
+// === Inputs ===
+RSI_Period = input.int(14, "Chiều dài RSI")
+SF = input.int(5, "RSI Smoothing")
+QQE = input.float(4.95, "Fast QQE Factor")
+pivotLen = input.int(3, "Pivot Strength", minval=1, maxval=10)
+entryType = input.string("open", "Entry Price", options=["open", "open_next", "close"])
+
+// ✅ Thêm công tắc Bollinger Bands
+showBB = input.bool(true, "Hiển thị Bollinger Bands")
+
+// === Core QQE ===
+src = close
+Wilders_Period = RSI_Period * 2 - 1
+Rsi = ta.rsi(src, RSI_Period)
+RsiMa = ta.ema(Rsi, SF)
+AtrRsi = math.abs(RsiMa[1] - RsiMa)
+MaAtrRsi = ta.ema(AtrRsi, Wilders_Period)
+dar = ta.ema(MaAtrRsi, Wilders_Period) * QQE
+
+var float longband = na
+var float shortband = na
+var int trend = 0
+
+DeltaFastAtrRsi = dar
+RSIndex = RsiMa
+newshortband = RSIndex + DeltaFastAtrRsi
+newlongband = RSIndex - DeltaFastAtrRsi
+longband := RSIndex[1] > longband[1] and RSIndex > longband[1] ? math.max(longband[1], newlongband) : newlongband
+shortband := RSIndex[1] < shortband[1] and RSIndex < shortband[1] ? math.min(shortband[1], newshortband) : newshortband
+cross_1 = ta.cross(longband[1], RSIndex)
+trend := ta.cross(RSIndex, shortband[1]) ? 1 : cross_1 ? -1 : nz(trend[1], 1)
+FastAtrRsiTL = trend == 1 ? longband : shortband
+
+// === Entry Signals (QQE trigger) ===
+QQExlong = FastAtrRsiTL < RSIndex and FastAtrRsiTL[1] >= RSIndex[1]
+QQExshort = FastAtrRsiTL > RSIndex and FastAtrRsiTL[1] <= RSIndex[1]
+
+// === Pivot Structure ===
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastHigh = na
+var float lastLow = na
+if not na(ph)
+    lastHigh := ph
+if not na(pl)
+    lastLow := pl
+
+// === Break of Structure (ICT) ===
+BOS_up = close > lastHigh
+BOS_down = close < lastLow
+
+// === Entry Type Selector ===
+entryPrice =
+     entryType == "open" ? open :
+     entryType == "open_next" ? open[1] :
+     close
+
+// === Final Entry Conditions ===
+longEntry = QQExlong and BOS_up
+shortEntry = QQExshort and BOS_down
+
+// === Bollinger Bands (length 20, dev 2) ===
+bbLen = 20
+bbMult = 2.0
+bbBasis = ta.sma(close, bbLen)
+bbStdev = ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbMult * bbStdev
+bbLower = bbBasis - bbMult * bbStdev
+
+plot(showBB ? bbBasis : na, title="BB Basis", color=color.new(color.blue, 0))
+plot(showBB ? bbUpper : na, title="BB Upper", color=color.new(color.blue, 60))
+plot(showBB ? bbLower : na, title="BB Lower", color=color.new(color.blue, 60))
+
+// === Plot Labels ===
+if longEntry
+    label.new(bar_index, low,
+     "LONG ✅ " + str.tostring(entryPrice, format.mintick),
+     style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, yloc=yloc.belowbar)
+
+if shortEntry
+    label.new(bar_index, high,
+     "SHORT 🚨 " + str.tostring(entryPrice, format.mintick),
+     style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, yloc=yloc.abovebar)
+
+// === Alerts ===
+alertcondition(longEntry, title="Long Entry", message="QQE + ICT Long Entry Confirmed")
+alertcondition(shortEntry, title="Short Entry", message="QQE + ICT Short Entry Confirmed")
+
+
+// ==========================================================================================
+
+// === Dashboard with Telegram Link ===
+var table myTable = table.new(position.top_center, 1, 1, border_width=1, frame_color=color.black, bgcolor=color.white)
+
+// Add Telegram Message to Dashboard
+table.cell(myTable, 0, 0, "Join Telegram @simpleforextools", bgcolor=color.blue, text_color=color.white, text_size=size.normal)

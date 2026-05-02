@@ -1,0 +1,1010 @@
+//@version=6
+strategy("Turtle Soup Retest Strategy MTF", "TSoupMTF", overlay = true, max_boxes_count = 40, max_labels_count = 300, pyramiding = 0, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, commission_type = strategy.commission.percent, commission_value = 0.06, slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+
+grpExec = "Execution"
+i_exec_note = input.string("Run on 5m or 15m chart", "Execution Note", options = ["Run on 5m or 15m chart"], group = grpExec, tooltip = "Primary design is 5m execution. 15m is also useful for TradingView free-plan comparison and debugging.")
+i_structure_tf = input.timeframe("15", "Structure timeframe", group = grpExec)
+i_entry_mode = input.string("Zone Retest", "Entry mode", options = ["Zone Retest", "Limit Mid", "Retest Close"], group = grpExec)
+
+grpLevels = "HTF Zones"
+i_use_tf1 = input.bool(true, "Use first key timeframe", group = grpLevels)
+i_tf1 = input.timeframe("240", "Timeframe 1", group = grpLevels)
+i_use_tf2 = input.bool(true, "Use second key timeframe", group = grpLevels)
+i_tf2 = input.timeframe("1D", "Timeframe 2", group = grpLevels)
+i_htf_left = input.int(5, "HTF pivot left bars", minval = 1, maxval = 20, group = grpLevels)
+i_htf_right = input.int(5, "HTF pivot right bars", minval = 1, maxval = 20, group = grpLevels)
+i_htf_ob_search_bars = input.int(50, "Max HTF bars to search OB", minval = 5, maxval = 200, group = grpLevels)
+i_zone_penetration_frac = input.float(0.50, "Tap tolerance below/above zone (x width)", minval = 0.0, maxval = 2.0, step = 0.05, group = grpLevels)
+i_show_zones = input.bool(true, "Show active HTF zones", group = grpLevels)
+i_prioritize_higher_tf = input.bool(true, "Prioritize second timeframe when both trigger", group = grpLevels)
+
+grpSweep = "Sweep And CHoCH"
+i_max_structure_bars_to_choch = input.int(32, "Max structure bars from sweep to CHoCH", minval = 1, maxval = 80, group = grpSweep)
+i_structure_left = input.int(2, "Structure pivot left bars", minval = 1, maxval = 20, group = grpSweep)
+i_structure_right = input.int(2, "Structure pivot right bars", minval = 1, maxval = 20, group = grpSweep)
+i_min_sweep_reclaim_pos = input.float(0.70, "Min sweep reclaim position", minval = 0.0, maxval = 1.0, step = 0.05, group = grpSweep, tooltip = "How strongly the sweep candle must reclaim its own range. 0.70 means the close must reclaim at least 70% of the candle.")
+i_require_choch_fvg = input.bool(false, "Require structure imbalance on CHoCH bar", group = grpSweep, tooltip = "Optional first-pass imbalance filter. Requires a fair-value-gap style displacement on the CHoCH bar.")
+
+grpEntry = "Order Block Retest"
+i_ob_use_body = input.bool(false, "Use candle body for OB bounds", group = grpEntry)
+i_ob_search_exec_bars = input.int(60, "Max execution bars from sweep to search OB", minval = 5, maxval = 200, group = grpEntry)
+i_retest_valid_exec_bars = input.int(60, "Max execution bars from CHoCH to entry", minval = 5, maxval = 300, group = grpEntry)
+i_retest_close_pos = input.float(0.50, "Retest close position inside OB", minval = 0.0, maxval = 1.0, step = 0.05, group = grpEntry)
+i_limit_entry_pos = input.float(0.50, "Limit entry position inside OB", minval = 0.0, maxval = 1.0, step = 0.05, group = grpEntry)
+i_pre_entry_invalidation_mode = input.string("OB Or Stop Wick", "Pre-entry invalidation", options = ["OB Or Stop Wick", "OB Or Stop Close", "Zone Boundary", "Blocked Setup Retry"], group = grpEntry, tooltip = "How strict setup invalidation should be before entry. 'Zone Boundary' keeps a blocked setup alive for deeper second-chance retests as long as the HTF zone itself has not failed. 'Blocked Setup Retry' stays strict by default, but if a touch is blocked only by the dead zone it keeps that setup alive for one later retest unless the HTF zone itself fails.")
+i_invalidate_on_close = input.bool(true, "Invalidate if candle closes through OB", group = grpEntry)
+i_show_ob_boxes = input.bool(true, "Show active OB boxes", group = grpEntry)
+
+grpFilters = "Filters"
+i_block_dead_zone = input.bool(true, "Block 05:00-11:00 UTC entries", group = grpFilters)
+i_dead_zone_start_hour = input.int(5, "Dead zone start hour (UTC)", minval = 0, maxval = 23, group = grpFilters, inline = "dz")
+i_dead_zone_end_hour = input.int(11, "End", minval = 0, maxval = 23, group = grpFilters, inline = "dz")
+i_bias_mode = input.string("Off", "HTF directional bias", options = ["Off", "4H EMA", "4H + 1D EMA"], group = grpFilters)
+i_bias_ema_len = input.int(20, "Bias EMA length", minval = 2, maxval = 200, group = grpFilters)
+
+grpRisk = "Risk"
+i_stop_buffer_atr = input.float(0.10, "Stop buffer beyond sweep (ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = grpRisk)
+i_target_rr = input.float(2.0, "Target RR", minval = 0.5, maxval = 10.0, step = 0.25, group = grpRisk)
+i_max_hold_exec_bars = input.int(120, "Max bars in trade", minval = 1, maxval = 500, group = grpRisk)
+
+grpStyle = "Style"
+i_show_event_labels = input.bool(true, "Show sweep / CHoCH labels", group = grpStyle)
+i_show_filter_block_labels = input.bool(true, "Show filter block labels", group = grpStyle)
+i_show_debug_warning = input.bool(true, "Warn when not on 5m chart", group = grpStyle)
+i_show_4h_bias_ema = input.bool(true, "Show 4H bias EMA", group = grpStyle, tooltip = "Plots the same 4H EMA used in the higher-timeframe bias logic.")
+i_show_1d_bias_ema = input.bool(true, "Show 1D bias EMA", group = grpStyle, tooltip = "Plots the same 1D EMA used in the higher-timeframe bias logic.")
+i_show_bias_bg = input.bool(true, "Tint background with HTF bias", group = grpStyle)
+i_bias_bg_transparency = input.int(94, "Bias background transparency", minval = 80, maxval = 100, group = grpStyle)
+i_show_bias_panel = input.bool(true, "Show HTF bias panel", group = grpStyle)
+i_4h_bias_ema_bull_color = input.color(color.new(color.aqua, 0), "4H EMA bull", group = grpStyle, inline = "b4h")
+i_4h_bias_ema_bear_color = input.color(color.new(color.blue, 20), "Bear", group = grpStyle, inline = "b4h")
+i_1d_bias_ema_bull_color = input.color(color.new(color.orange, 0), "1D EMA bull", group = grpStyle, inline = "b1d")
+i_1d_bias_ema_bear_color = input.color(color.new(color.red, 10), "Bear", group = grpStyle, inline = "b1d")
+i_tf1_res_color = input.color(color.new(color.red, 0), "TF1 resistance", group = grpStyle, inline = "tf1")
+i_tf1_sup_color = input.color(color.new(color.green, 0), "TF1 support", group = grpStyle, inline = "tf1")
+i_tf2_res_color = input.color(color.new(color.maroon, 0), "TF2 resistance", group = grpStyle, inline = "tf2")
+i_tf2_sup_color = input.color(color.new(color.teal, 0), "TF2 support", group = grpStyle, inline = "tf2")
+i_bull_ob_color = input.color(color.new(color.lime, 84), "Bullish OB", group = grpStyle)
+i_bear_ob_color = input.color(color.new(color.red, 84), "Bearish OB", group = grpStyle)
+i_min_bias_score = input.int(1, "Min net bias score", minval = 1, maxval = 5, group = grpFilters, tooltip = "When any optional bias filter is enabled, the chosen direction must lead by at least this many score points.")
+i_use_first4_return_bias = input.bool(false, "Use first 4H return bias", group = grpFilters, tooltip = "Adds one bull point when the first four UTC hours close up by the threshold, or one bear point when they close down by the threshold.")
+i_first4_return_threshold = input.float(0.50, "First 4H return threshold (%)", minval = 0.0, maxval = 5.0, step = 0.05, group = grpFilters)
+i_use_first4_range_bias = input.bool(false, "Use first 4H range-position bias", group = grpFilters, tooltip = "Adds one bull point when the first four UTC hours close near the high of their range, or one bear point when they close near the low.")
+i_first4_range_lower = input.float(0.30, "First 4H range lower", minval = 0.0, maxval = 1.0, step = 0.05, group = grpFilters)
+i_first4_range_upper = input.float(0.70, "First 4H range upper", minval = 0.0, maxval = 1.0, step = 0.05, group = grpFilters)
+i_use_prev_day_reversion_bias = input.bool(false, "Use previous day reversion bias", group = grpFilters, tooltip = "Adds one bear point after a strong up day and one bull point after a strong down day.")
+i_prev_day_reversion_threshold = input.float(1.0, "Prev day return threshold (%)", minval = 0.0, maxval = 10.0, step = 0.1, group = grpFilters)
+i_use_thursday_bearish_bias = input.bool(false, "Use Thursday bearish bias", group = grpFilters)
+i_min_sweep_volume_mult = input.float(0.0, "Min sweep volume / SMA20", minval = 0.0, maxval = 10.0, step = 0.05, group = grpFilters, tooltip = "0 disables the lower volume gate.")
+i_max_sweep_volume_mult = input.float(0.0, "Max sweep volume / SMA20", minval = 0.0, maxval = 10.0, step = 0.05, group = grpFilters, tooltip = "0 disables the upper volume gate.")
+
+f_tf_label(string tf) =>
+    tf == "240" ? "4H" : tf == "1D" ? "1D" : tf == "1W" ? "1W" : tf
+
+f_get_htf_context(string tf, int left, int right) =>
+    htfHigh = request.security(syminfo.tickerid, tf, ta.pivothigh(high, left, right), lookahead = barmerge.lookahead_off)
+    htfHighTime = request.security(syminfo.tickerid, tf, not na(ta.pivothigh(high, left, right)) ? time_close : na, lookahead = barmerge.lookahead_off)
+    htfLow = request.security(syminfo.tickerid, tf, ta.pivotlow(low, left, right), lookahead = barmerge.lookahead_off)
+    htfLowTime = request.security(syminfo.tickerid, tf, not na(ta.pivotlow(low, left, right)) ? time_close : na, lookahead = barmerge.lookahead_off)
+    htfAtr = request.security(syminfo.tickerid, tf, ta.atr(14), lookahead = barmerge.lookahead_off)
+    [htfHigh, htfHighTime, htfLow, htfLowTime, htfAtr]
+
+f_structure_state(int left, int right) =>
+    ph = ta.pivothigh(high, left, right)
+    pl = ta.pivotlow(low, left, right)
+    var float activeHigh = na
+    var float activeLow = na
+    var bool highCrossed = false
+    var bool lowCrossed = false
+    var int trend = 0
+    if not na(ph)
+        activeHigh := ph
+        highCrossed := false
+    if not na(pl)
+        activeLow := pl
+        lowCrossed := false
+    bullBreak = not na(activeHigh) and not highCrossed and close > activeHigh and nz(close[1], close) <= activeHigh
+    bearBreak = not na(activeLow) and not lowCrossed and close < activeLow and nz(close[1], close) >= activeLow
+    bullChoch = bullBreak and trend == -1
+    bearChoch = bearBreak and trend == 1
+    bullBreakLevel = bullChoch ? activeHigh : na
+    bearBreakLevel = bearChoch ? activeLow : na
+    bullFvg = low > high[2]
+    bearFvg = high < low[2]
+    if bullBreak
+        highCrossed := true
+        trend := 1
+    if bearBreak
+        lowCrossed := true
+        trend := -1
+    [bullChoch, bearChoch, time_close, bullFvg, bearFvg, bullBreakLevel, bearBreakLevel]
+
+f_bias_state(int len) =>
+    emaVal = ta.ema(close, len)
+    emaPrev = emaVal[1]
+    close > emaVal and emaVal >= emaPrev ? 1 : close < emaVal and emaVal <= emaPrev ? -1 : 0
+
+f_get_bias(string tf, int len) =>
+    request.security(syminfo.tickerid, tf, f_bias_state(len), lookahead = barmerge.lookahead_off)
+
+f_daily_context_1h() =>
+    newDay = ta.change(time("1D")) != 0
+    utcHour = hour(time, "UTC")
+    var float first4Open = na
+    var float first4Close = na
+    var float first4High = na
+    var float first4Low = na
+    if newDay
+        first4Open := open
+        first4Close := na
+        first4High := high
+        first4Low := low
+    if utcHour < 4
+        first4Open := na(first4Open) ? open : first4Open
+        first4High := na(first4High) ? high : math.max(first4High, high)
+        first4Low := na(first4Low) ? low : math.min(first4Low, low)
+        if utcHour == 3
+            first4Close := close
+    first4Return = not na(first4Open) and not na(first4Close) and first4Open != 0 ? (first4Close / first4Open - 1.0) * 100.0 : na
+    first4RangePos = not na(first4Close) and not na(first4High) and not na(first4Low) and first4High > first4Low ? (first4Close - first4Low) / (first4High - first4Low) : na
+    [first4Return, first4RangePos]
+
+f_bias_filters_enabled() =>
+    i_bias_mode != "Off" or i_use_first4_return_bias or i_use_first4_range_bias or i_use_prev_day_reversion_bias or i_use_thursday_bearish_bias
+
+f_bias_scores(int b4h, int b1d, float first4Return, float first4RangePos, float prevDayReturn, int dayOfWeek) =>
+    int bullScore = 0
+    int bearScore = 0
+    if i_bias_mode == "4H EMA" or i_bias_mode == "4H + 1D EMA"
+        if b4h > 0
+            bullScore += 1
+        else if b4h < 0
+            bearScore += 1
+    if i_bias_mode == "4H + 1D EMA"
+        if b1d > 0
+            bullScore += 1
+        else if b1d < 0
+            bearScore += 1
+    if hour(time, "UTC") >= 4 and i_use_first4_return_bias and not na(first4Return)
+        if first4Return >= i_first4_return_threshold
+            bullScore += 1
+        else if first4Return <= -i_first4_return_threshold
+            bearScore += 1
+    if hour(time, "UTC") >= 4 and i_use_first4_range_bias and not na(first4RangePos)
+        if first4RangePos >= i_first4_range_upper
+            bullScore += 1
+        else if first4RangePos <= i_first4_range_lower
+            bearScore += 1
+    if i_use_prev_day_reversion_bias and not na(prevDayReturn)
+        if prevDayReturn >= i_prev_day_reversion_threshold
+            bearScore += 1
+        else if prevDayReturn <= -i_prev_day_reversion_threshold
+            bullScore += 1
+    if i_use_thursday_bearish_bias and dayOfWeek == dayofweek.thursday
+        bearScore += 1
+    [bullScore, bearScore]
+
+f_bias_text(int value) =>
+    value > 0 ? "BULL" : value < 0 ? "BEAR" : "FLAT"
+
+f_bias_bg_color(int value) =>
+    value > 0 ? color.new(color.lime, 72) : value < 0 ? color.new(color.red, 72) : color.new(color.gray, 80)
+
+f_net_bias_text(int netBias) =>
+    netBias > 0 ? "BULL " + str.tostring(netBias) : netBias < 0 ? "BEAR " + str.tostring(netBias) : "NEUTRAL"
+
+f_allow_text(bool filtersEnabled, bool allowed) =>
+    filtersEnabled ? (allowed ? "ALLOWED" : "BLOCKED") : "OPEN"
+
+f_allow_bg_color(bool filtersEnabled, bool allowed) =>
+    not filtersEnabled ? color.new(color.gray, 80) : allowed ? color.new(color.lime, 72) : color.new(color.red, 72)
+
+f_bias_mode_text() =>
+    i_bias_mode == "Off" ? "RAW 4H + 1D" : i_bias_mode
+
+f_find_bullish_ob(int maxLookback, int barsSinceSweep, bool useBody) =>
+    float obTop = na
+    float obBottom = na
+    int obTime = na
+    int limit = math.min(maxLookback, math.max(barsSinceSweep - 1, 0))
+    if limit >= 1
+        for offset = 1 to limit
+            if close[offset] < open[offset]
+                obTop := useBody ? open[offset] : high[offset]
+                obBottom := useBody ? close[offset] : low[offset]
+                obTime := time[offset]
+                break
+    [obTop, obBottom, obTime]
+
+f_find_bearish_ob(int maxLookback, int barsSinceSweep, bool useBody) =>
+    float obTop = na
+    float obBottom = na
+    int obTime = na
+    int limit = math.min(maxLookback, math.max(barsSinceSweep - 1, 0))
+    if limit >= 1
+        for offset = 1 to limit
+            if close[offset] > open[offset]
+                obTop := useBody ? close[offset] : high[offset]
+                obBottom := useBody ? open[offset] : low[offset]
+                obTime := time[offset]
+                break
+    [obTop, obBottom, obTime]
+
+f_htf_smc_zones(int left, int right, int maxLookback, bool useBody) =>
+    ph = ta.pivothigh(high, left, right)
+    pl = ta.pivotlow(low, left, right)
+    var float activeHigh = na
+    var float activeLow = na
+    var int activeHighIndex = na
+    var int activeLowIndex = na
+    var bool highCrossed = false
+    var bool lowCrossed = false
+    var float demandTop = na
+    var float demandBottom = na
+    var int demandTime = na
+    var float supplyTop = na
+    var float supplyBottom = na
+    var int supplyTime = na
+    if not na(ph)
+        activeHigh := ph
+        activeHighIndex := bar_index - right
+        highCrossed := false
+    if not na(pl)
+        activeLow := pl
+        activeLowIndex := bar_index - right
+        lowCrossed := false
+    bullBreak = not na(activeHigh) and not highCrossed and close > activeHigh and nz(close[1], close) <= activeHigh
+    bearBreak = not na(activeLow) and not lowCrossed and close < activeLow and nz(close[1], close) >= activeLow
+    if bullBreak and not na(activeHighIndex)
+        float bestLow = na
+        float obTop = na
+        float obBottom = na
+        int obTime = na
+        int maxOffset = math.min(maxLookback, bar_index - activeHighIndex)
+        if maxOffset >= 1
+            for offset = 1 to maxOffset
+                if na(bestLow) or low[offset] < bestLow
+                    bestLow := low[offset]
+                    obTop := useBody ? math.max(open[offset], close[offset]) : high[offset]
+                    obBottom := useBody ? math.min(open[offset], close[offset]) : low[offset]
+                    obTime := time[offset]
+        if not na(obTop) and not na(obBottom)
+            demandTop := obTop
+            demandBottom := obBottom
+            demandTime := obTime
+        highCrossed := true
+    if bearBreak and not na(activeLowIndex)
+        float bestHigh = na
+        float obTop = na
+        float obBottom = na
+        int obTime = na
+        int maxOffset = math.min(maxLookback, bar_index - activeLowIndex)
+        if maxOffset >= 1
+            for offset = 1 to maxOffset
+                if na(bestHigh) or high[offset] > bestHigh
+                    bestHigh := high[offset]
+                    obTop := useBody ? math.max(open[offset], close[offset]) : high[offset]
+                    obBottom := useBody ? math.min(open[offset], close[offset]) : low[offset]
+                    obTime := time[offset]
+        if not na(obTop) and not na(obBottom)
+            supplyTop := obTop
+            supplyBottom := obBottom
+            supplyTime := obTime
+        lowCrossed := true
+    [demandTop, demandBottom, demandTime, supplyTop, supplyBottom, supplyTime]
+
+f_direction_allowed(string direction, int bullScore, int bearScore) =>
+    not f_bias_filters_enabled() ? true : direction == "long" ? bullScore - bearScore >= i_min_bias_score : bearScore - bullScore >= i_min_bias_score
+
+f_long_bias_ok(int bullScore, int bearScore) =>
+    f_direction_allowed("long", bullScore, bearScore)
+
+f_short_bias_ok(int bullScore, int bearScore) =>
+    f_direction_allowed("short", bullScore, bearScore)
+
+f_push_zone(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, float top, float bottom, int zoneTime) =>
+    array.unshift(tops, top)
+    array.unshift(bottoms, bottom)
+    array.unshift(times, zoneTime)
+    array.unshift(usedFlags, false)
+    if array.size(tops) > 20
+        array.pop(tops)
+        array.pop(bottoms)
+        array.pop(times)
+        array.pop(usedFlags)
+
+f_remove_zone(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, int idx) =>
+    array.remove(tops, idx)
+    array.remove(bottoms, idx)
+    array.remove(times, idx)
+    array.remove(usedFlags, idx)
+
+f_prune_support_zones(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, float lowValue) =>
+    if array.size(tops) > 0
+        int lastIdx = array.size(tops) - 1
+        for step = 0 to lastIdx
+            int idx = lastIdx - step
+            if lowValue < array.get(bottoms, idx)
+                f_remove_zone(tops, bottoms, times, usedFlags, idx)
+
+f_prune_resistance_zones(array<float> tops, array<float> bottoms, array<int> times, array<bool> usedFlags, float highValue) =>
+    if array.size(tops) > 0
+        int lastIdx = array.size(tops) - 1
+        for step = 0 to lastIdx
+            int idx = lastIdx - step
+            if highValue > array.get(tops, idx)
+                f_remove_zone(tops, bottoms, times, usedFlags, idx)
+
+f_stack_top(array<float> tops) =>
+    array.size(tops) > 0 ? array.get(tops, 0) : na
+
+f_stack_bottom(array<float> bottoms) =>
+    array.size(bottoms) > 0 ? array.get(bottoms, 0) : na
+
+f_stack_used(array<bool> usedFlags) =>
+    array.size(usedFlags) > 0 ? array.get(usedFlags, 0) : false
+
+f_bull_sweep_from_stack(array<float> tops, array<float> bottoms, array<bool> usedFlags, float reclaimPos, bool volOk, float penetrationFrac, float minReclaim) =>
+    bool found = false
+    float zoneTop = na
+    float zoneBottom = na
+    int zoneIndex = na
+    if array.size(tops) > 0
+        for idx = 0 to array.size(tops) - 1
+            top = array.get(tops, idx)
+            bottom = array.get(bottoms, idx)
+            width = top - bottom
+            if not array.get(usedFlags, idx) and low <= top and low >= bottom - width * penetrationFrac and close > top and reclaimPos >= minReclaim and volOk
+                found := true
+                zoneTop := top
+                zoneBottom := bottom
+                zoneIndex := idx
+                break
+    [found, zoneTop, zoneBottom, zoneIndex]
+
+f_bear_sweep_from_stack(array<float> tops, array<float> bottoms, array<bool> usedFlags, float reclaimPos, bool volOk, float penetrationFrac, float minReclaim) =>
+    bool found = false
+    float zoneTop = na
+    float zoneBottom = na
+    int zoneIndex = na
+    if array.size(tops) > 0
+        for idx = 0 to array.size(tops) - 1
+            top = array.get(tops, idx)
+            bottom = array.get(bottoms, idx)
+            width = top - bottom
+            if not array.get(usedFlags, idx) and high >= bottom and high <= top + width * penetrationFrac and close < bottom and reclaimPos >= minReclaim and volOk
+                found := true
+                zoneTop := top
+                zoneBottom := bottom
+                zoneIndex := idx
+                break
+    [found, zoneTop, zoneBottom, zoneIndex]
+
+atr = ta.atr(14)
+volSma20 = ta.sma(volume, 20)
+sweepVolMult = volSma20 > 0 ? volume / volSma20 : 0.0
+sweepVolOk = sweepVolMult >= i_min_sweep_volume_mult and (i_max_sweep_volume_mult <= 0 or sweepVolMult <= i_max_sweep_volume_mult)
+utcHour = hour(time, "UTC")
+inDeadZone = i_block_dead_zone and utcHour >= i_dead_zone_start_hour and utcHour <= i_dead_zone_end_hour
+biasEma4h = request.security(syminfo.tickerid, "240", ta.ema(close, i_bias_ema_len), lookahead = barmerge.lookahead_off)
+biasEma1d = request.security(syminfo.tickerid, "1D", ta.ema(close, i_bias_ema_len), lookahead = barmerge.lookahead_off)
+bias4h = f_get_bias("240", i_bias_ema_len)
+bias1d = f_get_bias("1D", i_bias_ema_len)
+[first4Return, first4RangePos] = request.security(syminfo.tickerid, "60", f_daily_context_1h(), lookahead = barmerge.lookahead_off)
+prevDayReturn = request.security(syminfo.tickerid, "1D", open[1] != 0 ? (close[1] / open[1] - 1.0) * 100.0 : na, lookahead = barmerge.lookahead_off)
+dayOfWeek = request.security(syminfo.tickerid, "1D", dayofweek, lookahead = barmerge.lookahead_off)
+
+[tf1SupTopCandidate, tf1SupBottomCandidate, tf1SupTimeCandidate, tf1ResTopCandidate, tf1ResBottomCandidate, tf1ResTimeCandidate] = request.security(syminfo.tickerid, i_tf1, f_htf_smc_zones(i_htf_left, i_htf_right, i_htf_ob_search_bars, i_ob_use_body), lookahead = barmerge.lookahead_off)
+[tf2SupTopCandidate, tf2SupBottomCandidate, tf2SupTimeCandidate, tf2ResTopCandidate, tf2ResBottomCandidate, tf2ResTimeCandidate] = request.security(syminfo.tickerid, i_tf2, f_htf_smc_zones(i_htf_left, i_htf_right, i_htf_ob_search_bars, i_ob_use_body), lookahead = barmerge.lookahead_off)
+[structureBullChoch, structureBearChoch, structureBarCloseTime, structureBullFvg, structureBearFvg, structureBullBreakLevel, structureBearBreakLevel] = request.security(syminfo.tickerid, i_structure_tf, f_structure_state(i_structure_left, i_structure_right), lookahead = barmerge.lookahead_off)
+
+var array<float> tf1ResTops = array.new<float>()
+var array<float> tf1ResBottoms = array.new<float>()
+var array<int> tf1ResTimes = array.new<int>()
+var array<bool> tf1ResUsedFlags = array.new<bool>()
+var int tf1ResLastTime = na
+var array<float> tf1SupTops = array.new<float>()
+var array<float> tf1SupBottoms = array.new<float>()
+var array<int> tf1SupTimes = array.new<int>()
+var array<bool> tf1SupUsedFlags = array.new<bool>()
+var int tf1SupLastTime = na
+
+var array<float> tf2ResTops = array.new<float>()
+var array<float> tf2ResBottoms = array.new<float>()
+var array<int> tf2ResTimes = array.new<int>()
+var array<bool> tf2ResUsedFlags = array.new<bool>()
+var int tf2ResLastTime = na
+var array<float> tf2SupTops = array.new<float>()
+var array<float> tf2SupBottoms = array.new<float>()
+var array<int> tf2SupTimes = array.new<int>()
+var array<bool> tf2SupUsedFlags = array.new<bool>()
+var int tf2SupLastTime = na
+var int dbgBullSweepCount = 0
+var int dbgBearSweepCount = 0
+var int dbgBullChochCount = 0
+var int dbgBearChochCount = 0
+var int dbgBullEntrySignalCount = 0
+var int dbgBearEntrySignalCount = 0
+var int dbgBullFilterBlockCount = 0
+var int dbgBearFilterBlockCount = 0
+var int dbgTf1ResZoneCount = 0
+var int dbgTf1SupZoneCount = 0
+var int dbgTf2ResZoneCount = 0
+var int dbgTf2SupZoneCount = 0
+
+if i_use_tf1 and not na(tf1ResTopCandidate) and not na(tf1ResBottomCandidate) and not na(tf1ResTimeCandidate) and (na(tf1ResLastTime) or tf1ResTimeCandidate != tf1ResLastTime)
+    f_push_zone(tf1ResTops, tf1ResBottoms, tf1ResTimes, tf1ResUsedFlags, tf1ResTopCandidate, tf1ResBottomCandidate, tf1ResTimeCandidate)
+    tf1ResLastTime := tf1ResTimeCandidate
+    dbgTf1ResZoneCount += 1
+
+if i_use_tf1 and not na(tf1SupTopCandidate) and not na(tf1SupBottomCandidate) and not na(tf1SupTimeCandidate) and (na(tf1SupLastTime) or tf1SupTimeCandidate != tf1SupLastTime)
+    f_push_zone(tf1SupTops, tf1SupBottoms, tf1SupTimes, tf1SupUsedFlags, tf1SupTopCandidate, tf1SupBottomCandidate, tf1SupTimeCandidate)
+    tf1SupLastTime := tf1SupTimeCandidate
+    dbgTf1SupZoneCount += 1
+
+if i_use_tf2 and not na(tf2ResTopCandidate) and not na(tf2ResBottomCandidate) and not na(tf2ResTimeCandidate) and (na(tf2ResLastTime) or tf2ResTimeCandidate != tf2ResLastTime)
+    f_push_zone(tf2ResTops, tf2ResBottoms, tf2ResTimes, tf2ResUsedFlags, tf2ResTopCandidate, tf2ResBottomCandidate, tf2ResTimeCandidate)
+    tf2ResLastTime := tf2ResTimeCandidate
+    dbgTf2ResZoneCount += 1
+
+if i_use_tf2 and not na(tf2SupTopCandidate) and not na(tf2SupBottomCandidate) and not na(tf2SupTimeCandidate) and (na(tf2SupLastTime) or tf2SupTimeCandidate != tf2SupLastTime)
+    f_push_zone(tf2SupTops, tf2SupBottoms, tf2SupTimes, tf2SupUsedFlags, tf2SupTopCandidate, tf2SupBottomCandidate, tf2SupTimeCandidate)
+    tf2SupLastTime := tf2SupTimeCandidate
+    dbgTf2SupZoneCount += 1
+
+f_prune_support_zones(tf1SupTops, tf1SupBottoms, tf1SupTimes, tf1SupUsedFlags, low)
+f_prune_support_zones(tf2SupTops, tf2SupBottoms, tf2SupTimes, tf2SupUsedFlags, low)
+f_prune_resistance_zones(tf1ResTops, tf1ResBottoms, tf1ResTimes, tf1ResUsedFlags, high)
+f_prune_resistance_zones(tf2ResTops, tf2ResBottoms, tf2ResTimes, tf2ResUsedFlags, high)
+
+tf1ResTop = f_stack_top(tf1ResTops)
+tf1ResBottom = f_stack_bottom(tf1ResBottoms)
+tf1ResUsed = f_stack_used(tf1ResUsedFlags)
+tf1SupTop = f_stack_top(tf1SupTops)
+tf1SupBottom = f_stack_bottom(tf1SupBottoms)
+tf1SupUsed = f_stack_used(tf1SupUsedFlags)
+tf2ResTop = f_stack_top(tf2ResTops)
+tf2ResBottom = f_stack_bottom(tf2ResBottoms)
+tf2ResUsed = f_stack_used(tf2ResUsedFlags)
+tf2SupTop = f_stack_top(tf2SupTops)
+tf2SupBottom = f_stack_bottom(tf2SupBottoms)
+tf2SupUsed = f_stack_used(tf2SupUsedFlags)
+
+tf1ResTopPlot = plot(i_show_zones and i_use_tf1 ? tf1ResTop : na, "TF1 Res Top", color = tf1ResUsed ? color.new(i_tf1_res_color, 75) : i_tf1_res_color, linewidth = 1, style = plot.style_stepline)
+tf1ResBottomPlot = plot(i_show_zones and i_use_tf1 ? tf1ResBottom : na, "TF1 Res Bottom", color = tf1ResUsed ? color.new(i_tf1_res_color, 75) : i_tf1_res_color, linewidth = 1, style = plot.style_stepline)
+fill(tf1ResTopPlot, tf1ResBottomPlot, color = color.new(i_tf1_res_color, 90), title = "TF1 Resistance Zone")
+
+tf1SupTopPlot = plot(i_show_zones and i_use_tf1 ? tf1SupTop : na, "TF1 Sup Top", color = tf1SupUsed ? color.new(i_tf1_sup_color, 75) : i_tf1_sup_color, linewidth = 1, style = plot.style_stepline)
+tf1SupBottomPlot = plot(i_show_zones and i_use_tf1 ? tf1SupBottom : na, "TF1 Sup Bottom", color = tf1SupUsed ? color.new(i_tf1_sup_color, 75) : i_tf1_sup_color, linewidth = 1, style = plot.style_stepline)
+fill(tf1SupTopPlot, tf1SupBottomPlot, color = color.new(i_tf1_sup_color, 90), title = "TF1 Support Zone")
+
+tf2ResTopPlot = plot(i_show_zones and i_use_tf2 ? tf2ResTop : na, "TF2 Res Top", color = tf2ResUsed ? color.new(i_tf2_res_color, 75) : i_tf2_res_color, linewidth = 1, style = plot.style_stepline)
+tf2ResBottomPlot = plot(i_show_zones and i_use_tf2 ? tf2ResBottom : na, "TF2 Res Bottom", color = tf2ResUsed ? color.new(i_tf2_res_color, 75) : i_tf2_res_color, linewidth = 1, style = plot.style_stepline)
+fill(tf2ResTopPlot, tf2ResBottomPlot, color = color.new(i_tf2_res_color, 90), title = "TF2 Resistance Zone")
+
+tf2SupTopPlot = plot(i_show_zones and i_use_tf2 ? tf2SupTop : na, "TF2 Sup Top", color = tf2SupUsed ? color.new(i_tf2_sup_color, 75) : i_tf2_sup_color, linewidth = 1, style = plot.style_stepline)
+tf2SupBottomPlot = plot(i_show_zones and i_use_tf2 ? tf2SupBottom : na, "TF2 Sup Bottom", color = tf2SupUsed ? color.new(i_tf2_sup_color, 75) : i_tf2_sup_color, linewidth = 1, style = plot.style_stepline)
+fill(tf2SupTopPlot, tf2SupBottomPlot, color = color.new(i_tf2_sup_color, 90), title = "TF2 Support Zone")
+
+var bool longSetupActive = false
+var bool longChochConfirmed = false
+var bool longOrderArmed = false
+var bool longRetryArmed = false
+var string longSweepTf = ""
+var float longZoneTop = na
+var float longZoneBottom = na
+var int longSweepBar = na
+var int longSweepTime = na
+var float longSweepExtreme = na
+var int longChochBar = na
+var int longChochTime = na
+var float longChochBreakLevel = na
+var float longObTop = na
+var float longObBottom = na
+var int longObTime = na
+var float longLimitPrice = na
+var float longStopPrice = na
+var box longObBox = na
+
+var bool shortSetupActive = false
+var bool shortChochConfirmed = false
+var bool shortOrderArmed = false
+var bool shortRetryArmed = false
+var string shortSweepTf = ""
+var float shortZoneTop = na
+var float shortZoneBottom = na
+var int shortSweepBar = na
+var int shortSweepTime = na
+var float shortSweepExtreme = na
+var int shortChochBar = na
+var int shortChochTime = na
+var float shortChochBreakLevel = na
+var float shortObTop = na
+var float shortObBottom = na
+var int shortObTime = na
+var float shortLimitPrice = na
+var float shortStopPrice = na
+var box shortObBox = na
+
+var float pendingLongStop = na
+var float pendingShortStop = na
+var float activeLongStop = na
+var float activeLongTarget = na
+var float activeShortStop = na
+var float activeShortTarget = na
+var int activeEntryBar = na
+
+bullSweepEvent = false
+bearSweepEvent = false
+bullChochEvent = false
+bearChochEvent = false
+bullEntryEvent = false
+bearEntryEvent = false
+bullFilterBlockEvent = false
+bearFilterBlockEvent = false
+string bullFilterBlockReason = ""
+string bearFilterBlockReason = ""
+
+float bullCandidateTop = na
+float bullCandidateBottom = na
+string bullCandidateTf = ""
+bool bullCandidateFromTf2 = false
+int bullCandidateIndex = na
+
+float bearCandidateTop = na
+float bearCandidateBottom = na
+string bearCandidateTf = ""
+bool bearCandidateFromTf2 = false
+int bearCandidateIndex = na
+
+bullReclaimPos = (high - low) > 0 ? (close - low) / (high - low) : 0.0
+bearReclaimPos = (high - low) > 0 ? (high - close) / (high - low) : 0.0
+
+[tf2BullSweepRaw, tf2BullTop, tf2BullBottom, tf2BullIndex] = f_bull_sweep_from_stack(tf2SupTops, tf2SupBottoms, tf2SupUsedFlags, bullReclaimPos, sweepVolOk, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+[tf1BullSweepRaw, tf1BullTop, tf1BullBottom, tf1BullIndex] = f_bull_sweep_from_stack(tf1SupTops, tf1SupBottoms, tf1SupUsedFlags, bullReclaimPos, sweepVolOk, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+[tf2BearSweepRaw, tf2BearTop, tf2BearBottom, tf2BearIndex] = f_bear_sweep_from_stack(tf2ResTops, tf2ResBottoms, tf2ResUsedFlags, bearReclaimPos, sweepVolOk, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+[tf1BearSweepRaw, tf1BearTop, tf1BearBottom, tf1BearIndex] = f_bear_sweep_from_stack(tf1ResTops, tf1ResBottoms, tf1ResUsedFlags, bearReclaimPos, sweepVolOk, i_zone_penetration_frac, i_min_sweep_reclaim_pos)
+tf2BullSweep = i_use_tf2 and tf2BullSweepRaw
+tf1BullSweep = i_use_tf1 and tf1BullSweepRaw
+tf2BearSweep = i_use_tf2 and tf2BearSweepRaw
+tf1BearSweep = i_use_tf1 and tf1BearSweepRaw
+
+if i_prioritize_higher_tf
+    if tf2BullSweep
+        bullCandidateTop := tf2BullTop
+        bullCandidateBottom := tf2BullBottom
+        bullCandidateTf := f_tf_label(i_tf2)
+        bullCandidateFromTf2 := true
+        bullCandidateIndex := tf2BullIndex
+    else if tf1BullSweep
+        bullCandidateTop := tf1BullTop
+        bullCandidateBottom := tf1BullBottom
+        bullCandidateTf := f_tf_label(i_tf1)
+        bullCandidateIndex := tf1BullIndex
+
+    if tf2BearSweep
+        bearCandidateTop := tf2BearTop
+        bearCandidateBottom := tf2BearBottom
+        bearCandidateTf := f_tf_label(i_tf2)
+        bearCandidateFromTf2 := true
+        bearCandidateIndex := tf2BearIndex
+    else if tf1BearSweep
+        bearCandidateTop := tf1BearTop
+        bearCandidateBottom := tf1BearBottom
+        bearCandidateTf := f_tf_label(i_tf1)
+        bearCandidateIndex := tf1BearIndex
+else
+    if tf1BullSweep
+        bullCandidateTop := tf1BullTop
+        bullCandidateBottom := tf1BullBottom
+        bullCandidateTf := f_tf_label(i_tf1)
+        bullCandidateIndex := tf1BullIndex
+    else if tf2BullSweep
+        bullCandidateTop := tf2BullTop
+        bullCandidateBottom := tf2BullBottom
+        bullCandidateTf := f_tf_label(i_tf2)
+        bullCandidateFromTf2 := true
+        bullCandidateIndex := tf2BullIndex
+
+    if tf1BearSweep
+        bearCandidateTop := tf1BearTop
+        bearCandidateBottom := tf1BearBottom
+        bearCandidateTf := f_tf_label(i_tf1)
+        bearCandidateIndex := tf1BearIndex
+    else if tf2BearSweep
+        bearCandidateTop := tf2BearTop
+        bearCandidateBottom := tf2BearBottom
+        bearCandidateTf := f_tf_label(i_tf2)
+        bearCandidateFromTf2 := true
+        bearCandidateIndex := tf2BearIndex
+
+if not na(bullCandidateTop)
+    bullSweepEvent := true
+    dbgBullSweepCount += 1
+    if not na(bullCandidateIndex)
+        if bullCandidateFromTf2
+            array.set(tf2SupUsedFlags, bullCandidateIndex, true)
+        else
+            array.set(tf1SupUsedFlags, bullCandidateIndex, true)
+    strategy.cancel("Long")
+    if not na(longObBox)
+        box.delete(longObBox)
+    longSetupActive := true
+    longChochConfirmed := false
+    longOrderArmed := false
+    longRetryArmed := false
+    longSweepTf := bullCandidateTf
+    longZoneTop := bullCandidateTop
+    longZoneBottom := bullCandidateBottom
+    longSweepBar := bar_index
+    longSweepTime := time
+    longSweepExtreme := low
+    longChochBar := na
+    longChochTime := na
+    longChochBreakLevel := na
+    longObTop := na
+    longObBottom := na
+    longObTime := na
+    longLimitPrice := na
+    longStopPrice := na
+    longObBox := na
+
+if not na(bearCandidateTop)
+    bearSweepEvent := true
+    dbgBearSweepCount += 1
+    if not na(bearCandidateIndex)
+        if bearCandidateFromTf2
+            array.set(tf2ResUsedFlags, bearCandidateIndex, true)
+        else
+            array.set(tf1ResUsedFlags, bearCandidateIndex, true)
+    strategy.cancel("Short")
+    if not na(shortObBox)
+        box.delete(shortObBox)
+    shortSetupActive := true
+    shortChochConfirmed := false
+    shortOrderArmed := false
+    shortRetryArmed := false
+    shortSweepTf := bearCandidateTf
+    shortZoneTop := bearCandidateTop
+    shortZoneBottom := bearCandidateBottom
+    shortSweepBar := bar_index
+    shortSweepTime := time
+    shortSweepExtreme := high
+    shortChochBar := na
+    shortChochTime := na
+    shortChochBreakLevel := na
+    shortObTop := na
+    shortObBottom := na
+    shortObTime := na
+    shortLimitPrice := na
+    shortStopPrice := na
+    shortObBox := na
+
+maxChochWaitExecBars = i_max_structure_bars_to_choch * math.max(1, timeframe.in_seconds(i_structure_tf) / timeframe.in_seconds())
+
+if longSetupActive and not longChochConfirmed
+    longPreChochInvalid = i_invalidate_on_close ? close < longZoneBottom : low < longZoneBottom
+    if longPreChochInvalid or bar_index - longSweepBar > maxChochWaitExecBars
+        longSetupActive := false
+        longRetryArmed := false
+        strategy.cancel("Long")
+    else
+        longSweepExtreme := math.min(longSweepExtreme, low)
+    if longSetupActive and not longChochConfirmed and structureBullChoch and structureBarCloseTime > longSweepTime and bar_index > longSweepBar and (not i_require_choch_fvg or structureBullFvg)
+        [nextBullObTop, nextBullObBottom, nextBullObTime] = f_find_bullish_ob(i_ob_search_exec_bars, bar_index - longSweepBar, i_ob_use_body)
+        if not na(nextBullObTop) and not na(nextBullObBottom)
+            bullChochEvent := true
+            dbgBullChochCount += 1
+            longChochConfirmed := true
+            longOrderArmed := true
+            longChochBar := bar_index
+            longChochTime := structureBarCloseTime
+            longChochBreakLevel := structureBullBreakLevel
+            longObTop := nextBullObTop
+            longObBottom := nextBullObBottom
+            longObTime := nextBullObTime
+            longStopPrice := longSweepExtreme - atr * i_stop_buffer_atr
+            obRange = longObTop - longObBottom
+            longLimitPrice := i_entry_mode == "Zone Retest" ? longZoneTop : longObBottom + obRange * i_limit_entry_pos
+            pendingLongStop := longStopPrice
+            if i_show_ob_boxes
+                longObBox := box.new(longObTime, longObTop, time, longObBottom, xloc = xloc.bar_time, bgcolor = i_bull_ob_color, border_color = color.new(color.lime, 0))
+        else
+            longSetupActive := false
+            longRetryArmed := false
+            strategy.cancel("Long")
+
+if shortSetupActive and not shortChochConfirmed
+    shortPreChochInvalid = i_invalidate_on_close ? close > shortZoneTop : high > shortZoneTop
+    if shortPreChochInvalid or bar_index - shortSweepBar > maxChochWaitExecBars
+        shortSetupActive := false
+        shortRetryArmed := false
+        strategy.cancel("Short")
+    else
+        shortSweepExtreme := math.max(shortSweepExtreme, high)
+    if shortSetupActive and not shortChochConfirmed and structureBearChoch and structureBarCloseTime > shortSweepTime and bar_index > shortSweepBar and (not i_require_choch_fvg or structureBearFvg)
+        [nextBearObTop, nextBearObBottom, nextBearObTime] = f_find_bearish_ob(i_ob_search_exec_bars, bar_index - shortSweepBar, i_ob_use_body)
+        if not na(nextBearObTop) and not na(nextBearObBottom)
+            bearChochEvent := true
+            dbgBearChochCount += 1
+            shortChochConfirmed := true
+            shortOrderArmed := true
+            shortChochBar := bar_index
+            shortChochTime := structureBarCloseTime
+            shortChochBreakLevel := structureBearBreakLevel
+            shortObTop := nextBearObTop
+            shortObBottom := nextBearObBottom
+            shortObTime := nextBearObTime
+            shortStopPrice := shortSweepExtreme + atr * i_stop_buffer_atr
+            obRange = shortObTop - shortObBottom
+            shortLimitPrice := i_entry_mode == "Zone Retest" ? shortZoneBottom : shortObTop - obRange * i_limit_entry_pos
+            pendingShortStop := shortStopPrice
+            if i_show_ob_boxes
+                shortObBox := box.new(shortObTime, shortObTop, time, shortObBottom, xloc = xloc.bar_time, bgcolor = i_bear_ob_color, border_color = color.new(color.red, 0))
+        else
+            shortSetupActive := false
+            shortRetryArmed := false
+            strategy.cancel("Short")
+
+if longSetupActive and longChochConfirmed and not na(longObBox)
+    box.set_right(longObBox, time)
+
+if shortSetupActive and shortChochConfirmed and not na(shortObBox)
+    box.set_right(shortObBox, time)
+
+[bullBiasScore, bearBiasScore] = f_bias_scores(bias4h, bias1d, first4Return, first4RangePos, prevDayReturn, dayOfWeek)
+filtersEnabled = f_bias_filters_enabled()
+netBiasScore = bullBiasScore - bearBiasScore
+visualBiasValue = i_bias_mode == "4H EMA" ? bias4h : bias4h + bias1d
+longBiasOk = f_long_bias_ok(bullBiasScore, bearBiasScore)
+shortBiasOk = f_short_bias_ok(bullBiasScore, bearBiasScore)
+
+f_block_reason(bool deadZone, bool biasOk) =>
+    deadZone and not biasOk ? "Blocked: dead zone + bias" : deadZone ? "Blocked: dead zone" : "Blocked: bias"
+
+f_long_pre_entry_invalid(string mode, bool retryArmed, bool invalidateOnClose, float closeVal, float lowVal, float obBottomVal, float zoneBottomVal, float stopVal) =>
+    effectiveMode = mode == "Blocked Setup Retry" ? (retryArmed ? "Stop Sweep" : "OB Or Stop Wick") : mode
+    effectiveMode == "OB Or Stop Wick" ? ((invalidateOnClose ? closeVal < obBottomVal : lowVal < obBottomVal) or lowVal <= stopVal) :
+     effectiveMode == "OB Or Stop Close" ? ((invalidateOnClose ? closeVal < obBottomVal : lowVal < obBottomVal) or closeVal <= stopVal) :
+     effectiveMode == "Stop Sweep" ? lowVal <= stopVal :
+     (invalidateOnClose ? closeVal < zoneBottomVal : lowVal < zoneBottomVal)
+
+f_short_pre_entry_invalid(string mode, bool retryArmed, bool invalidateOnClose, float closeVal, float highVal, float obTopVal, float zoneTopVal, float stopVal) =>
+    effectiveMode = mode == "Blocked Setup Retry" ? (retryArmed ? "Stop Sweep" : "OB Or Stop Wick") : mode
+    effectiveMode == "OB Or Stop Wick" ? ((invalidateOnClose ? closeVal > obTopVal : highVal > obTopVal) or highVal >= stopVal) :
+     effectiveMode == "OB Or Stop Close" ? ((invalidateOnClose ? closeVal > obTopVal : highVal > obTopVal) or closeVal >= stopVal) :
+     effectiveMode == "Stop Sweep" ? highVal >= stopVal :
+     (invalidateOnClose ? closeVal > zoneTopVal : highVal > zoneTopVal)
+
+if longSetupActive and longChochConfirmed
+    longExpired = bar_index - longChochBar > i_retest_valid_exec_bars
+    longInvalidBoundary = i_entry_mode == "Zone Retest" ? longZoneBottom : longObBottom
+    longInvalid = f_long_pre_entry_invalid(i_pre_entry_invalidation_mode, longRetryArmed, i_invalidate_on_close, close, low, longInvalidBoundary, longZoneBottom, longStopPrice)
+    longRetryTrendInvalid = i_pre_entry_invalidation_mode == "Blocked Setup Retry" and longRetryArmed and not longBiasOk
+    longRetryStructureInvalid = i_pre_entry_invalidation_mode == "Blocked Setup Retry" and longRetryArmed and structureBullChoch and structureBarCloseTime > longChochTime and not na(structureBullBreakLevel) and not na(longChochBreakLevel) and structureBullBreakLevel > longChochBreakLevel
+    if longExpired or longInvalid or longRetryTrendInvalid or longRetryStructureInvalid
+        longSetupActive := false
+        longChochConfirmed := false
+        longOrderArmed := false
+        longRetryArmed := false
+        pendingLongStop := na
+        longChochBreakLevel := na
+        strategy.cancel("Long")
+    else if strategy.position_size == 0
+        longCanTrade = not inDeadZone and longBiasOk
+        if not inDeadZone and longBiasOk
+            if i_entry_mode == "Limit Mid" or i_entry_mode == "Zone Retest"
+                strategy.entry("Long", strategy.long, limit = longLimitPrice)
+                bullEntryEvent := low <= longLimitPrice and high >= longLimitPrice
+                if bullEntryEvent
+                    dbgBullEntrySignalCount += 1
+                    longRetryArmed := false
+            else
+                longObRange = longObTop - longObBottom
+                longRetestClose = longObBottom + longObRange * i_retest_close_pos
+                longTouched = low <= longObTop and high >= longObBottom
+                if longTouched and close >= longRetestClose and longStopPrice < close
+                    bullEntryEvent := true
+                    dbgBullEntrySignalCount += 1
+                    longRetryArmed := false
+                    strategy.entry("Long", strategy.long)
+        else
+            strategy.cancel("Long")
+            if i_entry_mode == "Limit Mid" or i_entry_mode == "Zone Retest"
+                longWouldEnter = low <= longLimitPrice and high >= longLimitPrice and longStopPrice < longLimitPrice
+                if longWouldEnter
+                    if i_pre_entry_invalidation_mode == "Blocked Setup Retry" and inDeadZone and longBiasOk
+                        longRetryArmed := true
+                    bullFilterBlockEvent := true
+                    bullFilterBlockReason := f_block_reason(inDeadZone, longBiasOk)
+                    dbgBullFilterBlockCount += 1
+            else
+                longObRange = longObTop - longObBottom
+                longRetestClose = longObBottom + longObRange * i_retest_close_pos
+                longTouched = low <= longObTop and high >= longObBottom
+                longWouldEnter = longTouched and close >= longRetestClose and longStopPrice < close
+                if longWouldEnter
+                    if i_pre_entry_invalidation_mode == "Blocked Setup Retry" and inDeadZone and longBiasOk
+                        longRetryArmed := true
+                    bullFilterBlockEvent := true
+                    bullFilterBlockReason := f_block_reason(inDeadZone, longBiasOk)
+                    dbgBullFilterBlockCount += 1
+
+if shortSetupActive and shortChochConfirmed
+    shortExpired = bar_index - shortChochBar > i_retest_valid_exec_bars
+    shortInvalidBoundary = i_entry_mode == "Zone Retest" ? shortZoneTop : shortObTop
+    shortInvalid = f_short_pre_entry_invalid(i_pre_entry_invalidation_mode, shortRetryArmed, i_invalidate_on_close, close, high, shortInvalidBoundary, shortZoneTop, shortStopPrice)
+    shortRetryTrendInvalid = i_pre_entry_invalidation_mode == "Blocked Setup Retry" and shortRetryArmed and not shortBiasOk
+    shortRetryStructureInvalid = i_pre_entry_invalidation_mode == "Blocked Setup Retry" and shortRetryArmed and structureBearChoch and structureBarCloseTime > shortChochTime and not na(structureBearBreakLevel) and not na(shortChochBreakLevel) and structureBearBreakLevel < shortChochBreakLevel
+    if shortExpired or shortInvalid or shortRetryTrendInvalid or shortRetryStructureInvalid
+        shortSetupActive := false
+        shortChochConfirmed := false
+        shortOrderArmed := false
+        shortRetryArmed := false
+        pendingShortStop := na
+        shortChochBreakLevel := na
+        strategy.cancel("Short")
+    else if strategy.position_size == 0
+        if not inDeadZone and shortBiasOk
+            if i_entry_mode == "Limit Mid" or i_entry_mode == "Zone Retest"
+                strategy.entry("Short", strategy.short, limit = shortLimitPrice)
+                bearEntryEvent := low <= shortLimitPrice and high >= shortLimitPrice
+                if bearEntryEvent
+                    dbgBearEntrySignalCount += 1
+                    shortRetryArmed := false
+            else
+                shortObRange = shortObTop - shortObBottom
+                shortRetestClose = shortObTop - shortObRange * i_retest_close_pos
+                shortTouched = high >= shortObBottom and low <= shortObTop
+                if shortTouched and close <= shortRetestClose and shortStopPrice > close
+                    bearEntryEvent := true
+                    dbgBearEntrySignalCount += 1
+                    shortRetryArmed := false
+                    strategy.entry("Short", strategy.short)
+        else
+            strategy.cancel("Short")
+            if i_entry_mode == "Limit Mid" or i_entry_mode == "Zone Retest"
+                shortWouldEnter = low <= shortLimitPrice and high >= shortLimitPrice and shortStopPrice > shortLimitPrice
+                if shortWouldEnter
+                    if i_pre_entry_invalidation_mode == "Blocked Setup Retry" and inDeadZone and shortBiasOk
+                        shortRetryArmed := true
+                    bearFilterBlockEvent := true
+                    bearFilterBlockReason := f_block_reason(inDeadZone, shortBiasOk)
+                    dbgBearFilterBlockCount += 1
+            else
+                shortObRange = shortObTop - shortObBottom
+                shortRetestClose = shortObTop - shortObRange * i_retest_close_pos
+                shortTouched = high >= shortObBottom and low <= shortObTop
+                shortWouldEnter = shortTouched and close <= shortRetestClose and shortStopPrice > close
+                if shortWouldEnter
+                    if i_pre_entry_invalidation_mode == "Blocked Setup Retry" and inDeadZone and shortBiasOk
+                        shortRetryArmed := true
+                    bearFilterBlockEvent := true
+                    bearFilterBlockReason := f_block_reason(inDeadZone, shortBiasOk)
+                    dbgBearFilterBlockCount += 1
+
+newLong = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+flatNow = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if newLong
+    activeEntryBar := bar_index
+    activeLongStop := pendingLongStop
+    longRisk = strategy.position_avg_price - activeLongStop
+    activeLongTarget := longRisk > syminfo.mintick ? strategy.position_avg_price + longRisk * i_target_rr : na
+    pendingLongStop := na
+    strategy.cancel("Long")
+    longSetupActive := false
+    longChochConfirmed := false
+    longOrderArmed := false
+
+if newShort
+    activeEntryBar := bar_index
+    activeShortStop := pendingShortStop
+    shortRisk = activeShortStop - strategy.position_avg_price
+    activeShortTarget := shortRisk > syminfo.mintick ? strategy.position_avg_price - shortRisk * i_target_rr : na
+    pendingShortStop := na
+    strategy.cancel("Short")
+    shortSetupActive := false
+    shortChochConfirmed := false
+    shortOrderArmed := false
+
+if strategy.position_size > 0 and not na(activeLongStop) and not na(activeLongTarget)
+    strategy.exit("Long Exit", "Long", stop = activeLongStop, limit = activeLongTarget)
+    if not na(activeEntryBar) and bar_index - activeEntryBar >= i_max_hold_exec_bars
+        strategy.close("Long", comment = "Time")
+
+if strategy.position_size < 0 and not na(activeShortStop) and not na(activeShortTarget)
+    strategy.exit("Short Exit", "Short", stop = activeShortStop, limit = activeShortTarget)
+    if not na(activeEntryBar) and bar_index - activeEntryBar >= i_max_hold_exec_bars
+        strategy.close("Short", comment = "Time")
+
+if flatNow
+    activeEntryBar := na
+    activeLongStop := na
+    activeLongTarget := na
+    activeShortStop := na
+    activeShortTarget := na
+
+biasBgColor = visualBiasValue > 0 ? color.new(color.lime, i_bias_bg_transparency) : visualBiasValue < 0 ? color.new(color.red, i_bias_bg_transparency) : na
+bgcolor(i_show_bias_bg ? biasBgColor : na, title = "HTF Bias Background")
+plot(i_show_4h_bias_ema ? biasEma4h : na, "4H Bias EMA", color = bias4h > 0 ? i_4h_bias_ema_bull_color : bias4h < 0 ? i_4h_bias_ema_bear_color : color.new(color.gray, 20), linewidth = 2)
+plot(i_show_1d_bias_ema ? biasEma1d : na, "1D Bias EMA", color = bias1d > 0 ? i_1d_bias_ema_bull_color : bias1d < 0 ? i_1d_bias_ema_bear_color : color.new(color.gray, 10), linewidth = 3)
+
+plotshape(bullSweepEvent, title = "Bullish Sweep", style = shape.circle, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny, text = "Sweep")
+plotshape(bearSweepEvent, title = "Bearish Sweep", style = shape.circle, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny, text = "Sweep")
+plotshape(bullChochEvent, title = "Bullish CHoCH", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.small, text = "CH")
+plotshape(bearChochEvent, title = "Bearish CHoCH", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.small, text = "CH")
+plotshape(bullEntryEvent, title = "Bullish OB Retest", style = shape.labelup, location = location.belowbar, color = color.new(color.lime, 0), textcolor = color.white, size = size.small, text = "Long")
+plotshape(bearEntryEvent, title = "Bearish OB Retest", style = shape.labeldown, location = location.abovebar, color = color.new(color.red, 0), textcolor = color.white, size = size.small, text = "Short")
+plotshape(bullFilterBlockEvent, title = "Bullish Filter Block", style = shape.xcross, location = location.belowbar, color = color.new(color.orange, 0), size = size.tiny, text = "Block")
+plotshape(bearFilterBlockEvent, title = "Bearish Filter Block", style = shape.xcross, location = location.abovebar, color = color.new(color.orange, 0), size = size.tiny, text = "Block")
+plot(dbgBullSweepCount, "DBG Bull Sweeps", color = color.new(color.lime, 100), display = display.data_window)
+plot(dbgBearSweepCount, "DBG Bear Sweeps", color = color.new(color.red, 100), display = display.data_window)
+plot(dbgBullChochCount, "DBG Bull CHoCH", color = color.new(color.green, 100), display = display.data_window)
+plot(dbgBearChochCount, "DBG Bear CHoCH", color = color.new(color.maroon, 100), display = display.data_window)
+plot(dbgBullEntrySignalCount, "DBG Bull Entry Signals", color = color.new(color.aqua, 100), display = display.data_window)
+plot(dbgBearEntrySignalCount, "DBG Bear Entry Signals", color = color.new(color.orange, 100), display = display.data_window)
+plot(dbgBullFilterBlockCount, "DBG Bull Filter Blocks", color = color.new(color.orange, 100), display = display.data_window)
+plot(dbgBearFilterBlockCount, "DBG Bear Filter Blocks", color = color.new(color.yellow, 100), display = display.data_window)
+plot(dbgTf1ResZoneCount, "DBG TF1 Res Zones", color = color.new(color.red, 100), display = display.data_window)
+plot(dbgTf1SupZoneCount, "DBG TF1 Sup Zones", color = color.new(color.lime, 100), display = display.data_window)
+plot(dbgTf2ResZoneCount, "DBG TF2 Res Zones", color = color.new(color.maroon, 100), display = display.data_window)
+plot(dbgTf2SupZoneCount, "DBG TF2 Sup Zones", color = color.new(color.teal, 100), display = display.data_window)
+plot(bullBiasScore, "DBG Bull Bias Score", color = color.new(color.lime, 100), display = display.data_window)
+plot(bearBiasScore, "DBG Bear Bias Score", color = color.new(color.red, 100), display = display.data_window)
+plot(sweepVolMult, "DBG Sweep Vol / SMA20", color = color.new(color.blue, 100), display = display.data_window)
+plot(first4Return, "DBG First 4H Return %", color = color.new(color.aqua, 100), display = display.data_window)
+plot(first4RangePos, "DBG First 4H Range Pos", color = color.new(color.fuchsia, 100), display = display.data_window)
+plot(prevDayReturn, "DBG Prev Day Return %", color = color.new(color.gray, 100), display = display.data_window)
+
+var table biasTable = table.new(position.top_right, 2, 7, frame_color = color.new(color.white, 75), border_width = 1)
+
+if barstate.islastconfirmedhistory
+    if i_show_bias_panel
+        table.cell(biasTable, 0, 0, "HTF Bias", text_color = color.white, bgcolor = color.new(color.black, 15), text_halign = text.align_left)
+        table.cell(biasTable, 1, 0, f_bias_mode_text(), text_color = color.white, bgcolor = color.new(color.black, 15), text_halign = text.align_right)
+        table.cell(biasTable, 0, 1, "4H EMA", text_color = color.white, bgcolor = color.new(color.black, 35), text_halign = text.align_left)
+        table.cell(biasTable, 1, 1, f_bias_text(bias4h), text_color = color.white, bgcolor = f_bias_bg_color(bias4h), text_halign = text.align_right)
+        table.cell(biasTable, 0, 2, "1D EMA", text_color = color.white, bgcolor = color.new(color.black, 35), text_halign = text.align_left)
+        table.cell(biasTable, 1, 2, f_bias_text(bias1d), text_color = color.white, bgcolor = f_bias_bg_color(bias1d), text_halign = text.align_right)
+        table.cell(biasTable, 0, 3, "Net Score", text_color = color.white, bgcolor = color.new(color.black, 35), text_halign = text.align_left)
+        table.cell(biasTable, 1, 3, f_net_bias_text(netBiasScore), text_color = color.white, bgcolor = f_bias_bg_color(netBiasScore), text_halign = text.align_right)
+        table.cell(biasTable, 0, 4, "Longs", text_color = color.white, bgcolor = color.new(color.black, 35), text_halign = text.align_left)
+        table.cell(biasTable, 1, 4, f_allow_text(filtersEnabled, longBiasOk), text_color = color.white, bgcolor = f_allow_bg_color(filtersEnabled, longBiasOk), text_halign = text.align_right)
+        table.cell(biasTable, 0, 5, "Shorts", text_color = color.white, bgcolor = color.new(color.black, 35), text_halign = text.align_left)
+        table.cell(biasTable, 1, 5, f_allow_text(filtersEnabled, shortBiasOk), text_color = color.white, bgcolor = f_allow_bg_color(filtersEnabled, shortBiasOk), text_halign = text.align_right)
+        table.cell(biasTable, 0, 6, "4H/1D", text_color = color.white, bgcolor = color.new(color.black, 35), text_halign = text.align_left)
+        table.cell(biasTable, 1, 6, f_bias_text(visualBiasValue), text_color = color.white, bgcolor = f_bias_bg_color(visualBiasValue), text_halign = text.align_right)
+    else
+        table.clear(biasTable, 0, 0, 1, 6)
+
+if bullSweepEvent and i_show_event_labels
+    label.new(time, low, longSweepTf + " tap + reclaim", xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.lime, 0), textcolor = color.white, size = size.small)
+
+if bearSweepEvent and i_show_event_labels
+    label.new(time, high, shortSweepTf + " tap + reclaim", xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+if bullChochEvent and i_show_event_labels
+    label.new(time, low, "Bull CHoCH " + i_structure_tf, xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
+
+if bearChochEvent and i_show_event_labels
+    label.new(time, high, "Bear CHoCH " + i_structure_tf, xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+if bullFilterBlockEvent and i_show_filter_block_labels
+    label.new(time, low, bullFilterBlockReason, xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.orange, 0), textcolor = color.white, size = size.small)
+
+if bearFilterBlockEvent and i_show_filter_block_labels
+    label.new(time, high, bearFilterBlockReason, xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.white, size = size.small)
+
+validExecTf = timeframe.in_seconds() == timeframe.in_seconds("5") or timeframe.in_seconds() == timeframe.in_seconds("15")
+
+if i_show_debug_warning and not validExecTf
+    var label tfWarn = na
+    if barstate.islastconfirmedhistory
+        if na(tfWarn)
+            tfWarn := label.new(time, high, "Use on 5m or 15m chart", xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.white, size = size.small)
+        else
+            label.set_x(tfWarn, time)
+            label.set_y(tfWarn, high)
+            label.set_text(tfWarn, "Use on 5m or 15m chart")

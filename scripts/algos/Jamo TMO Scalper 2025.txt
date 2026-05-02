@@ -1,0 +1,1100 @@
+//@version=5
+strategy('Jamo TMO Scalper 2025', overlay=false, format=format.price, precision=2)
+
+//15 Mins 2025 TMO Strat
+//Indicators:
+//BF 210, 21
+//T3 600
+//BBands 120, 2
+//DSL
+//CDV
+//TMO 30, 90, 240 2D
+
+//If you lose you wait X number of bars befor entering again
+
+//Main Strat
+//T3, BF, HTFTMO, and BBands need to match - Strong Trend
+
+/////////////////////////////////////////////////////////
+//////////////////// Optimiser Start ////////////////////
+/////////////////////////////////////////////////////////
+
+varT3Length = 370 //Default 5
+varfactorT3 = 0.7 //Default 0.7
+
+STFTMO = '30'
+LTFTMO = '90'
+MTFTMO = '240'
+HTFTMO = '2D'
+
+BFPeriod = 210
+BFFactor = 21
+
+T3Stagger = 30
+
+atrNum = 0 //1,2,3
+takeProfit = 1
+orderDelay = 250
+setStiffnessThreshold = 1 //Default 10
+ATRFactor = 3 //Default 2.5
+
+///////////////////////////////////////////////////////
+//////////////////// Optimiser End ////////////////////
+///////////////////////////////////////////////////////
+
+
+///////////////////////////////////////////////////
+//////////////////// TMO Start ////////////////////
+///////////////////////////////////////////////////
+
+TimeFrame1 = input.timeframe(STFTMO, "TMO 1", options = ['1','2','3','5','10','15','20','30','45',"60","90","120","180","240","480","720",'D','2D','3D','4D','W','2W','3W','M','2M','3M'], group = "Time Frames")
+TimeFrame2 = input.timeframe(LTFTMO, "TMO 2", options = ['1','2','3','5','10','15','20','30','45',"60","90","120","180","240","480","720",'D','2D','3D','4D','W','2W','3W','M','2M','3M'], group = "Time Frames")
+TimeFrame3 = input.timeframe(MTFTMO, "TMO 3", options = ['1','2','3','5','10','15','20','30','45',"60","90","120","180","240","480","720",'D','2D','3D','4D','W','2W','3W','M','2M','3M'], group = "Time Frames")
+TimeFrame4 = input.timeframe(HTFTMO, "TMO 4", options = ['1','2','3','5','10','15','20','30','45',"60","90","120","180","240","480","720",'D','2D','3D','4D','W','2W','3W','M','2M','3M'], group = "Time Frames")
+
+tmolength = input.int(14,title = "Length", group = "Settings")
+calcLength = input(5, title = "Calc Length", group = "Settings")
+smoothLength = input(3, title = "Smooth Length", group = "Settings")
+
+dotsize = input(3, title = "Signal Size", group = "Signal Settings")
+offset = input(2,title = "Signal Offset", group = "Signal Settings")
+oblevel = input(9,title = "OB Extreme Threshold", group = "Signal Settings")
+oslevel = input(-9,title = "OS Extreme Threshold", group = "Signal Settings")
+
+ShowTMO1 = input(defval = true, title = "Show TMO 1", group = "True Momentum Oscillator 1")
+TMO1Bullish = input(#27c22e, title = "Bullish", group = "True Momentum Oscillator 1")
+TMO1Bearish = input(#ff0000, title = "Bearish", group = "True Momentum Oscillator 1")
+TMO1CloudUp = input(color.new(#27c22e, 75), title = "Fill Bullish", group = "True Momentum Oscillator 1")
+TMO1CloudDn = input(color.new(#ff0000, 75), title = "Fill Bearish", group = "True Momentum Oscillator 1")
+
+ShowTMO2 = input(defval = true, title = "Show TMO 2", group = "True Momentum Oscillator 2")
+TMO2Bullish = input(#27c22e, title = "Bullish", group = "True Momentum Oscillator 2")
+TMO2Bearish = input(#ff0000, title = "Bearish", group = "True Momentum Oscillator 2")
+TMO2CloudUp = input(color.new(#27c22e, 75), title = "Fill Bullish", group = "True Momentum Oscillator 2")
+TMO2CloudDn = input(color.new(#ff0000, 75), title = "Fill Bearish", group = "True Momentum Oscillator 2")
+
+ShowTMO3 = input(defval=true, title = "Show TMO 3", group = "True Momentum Oscillator 3")
+TMO3Bullish = input(#006400, title = "Bullish", group = "True Momentum Oscillator 3")
+TMO3Bearish = input(#800000, title = "Bearish", group = "True Momentum Oscillator 3")
+TMO3CloudUp = input(color.new(#27c22e, 75), title = "Fill Bullish", group = "True Momentum Oscillator 3")
+TMO3CloudDn = input(color.new(#ff0000, 75), title = "Fill Bearish", group = "True Momentum Oscillator 3")
+
+ShowTMO4 = input(defval=true, title = "Show TMO 4", group = "True Momentum Oscillator 4")
+TMO4Bullish = input(#006400, title = "Bullish", group = "True Momentum Oscillator 4")
+TMO4Bearish = input(#800000, title = "Bearish", group = "True Momentum Oscillator 4")
+TMO4CloudUp = input(color.new(#27c22e, 75), title = "Fill Bullish", group = "True Momentum Oscillator 4")
+TMO4CloudDn = input(color.new(#ff0000, 75), title = "Fill Bearish", group = "True Momentum Oscillator 4")
+
+ShowTMOS1 = input(defval = true, title = "Show TMO 1 Signals", group = "True Momentum Oscillator 1 Signals")
+ShowTMOS11 = input(defval = false, title = "Show TMO 1 Signals (Extremes Only)", group = "True Momentum Oscillator 1 Signals")
+TMO1UpSignal = input(#27c22e, title = "TMO 1 Up Signal", group = "True Momentum Oscillator 1 Signals")
+TMO1DnSignal = input(#ff0000, title = "TMO 1 Down Signal", group = "True Momentum Oscillator 1 Signals")
+TMO1CharUp = input('▴',title = "TMO 1 Up", group = "True Momentum Oscillator 1 Signals")
+TMO1CharDn = input('▾',title = "TMO 1 Down", group = "True Momentum Oscillator 1 Signals")
+
+ShowTMOS2 = input(defval = true, title = "Show TMO 2 Signals", group = "True Momentum Oscillator 2 Signals")
+ShowTMOS22 = input(defval = false, title = "Show TMO 2 Signals (Extremes Only)", group = "True Momentum Oscillator 2 Signals")
+TMO2UpSignal = input(#006400, title = "TMO 2 Up Signal", group = "True Momentum Oscillator 2 Signals")
+TMO2DnSignal = input(#800000, title = "TMO 2 Down Signal", group = "True Momentum Oscillator 2 Signals")
+TMO2CharUp = input('▴',title = "TMO 2 Up", group = "True Momentum Oscillator 2 Signals")
+TMO2CharDn = input('▾',title = "TMO 2 Down", group = "True Momentum Oscillator 2 Signals")
+
+ShowUpperL = input(defval = false, title = "Show OB Line", group = "Oscillator Settings")
+UpperLineColor = input(#ff0000, title = "OB Line Color", group = "Oscillator Settings")
+ShowLowerL = input(defval = false, title = "Show OS Line", group = "Oscillator Settings")
+LowerLineColor = input(#27c22e, title = "OS Line Color", group = "Oscillator Settings")
+ShowObLine = input(defval = true, title = "Show OB Cutoff Line", group = "Oscillator Settings")
+ObLineColor = input(#ff0000, title = "OB Cutoff Line Color", group = "Oscillator Settings")
+ShowOsLine = input(defval = true, title = "Show OS Cutoff Line", group = "Oscillator Settings")
+OsLineColor = input(#27c22e, title = "OS Cutoff Line Color", group = "Oscillator Settings")
+ShowObFill = input(defval = true, title = "Show OB Fill", group = "Oscillator Settings")
+OBFillColor = input(color.new(#ff0000, 75), title = "OB Fill Color", group = "Oscillator Settings")
+ShowOsFill = input(defval = true, title = "Show OS Fill", group = "Oscillator Settings")
+OSFillColor = input(color.new(#27c22e, 75), title = "OS Fill Color", group = "Oscillator Settings")
+ShowZeroLine = input(defval = true, title = "Show Zero Line", group = "Oscillator Settings")
+ZeroLineColor = input(color.new(#2a2e39, 0), title = "Zero Line Color", group = "Oscillator Settings")
+
+// TMO 1 Calculations
+srcc1 = request.security(syminfo.tickerid, TimeFrame1, close)
+srco1 = request.security(syminfo.tickerid, TimeFrame1, open)
+o1 =  srco1
+c1 =  srcc1
+
+data1 = 0
+for i1 = 1 to tmolength -1
+    if c1 > o1[i1]
+        data1 := data1 + 1
+    if c1 < o1[i1]
+        data1 := data1 - 1
+
+
+EMA1 = ta.ema(data1,calcLength)
+Main1 = request.security(syminfo.tickerid, TimeFrame1, ta.ema(EMA1, smoothLength))
+Signal1 = request.security(syminfo.tickerid, TimeFrame1, ta.ema(Main1, smoothLength))
+
+// TMO 2 Calculations
+srcc2 = request.security(syminfo.tickerid, TimeFrame2, close)
+srco2 = request.security(syminfo.tickerid, TimeFrame2, open)
+
+o2 =  srco2
+c2 =  srcc2
+
+data2 = 0
+for i2 = 1 to tmolength -1
+    if c2 > o2[i2]
+        data2 := data2 + 1
+    if c2 < o2[i2]
+        data2 := data2 - 1
+
+
+EMA2 = ta.ema(data2,calcLength)
+Main2 = request.security(syminfo.tickerid, TimeFrame2, ta.ema(EMA2, smoothLength))
+Signal2 = request.security(syminfo.tickerid, TimeFrame2, ta.ema(Main2, smoothLength))
+
+// TMO 3 Calculations
+srcc3 = request.security(syminfo.tickerid, TimeFrame3, close)
+srco3 = request.security(syminfo.tickerid, TimeFrame3, open)
+
+o3 =  srco3
+c3 =  srcc3
+
+data3 = 0
+for i3 = 1 to tmolength -1
+    if c3 > o3[i3]
+        data3 := data3 + 1
+    if c3 < o3[i3]
+        data3 := data3 - 1
+
+
+EMA3 = ta.ema(data3,calcLength)
+Main3 = request.security(syminfo.tickerid, TimeFrame3, ta.ema(EMA3, smoothLength))
+Signal3 = request.security(syminfo.tickerid, TimeFrame3, ta.ema(Main3, smoothLength))
+
+
+// TMO 4 Calculations
+srcc4 = request.security(syminfo.tickerid, TimeFrame4, close)
+srco4 = request.security(syminfo.tickerid, TimeFrame4, open)
+
+o4 =  srco4
+c4 =  srcc4
+
+data4 = 0
+for i4 = 1 to tmolength -1
+    if c4 > o4[i4]
+        data4 := data4 + 1
+    if c4 < o4[i4]
+        data4 := data4 - 1
+
+
+EMA4 = ta.ema(data4,calcLength)
+Main4 = request.security(syminfo.tickerid, TimeFrame4, ta.ema(EMA4, smoothLength))
+Signal4 = request.security(syminfo.tickerid, TimeFrame4, ta.ema(Main4, smoothLength))
+
+// TMO Scalper Signals
+mainln = (15*Main1/tmolength)
+signaln = (15*Signal1/tmolength)
+mainln2 = (15*Main2/tmolength)
+signaln2 = (15*Signal2/tmolength)
+mainln3 = (15*Main3/tmolength)
+signaln3 = (15*Signal3/tmolength)
+mainln4 = (15*Main4/tmolength)
+signaln4 = (15*Signal4/tmolength)
+
+// TMO 1 Bullish Signal    
+plotchar(ShowTMOS1 and ta.crossover(mainln, signaln) and (mainln2 > signaln2) ? (mainln-offset) : na, title = "TMO 1 Up Signal", char = TMO1CharUp, location = location.absolute, size = size.small, color = TMO1UpSignal, editable = false)
+// TMO 1 Bearish Signal
+plotchar(ShowTMOS1 and ta.crossover(signaln, mainln) and (mainln2 < signaln2) ? (mainln+offset) : na, title = "TMO 1 Down Signal", char = TMO1CharDn, location = location.absolute, size = size.small, color = TMO1DnSignal, editable = false)
+// TMO 1 Bullish Signal (Oversolds Only)   
+plotchar(ShowTMOS11 and ta.crossover(mainln, signaln) and (mainln < oslevel) and (mainln2 > signaln2) ? (mainln-offset) : na, title = "TMO 1 Up (Oversolds Only)", char = TMO1CharUp, location = location.absolute, size = size.small, color = TMO1UpSignal, editable = false)
+// TMO 1 Bearish Signal (Overboughts Only)
+plotchar(ShowTMOS11 and ta.crossover(signaln, mainln) and (mainln > oblevel) and (mainln2 < signaln2) ? (mainln+offset) : na, title = "TMO 1 Down (Overboughts Only)", char = TMO1CharDn, location = location.absolute, size = size.small, color = TMO1DnSignal, editable = false)
+// TMO 2 Bullish Signal
+plotchar(ShowTMOS2 and ta.crossover(mainln2, signaln2) and (mainln3 > signaln3) ? (mainln2-offset) : na, title = "TMO 2 Up Signal", char = TMO2CharUp, location = location.absolute, size = size.normal, color = TMO2UpSignal, editable = false)
+// TMO 2 Bearish Signal
+plotchar(ShowTMOS2 and ta.crossover(signaln2, mainln2) and (mainln3 < signaln3) ? (mainln2+offset) : na, title = "TMO 2 Down Signal", char = TMO2CharDn, location = location.absolute, size = size.normal, color = TMO2DnSignal, editable = false)
+// TMO 2 Bullish Signal (Oversolds Only)  
+plotchar(ShowTMOS22 and ta.crossover(mainln2, signaln2) and (mainln2 < oslevel) and (mainln3 > signaln3) ? (mainln2-offset) : na, title = "TMO 2 Up (Oversolds Only)", char = TMO2CharUp, location = location.absolute, size = size.normal, color = TMO2UpSignal, editable = false)
+// TMO 2 Bearish Signal (Overboughts Only)
+plotchar(ShowTMOS22 and ta.crossover(signaln2, mainln2) and (mainln2 > oblevel) and (mainln3 < signaln3) ? (mainln2+offset) : na, title = "TMO 2 Down (Overboughts Only)", char = TMO2CharDn, location = location.absolute, size = size.normal, color = TMO2DnSignal, editable = false)
+
+// TMO 1 Plots
+color1 = ShowTMO1 and Main1 > Signal1 ? TMO1Bullish : ShowTMO1 ? TMO1Bearish : na
+mainLine1 = plot(15*Main1/tmolength, title="TMO 1 Main", color=color1, editable = false)
+signalLine1 = plot(15*Signal1/tmolength, title="TMO 1 Signal", color=color1, editable = false)
+cloudcolor1 = ShowTMO1 and Main1 > Signal1 ? TMO1CloudUp : ShowTMO1 ? TMO1CloudDn : na
+fill(mainLine1, signalLine1, title="TMO 1 Fill", color=cloudcolor1, editable = false)
+
+// TMO 2 Plots
+color2 = ShowTMO2 and Main2 > Signal2 ? TMO2Bullish : ShowTMO2 ? TMO2Bearish : na
+mainLine2 = plot(15*Main2/tmolength, title="TMO 2 Main", color=color2, editable = false)
+signalLine2 = plot(15*Signal2/tmolength, title="TMO 2 Signal", color=color2, editable = false)
+cloudcolor2 = ShowTMO2 and Main2 > Signal2 ? TMO2CloudUp : ShowTMO2 ? TMO2CloudDn : na
+fill(mainLine2, signalLine2, title="TMO 2 Fill", color=cloudcolor2, editable = false)
+
+// TMO 3 Plots
+color3 = ShowTMO3 and Main3 > Signal3 ? TMO3Bullish : ShowTMO3 ? TMO3Bearish : na
+mainLine3 = plot(15*Main3/tmolength, title="TMO 3 Main", color=color3, editable = false)
+signalLine3 = plot(15*Signal3/tmolength, title="TMO 3 Signal", color=color3, editable = false)
+cloudcolor3 = ShowTMO3 and Main3 > Signal3 ? TMO3CloudUp : ShowTMO3 ? TMO3CloudDn : na
+fill(mainLine3, signalLine3, title="TMO 3 Fill", color=cloudcolor3, editable = false)
+
+// TMO 4 Plots
+color4 = ShowTMO4 and Main4 > Signal4 ? TMO4Bullish : ShowTMO4 ? TMO4Bearish : na
+mainLine4 = plot(15*Main4/tmolength, title="TMO 4 Main", color=color4, editable = false)
+signalLine4 = plot(15*Signal4/tmolength, title="TMO 4 Signal", color=color4, editable = false)
+cloudcolor4 = ShowTMO4 and Main4 > Signal4 ? TMO4CloudUp : ShowTMO4 ? TMO4CloudDn : na
+fill(mainLine4, signalLine4, title="TMO 4 Fill", color=cloudcolor4, editable = false)
+
+// Background & Colors
+upperlcolor = ShowUpperL ? UpperLineColor : na
+upper = hline(10, title="OB Line", color= upperlcolor, linestyle=hline.style_solid, editable = false)
+lowerlcolor = ShowLowerL ? LowerLineColor : na
+lower = hline(-10, title="OS Line", color= lowerlcolor, linestyle=hline.style_solid, editable = false)
+obcolor = ShowObLine ? ObLineColor : na
+ob = hline(math.round(15), title="OB Cutoff Line", color= obcolor, linestyle=hline.style_solid, editable = false)
+oscolor = ShowOsLine ? OsLineColor : na
+os = hline(-math.round(15), title="OS Cutoff Line", color= oscolor, linestyle=hline.style_solid, editable = false)
+zerol = ShowZeroLine ? ZeroLineColor : na
+zero = hline(0, title="Zero Line", color=zerol, linestyle=hline.style_solid, editable = false)
+fill(ob, upper, title="OB Fill", color= color.new(#ff0000, 75), editable = false)
+fill(os, lower, title="OS Fill", color= color.new(#27c22e, 75), editable = false)
+
+/////////////////////////////////////////////////
+//////////////////// TMO End ////////////////////
+/////////////////////////////////////////////////
+
+
+
+//////////////////////////////////////////////////
+//////////////////// T3 Start ////////////////////
+//////////////////////////////////////////////////
+
+useT3 = input.bool(true, 'Use T3?')
+crossT3 = input.bool(true, 'Cross confirmation? - T3')
+inverseT3 = input.bool(false, 'Inverse? - T3')
+
+lengthT3 = input(title='Length - T3', defval=varT3Length)
+factorT3 = input.float(title='Factor - T3', minval=0, maxval=1, defval=varfactorT3)
+highlightMovementsT3 = input(title='Highlight Movements ? - T3', defval=true)
+srcT3 = input(title='Source - T3', defval=close)
+
+gdT3(srcT3, lengthT3) =>
+    ta.ema(srcT3, lengthT3) * (1 + factorT3) - ta.ema(ta.ema(srcT3, lengthT3), lengthT3) * factorT3
+
+t3 = gdT3(gdT3(gdT3(srcT3, lengthT3), lengthT3), lengthT3)
+
+t3Color = highlightMovementsT3 ? t3 > t3[1] ? color.green : color.red : #6d1e7f
+t3Signals = t3 > t3[1] ? 1 : -1
+// Simplified condition for long and short signals based on `useT3` and `highlightMovementsT3` inputs
+
+basicLongCondition = t3Signals > 0 and close > t3
+basicShortCondition = t3Signals < 0 and close < t3
+
+t3SignalsLong = useT3 ? (highlightMovementsT3 ? basicLongCondition : close > t3) : true
+t3SignalsShort = useT3 ? (highlightMovementsT3 ? basicShortCondition : close < t3) : true
+
+// Simplified cross condition logic for long and short signals
+t3SignalsLongCross = crossT3 ? not t3SignalsLong[1] and t3SignalsLong : t3SignalsLong
+t3SignalsShortCross = crossT3 ? not t3SignalsShort[1] and t3SignalsShort : t3SignalsShort
+
+// Applying inverse logic to final signals
+t3SignalsLongFinal = inverseT3 ? t3SignalsShortCross : t3SignalsLongCross
+t3SignalsShortFinal = inverseT3 ? t3SignalsLongCross : t3SignalsShortCross
+
+////////////////////////////////////////////////
+//////////////////// T3 End ////////////////////
+////////////////////////////////////////////////
+
+
+
+////////////////////////////////////////////////
+/////////////// BlackFlag Start ////////////////
+////////////////////////////////////////////////
+
+trailType = input.string('modified', 'Trailtype', options=['modified', 'unmodified'])
+ATRPeriod = input(BFPeriod, 'ATR Period')
+ATRFactorBF = input(BFFactor, 'ATR Factor')
+show_fib_entries = input(true, 'Show Fib Entries?')
+
+norm_o = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, open)
+norm_h = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, high)
+norm_l = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, low)
+norm_c = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, close)
+
+Wild_ma(_src, _malength) =>
+    _wild = 0.0
+    _wild := nz(_wild[1]) + (_src - nz(_wild[1])) / _malength
+    _wild
+
+HiLo = math.min(norm_h - norm_l, 1.5 * nz(ta.sma(norm_h - norm_l, ATRPeriod)))
+
+HRef = norm_l <= norm_h[1] ? norm_h - norm_c[1] : norm_h - norm_c[1] - 0.5 * (norm_l - norm_h[1])
+
+LRef = norm_h >= norm_l[1] ? norm_c[1] - norm_l : norm_c[1] - norm_l - 0.5 * (norm_l[1] - norm_h)
+
+trueRange = trailType == 'modified' ? math.max(HiLo, HRef, LRef) : math.max(norm_h - norm_l, math.abs(norm_h - norm_c[1]), math.abs(norm_l - norm_c[1]))
+
+loss = ATRFactorBF * Wild_ma(trueRange, ATRPeriod)
+
+Up = norm_c - loss
+Dn = norm_c + loss
+
+TrendUp = Up
+TrendDown = Dn
+Trend = 1
+
+TrendUp := norm_c[1] > TrendUp[1] ? math.max(Up, TrendUp[1]) : Up
+TrendDown := norm_c[1] < TrendDown[1] ? math.min(Dn, TrendDown[1]) : Dn
+
+Trend := norm_c > TrendDown[1] ? 1 : norm_c < TrendUp[1] ? -1 : nz(Trend[1], 1)
+trail = Trend == 1 ? TrendUp : TrendDown
+
+ex = 0.0
+ex := ta.crossover(Trend, 0) ? norm_h : ta.crossunder(Trend, 0) ? norm_l : Trend == 1 ? math.max(ex[1], norm_h) : Trend == -1 ? math.min(ex[1], norm_l) : ex[1]
+
+state = Trend == 1 ? 'long' : 'short'
+
+fib1Level = 61.8
+fib2Level = 78.6
+fib3Level = 88.6
+
+f1 = ex + (trail - ex) * fib1Level / 100
+f2 = ex + (trail - ex) * fib2Level / 100
+f3 = ex + (trail - ex) * fib3Level / 100
+l100 = trail + 0
+
+l1 = state[1] == 'long' and ta.crossunder(norm_c, f1[1])
+l2 = state[1] == 'long' and ta.crossunder(norm_c, f2[1])
+l3 = state[1] == 'long' and ta.crossunder(norm_c, f3[1])
+s1 = state[1] == 'short' and ta.crossover(norm_c, f1[1])
+s2 = state[1] == 'short' and ta.crossover(norm_c, f2[1])
+s3 = state[1] == 'short' and ta.crossover(norm_c, f3[1])
+
+atrBF = ta.sma(trueRange, 14)
+
+///////////////////////////////////////////////
+//////////////// BlackFlag End ////////////////
+///////////////////////////////////////////////
+
+
+///////////////////////////////////////////////
+//////////////// DSL Osc Start ////////////////
+///////////////////////////////////////////////
+
+len      = input.int(10, "Length")
+dsl_mode = input.string("Fast", "DSL Lines Mode", ["Fast", "Slow"]) == "Fast" ? 2 : 1
+
+// Color definitions
+color_up = #8BD8BD
+color_dn = #436cd3
+
+// Condition for a dashed line
+bool dashed = bool(bar_index % 2)
+
+// Calculate RSI with a period of 10
+RSI = ta.rsi(close, 10)
+
+// Zero-Lag Exponential Moving Average function
+zlema(src, length) =>
+    lag      = math.floor((length - 1) / 2)
+    ema_data = 2 * src - src[lag]
+    ema2     = ta.ema(ema_data, length)
+    ema2
+
+// Discontinued Signal Lines
+dsl_lines(src, length)=>
+    up  = 0.
+    dn  = 0.
+    up := (src > ta.sma(src, length)) ? nz(up[1]) + dsl_mode / length * (src - nz(up[1])) : nz(up[1])  
+    dn := (src < ta.sma(src, length)) ? nz(dn[1]) + dsl_mode / length * (src - nz(dn[1])) : nz(dn[1])
+    [up, dn]
+
+// Calculate DSL lines for RSI
+[lvlu, lvld] = dsl_lines(RSI, len)
+
+// Calculate DSL oscillator using ZLEMA of the average of upper and lower DSL Lines
+dsl_osc = zlema((lvlu + lvld) / 2, 10)
+
+// Calculate DSL Lines for the oscillator
+[level_up, level_dn] = dsl_lines(dsl_osc, 10)
+
+// Determine color based on oscillator position relative to its DSL Lines
+color = color.from_gradient(dsl_osc, level_dn, level_up, color_dn, color_up)
+
+// Detect crossovers for signal generation
+up = ta.crossover(dsl_osc, level_dn) and dsl_osc < 55
+dn = ta.crossunder(dsl_osc, level_up) and dsl_osc > 50
+
+dslGreenColor = up and dsl_osc[1] ? dsl_osc < 40 ? color.lime : color.teal : na
+dslRedColor = dn and dsl_osc[1] ? dsl_osc > 60 ? color.red : color.maroon : na
+
+plotchar(up and dsl_osc[1] ? -16 : na , title = 'Buy circle', char='·', color = dslGreenColor, location = location.absolute, size = size.large)
+plotchar(dn and dsl_osc[1] ? -16 : na , title = 'Sell circle', char='·', color = dslRedColor, location = location.absolute, size = size.large)
+
+/////////////////////////////////////////////
+//////////////// DSL Osc End ////////////////
+/////////////////////////////////////////////
+
+
+
+//////////////////////////////////////////////
+//////////////// UT Bot Start ////////////////
+//////////////////////////////////////////////
+
+src = close
+
+keyvalue = input.float(8, title='Key Vaule. \'This changes the sensitivity\'', step=.5)
+atrperiod = input(12, title='ATR Period')
+xATR = ta.atr(atrperiod)
+nLoss = keyvalue * xATR
+
+xATRTrailingStop = 0.0
+iff_1 = src > nz(xATRTrailingStop[1], 0) ? src - nLoss : src + nLoss
+iff_2 = src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0) ? math.min(nz(xATRTrailingStop[1]), src + nLoss) : iff_1
+xATRTrailingStop := src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0) ? math.max(nz(xATRTrailingStop[1]), src - nLoss) : iff_2
+
+pos = 0
+iff_3 = src[1] > nz(xATRTrailingStop[1], 0) and src < nz(xATRTrailingStop[1], 0) ? -1 : nz(pos[1], 0)
+pos := src[1] < nz(xATRTrailingStop[1], 0) and src > nz(xATRTrailingStop[1], 0) ? 1 : iff_3
+
+xcolor = pos == -1 ? color.red : pos == 1 ? color.green : color.blue
+
+// plot(xATRTrailingStop, color=xcolor, title='Trailing Stop')
+buy = ta.crossover(src, xATRTrailingStop)
+sell = ta.crossunder(src, xATRTrailingStop)
+// barcolor = src > xATRTrailingStop
+
+// plotshape(buy, title='Buy', text='Buy', style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+// plotshape(sell, title='Sell', text='Sell', style=shape.labeldown, color=color.new(color.red, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+
+// barcolor(barcolor ? color.green : color.red)
+
+////////////////////////////////////////////
+//////////////// UT Bot End ////////////////
+////////////////////////////////////////////
+
+
+///////////////////////////////////////////
+//////////////// ATR Start ////////////////
+///////////////////////////////////////////
+
+atrPeriod = input.int(title='ATR Period', defval=14, minval=1)
+srcUpper = input(title='Source Upper', defval=close)
+srcLower = input(title='Source Lower', defval=close)
+atrMultiplierUpper = input.float(title='ATR Multiplier Upper', defval=ATRFactor)
+atrMultiplierLower = input.float(title='ATR Multiplier Lower', defval=ATRFactor)
+
+atr = ta.atr(atrPeriod)
+
+///////////////////////////////////////////
+//////////////// ATR End ////////////////
+///////////////////////////////////////////
+
+
+/////////////////////////////////////////////////
+//////////////// Stiffness Start ////////////////
+/////////////////////////////////////////////////
+
+useStiffness = input(title='Use Stiffness?', defval=false)
+
+maLengthStiffness = input.int(title='Moving Average Length - Stiffness', minval=1, defval=100)
+stiffLength = input.int(title='Stiffness Length', minval=1, defval=60)
+stiffSmooth = input.int(title='Stiffness Smoothing Length', minval=1, defval=3)
+thresholdStiffness = input.int(title='threshold - Stiffness', minval=1, defval=90)
+highlightThresholdCrossoversStiffness = input(title='Highlight threshold Stiffness Crossovers ?', defval=false)
+
+boundStiffness = ta.sma(close, maLengthStiffness) - 0.2 * ta.stdev(close, maLengthStiffness)
+sumAboveStiffness = math.sum(close > boundStiffness ? 1 : 0, stiffLength)
+stiffness = ta.ema(sumAboveStiffness * 100 / stiffLength, stiffSmooth)
+
+transparentStiffness = color.new(color.white, 100)
+
+bgColorStiffness = highlightThresholdCrossoversStiffness ? stiffness > thresholdStiffness ? color.new(#0ebb23,70) : color.new(color.red,70) : transparentStiffness
+
+
+signalStiffness = useStiffness ? stiffness > thresholdStiffness ? true : false : true
+
+///////////////////////////////////////////////
+//////////////// Stiffness End ////////////////
+///////////////////////////////////////////////
+
+
+
+//////////////////////////////////////////////////////
+//////////////// T3, BF, UT Bot Start ////////////////
+//////////////////////////////////////////////////////
+
+T3Green = false
+T3Red = false
+
+if t3 > t3[1]
+    T3Green := true
+else
+    T3Red := true
+
+BFGreen = Trend == 1 ? true : false
+
+Price_Above_UT = close > xATRTrailingStop ? true : false
+
+/////////////////////////////////////////////////////
+//////////////// T3 & BF, UT Bot End ////////////////
+/////////////////////////////////////////////////////
+
+
+
+//////////////////////////////////////////////
+//////////////// HTFTMO Start ////////////////
+//////////////////////////////////////////////
+
+SlowSignalOS = false
+SlowSignalOB = false
+
+HTFTMOMainValue = 15*Main4/tmolength
+HTFTMOSignalValue = 15*Signal4/tmolength
+
+//OS/OB
+if HTFTMOMainValue < -10
+    SlowSignalOS := true
+
+if HTFTMOSignalValue > 10
+    SlowSignalOB := true
+
+//Color
+HTFTMOGreen = Main4 > Signal4 ? true : false
+
+//Bars since OS/OB
+Bars_Since_HTFTMO_OS = ta.barssince(HTFTMOMainValue > -10)
+Bars_Since_HTFTMO_OB = ta.barssince(HTFTMOMainValue < 10)
+
+////////////////////////////////////////////
+//////////////// HTFTMO End ////////////////
+////////////////////////////////////////////
+
+
+//////////////////////////////////////////////
+//////////////// MTFTMO Start ////////////////
+//////////////////////////////////////////////
+
+MediumSignalOS = false
+MediumSignalOB = false
+
+MTFTMOMainValue = 15*Main3/tmolength
+MTFTMOSignalValue = 15*Signal3/tmolength
+
+//OS/OB
+if MTFTMOMainValue < -10
+    MediumSignalOS := true
+
+if MTFTMOSignalValue > 10
+    MediumSignalOB := true
+
+//Color
+MTFTMOGreen = Main3 > Signal3 ? true : false
+
+//Bars since OS/OB
+Bars_Since_MTFTMO_OS = ta.barssince(MTFTMOMainValue > -10)
+Bars_Since_MTFTMO_OB = ta.barssince(MTFTMOMainValue < 10)
+
+////////////////////////////////////////////
+//////////////// MTFTMO End ////////////////
+////////////////////////////////////////////
+
+
+//////////////////////////////////////////////
+//////////////// LTFTMO Start ////////////////
+//////////////////////////////////////////////
+
+LowerSignalOS = false
+LowerSignalOB = false
+
+LTFTMOMainValue = 15*Main2/tmolength
+LTFTMOSignalValue = 15*Signal2/tmolength
+
+//OS/OB
+if LTFTMOMainValue < -10
+    LowerSignalOS := true
+
+if LTFTMOSignalValue > 10
+    LowerSignalOB := true
+
+//Color
+LTFTMOGreen = Main2 > Signal2 ? true : false
+
+////////////////////////////////////////////
+//////////////// LTFTMO End ////////////////
+////////////////////////////////////////////
+
+
+///////////////////////////////////////////////
+//////////////// VLTFTMO Start ////////////////
+///////////////////////////////////////////////
+
+VLowSignalOS = false
+VLowSignalOB = false
+
+VLTFTMOMainValue = 15*Main1/tmolength
+VLTFTMOSignalValue = 15*Signal1/tmolength
+
+//OS/OB
+if VLTFTMOMainValue < -10
+    VLowSignalOS := true
+
+if VLTFTMOSignalValue > 10
+    VLowSignalOB := true
+
+//Color
+VLTFTMOGreen = Main1 > Signal1 ? true : false
+
+//VLTFTMO Signal
+VLTFTMO_OB_Signal = false
+VLTFTMO_OS_Signal = false
+
+if VLTFTMOMainValue[1] > 10 or VLTFTMOMainValue[2] > 10 or VLTFTMOMainValue[3] > 10
+    VLTFTMO_OB_Signal := true
+
+if VLTFTMOMainValue[1] < -10 or VLTFTMOMainValue[2] < -10 or VLTFTMOMainValue[3] < -10
+    VLTFTMO_OS_Signal := true
+
+// //Prev MTO
+// CurrentGreenBearish = false
+// CurrentRedBullish = false
+
+// if HTFTMOGreen and HTFTMOMainValue < HTFTMOMainValue[48]
+//     CurrentGreenBearish := true
+
+// if not HTFTMOGreen and HTFTMOMainValue > HTFTMOMainValue[48]
+//     CurrentRedBullish := true
+
+/////////////////////////////////////////////
+//////////////// VLTFTMO End ////////////////
+/////////////////////////////////////////////
+
+
+///////////////////////////////////////////////////
+//////////////// Trade Delay Start ////////////////
+///////////////////////////////////////////////////
+
+flat = strategy.position_size == 0
+
+i_qtyTimeUnits = -input.int(orderDelay, 'Delay between orders:', inline='1', minval=0, tooltip='Use 0 for no delay')
+i_timeUnits = input.string('minutes', '', inline='1', options=['seconds', 'minutes', 'hours', 'days', 'months', 'years'])
+
+f_tfInMinutes() =>
+    _tfInMinutes = timeframe.multiplier * (timeframe.isseconds ? 1. / 60 : timeframe.isminutes ? 1. : timeframe.isdaily ? 60. * 24 : timeframe.isweekly ? 60. * 24 * 7 : timeframe.ismonthly ? 60. * 24 * 30.4375 : na)
+    _tfInMinutes
+
+f_timeFrom(_from, _qty, _units) =>
+
+    int _timeFrom = na
+    _unit = str.replace_all(_units, 's', '')
+    _t = _from == 'bar' ? time : _from == 'close' ? time_close : timenow
+    if _units == 'chart'
+        _timeFrom := int(_t + f_tfInMinutes() * 60 * 1000 * _qty)
+        _timeFrom
+    else
+        _year = year(_t) + (_unit == 'year' ? int(_qty) : 0)
+        _month = month(_t) + (_unit == 'month' ? int(_qty) : 0)
+        _day = dayofmonth(_t) + (_unit == 'day' ? int(_qty) : 0)
+        _hour = hour(_t) + (_unit == 'hour' ? int(_qty) : 0)
+        _minute = minute(_t) + (_unit == 'minute' ? int(_qty) : 0)
+        _second = second(_t) + (_unit == 'econd' ? int(_qty) : 0)
+        // Return the resulting time in ms Unix time format.
+        _timeFrom := timestamp(_year, _month, _day, _hour, _minute, _second)
+        _timeFrom
+
+
+var float lastTradeTime = na
+if nz(ta.change(strategy.position_size), time) != 0
+    lastTradeTime := time
+    lastTradeTime
+delayElapsed = f_timeFrom('bar', i_qtyTimeUnits, i_timeUnits) >= lastTradeTime
+
+percent2points(percent) =>
+    strategy.position_avg_price * percent / 100 / syminfo.mintick
+
+/////////////////////////////////////////////////
+//////////////// Trade Delay End ////////////////
+/////////////////////////////////////////////////
+
+
+
+////////////////////////////////////////////////////
+//////////////// Main Entries Start ////////////////
+////////////////////////////////////////////////////
+
+mainLongEntry = false
+mainShortEntry = false
+
+UpTrend = false
+DownTrend = false
+
+if T3Green and BFGreen
+    UpTrend := true
+
+if T3Red and not BFGreen
+    DownTrend := true
+
+BFT3BullReady = false
+BFT3BearReady = false
+
+// if ta.barssince(T3Red) > 125 and ta.barssince(not BFGreen) > 125
+//     BFT3BullReady := true
+
+// if ta.barssince(T3Green) > 125 and ta.barssince(BFGreen) > 125
+//     BFT3BearReady := true
+
+// if UpTrend and BFT3BullReady and ta.barssince(not VLTFTMOGreen) == 1 and (VLTFTMO_OS_Signal or VLTFTMOMainValue < -10) and Price_Above_UT and flat
+//     mainLongEntry := true
+
+// if DownTrend and BFT3BearReady and ta.barssince(VLTFTMOGreen) == 1 and (VLTFTMO_OB_Signal or VLTFTMOMainValue > 10) and not Price_Above_UT and flat
+//     mainShortEntry := true
+
+if Bars_Since_HTFTMO_OS > 400 and Bars_Since_MTFTMO_OS > 50 and MTFTMOMainValue < -10 and ta.barssince(not MTFTMOGreen) == 1
+    mainLongEntry := true
+
+plotchar(Bars_Since_HTFTMO_OS, "Bars_Since_HTFTMO_OS", "", location = location.top)
+plotchar(Bars_Since_MTFTMO_OS, "Bars_Since_MTFTMO_OS", "", location = location.top)
+plotchar(MTFTMOMainValue, "MTFTMOMainValue", "", location = location.top)
+plotchar(MTFTMOGreen, "MTFTMOGreen", "", location = location.top)
+
+// if DownTrend and BFT3BearReady and ta.barssince(VLTFTMOGreen) == 1 and (VLTFTMO_OB_Signal or VLTFTMOMainValue > 10) and not Price_Above_UT and flat
+//     mainShortEntry := true
+
+//////////////////////////////////////////////////
+//////////////// Main Entries End ////////////////
+//////////////////////////////////////////////////
+
+
+longTradeEntered = false
+shortTradeEntered = false
+
+var Initial_SL = 5.0
+var Initial_TP = 10.0
+
+//Find previous Low or High
+
+if (mainLongEntry and flat and delayElapsed)
+    longTradeEntered := true
+    strategy.entry("Main Long", strategy.long, comment="Main Strat Long")
+
+if (mainShortEntry and flat and delayElapsed)
+    shortTradeEntered := true
+    strategy.entry("Main Short", strategy.short, comment="Main Strat Short")
+
+
+
+//////////////////////////////////////////////////////////
+//////////////// Moving Stop Loss Start //////////////////
+//////////////////////////////////////////////////////////
+
+
+
+
+//Initial SL/TP
+Long_SL = percent2points(Initial_SL)
+Long_TP = percent2points(Initial_TP)
+
+Short_SL = percent2points(Initial_SL)
+Short_TP = percent2points(Initial_TP)
+
+
+//Save the price when opening trade
+Saved_Long_Entry_Price = ta.valuewhen(mainLongEntry, close, 0)
+Saved_Short_Entry_Price = ta.valuewhen(mainShortEntry, close, 0)
+var Activate_DSL = false
+
+//Longs
+var Long_Above_Four = false
+Calc_Long_Diff = (close - Saved_Long_Entry_Price) / Saved_Long_Entry_Price * 100
+
+// if Calc_Long_Diff > 3 and not Long_Above_Four
+//     Initial_SL := 2.0
+//     Long_SL := percent2points(Initial_SL)
+
+// if Calc_Long_Diff > 4
+//     Long_Above_Four := true
+//     Initial_SL := 1.0
+//     Long_SL := percent2points(Initial_SL)
+
+// if Calc_Long_Diff > 5
+//     Activate_DSL := true
+
+//Shorts
+var Short_Above_Four = false
+Calc_Short_Diff = (Saved_Short_Entry_Price - close) / Saved_Short_Entry_Price * 100
+
+// if Calc_Short_Diff > 3 and not Short_Above_Four
+//     Initial_SL := 2.0
+//     Short_SL := percent2points(Initial_SL)
+
+// if Calc_Short_Diff > 4
+//     Short_Above_Four := true
+//     Initial_SL := 1.0
+//     Short_SL := percent2points(Initial_SL)
+
+// if Calc_Short_Diff > 5
+//     Activate_DSL := true
+
+plotchar(Initial_SL, "Initial_SL", "", location = location.top)
+plotchar(Initial_TP, "Initial_TP", "", location = location.top)
+
+plotchar(Saved_Short_Entry_Price, "Saved_Short_Entry_Price", "", location = location.top)
+plotchar(Calc_Short_Diff, "Calc_Short_Diff", "", location = location.top)
+plotchar(Short_SL, "Short_SL", "", location = location.top)
+
+
+// longATR = srcLower - atr * atrMultiplierLower
+// shortATR = srcUpper + atr * atrMultiplierUpper
+
+// plotchar(longATR, "longATR", "", location = location.top)
+
+
+// Saved_Long_ATR = ta.valuewhen(mainLongEntry, longATR, 0)
+// Saved_Short_ATR = ta.valuewhen(mainShortEntry, shortATR, 0)
+
+// plotchar(Saved_Long_ATR, "Saved_Long_ATR", "", location = location.top)
+
+// Saved_Calc_Long_SL = ta.valuewhen(mainLongEntry, ((close - Saved_Long_ATR) / close) * 100, 0)
+// Saved_Calc_Long_TP = 1.5 * Saved_Calc_Long_SL
+
+// plotchar(Saved_Calc_Long_SL, "Saved_Calc_Long_SL", "", location = location.top)
+// plotchar(Saved_Calc_Long_TP, "Saved_Calc_Long_TP", "", location = location.top)
+
+// Calc_Short_SL = ta.valuewhen(mainShortEntry, ((Saved_Short_ATR - close) / Saved_Short_ATR) * 100, 0)
+// Calc_Short_TP = 1.5 * Calc_Short_SL
+
+// // Long_SL = percent2points(Saved_Calc_Long_SL)
+// // Long_TP = percent2points(Saved_Calc_Long_TP)
+
+// // plotchar(Long_SL, "Long_SL", "", location = location.top)
+// // plotchar(Long_TP, "Long_TP", "", location = location.top)
+
+// Short_SL = percent2points(Calc_Short_SL)
+// Short_TP = percent2points(Calc_Short_TP)
+
+// longATR = srcLower - atr * atrMultiplierLower
+// shortATR = srcUpper + atr * atrMultiplierUpper
+
+// Saved_Long_ATR = ta.valuewhen(longTradeEntered, longATR[atrNum], 0)
+// Saved_Short_ATR = ta.valuewhen(shortTradeEntered, shortATR[atrNum], 0)
+
+// Calc_Long_SL = ta.valuewhen(longTradeEntered, ((close - Saved_Long_ATR) / close) * 100, 0)
+// Calc_Long_TP = takeProfit * Calc_Long_SL
+
+// Calc_Short_SL = ta.valuewhen(shortTradeEntered, ((Saved_Short_ATR - close) / Saved_Short_ATR) * 100, 0)
+// Calc_Short_TP = takeProfit * Calc_Short_SL
+
+// savedLongSL = ta.valuewhen(longTradeEntered, longSL, 0)
+// savedLongTP = ta.valuewhen(longTradeEntered, longTP, 0)
+
+// savedShortSL = ta.valuewhen(shortTradeEntered, shortSL, 0)
+// savedShortTP = ta.valuewhen(shortTradeEntered, shortTP, 0)
+
+////////////////////////////////////////////////////////
+//////////////// Moving Stop Loss End //////////////////
+////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////
+//////////////// Exit Trades Start //////////////////
+/////////////////////////////////////////////////////
+
+if (strategy.position_size > 0)
+    strategy.exit('Main Long', loss=Long_SL, profit=Long_TP, comment='Main Long: TP/SL')
+
+
+// if (strategy.position_size > 0) and dn and dsl_osc[1] and dsl_osc > 60 and Activate_DSL
+//     strategy.close("Main Long", comment='DSL Long: TP/SL')
+
+
+if (strategy.position_size < 0)
+    strategy.exit('Main Short', loss=Short_SL, profit=Short_TP, comment='Main Short: TP/SL')
+
+// if (strategy.position_size < 0) and up and dsl_osc[1] and dsl_osc < 40 and Activate_DSL
+//     strategy.close("Main Short", comment='DSL Short: TP/SL')
+
+
+//Reset variables if not in trade
+if flat
+    Short_Above_Four := false
+    Long_Above_Four := false
+    Initial_SL := 5.0
+    Initial_TP := 10.0
+    Activate_DSL := false
+
+
+// Trailing_Stop_Trigger_Price = Saved_Entry_Price + (Saved_Entry_Price / 20)
+// plotchar(Trailing_Stop_Trigger_Price, "Trailing_Stop_Trigger_Price", "", location = location.top)
+
+// if (strategy.position_size > 0)
+// 	strategy.exit("Main Long", from_entry="Main Long", trail_price=Trailing_Stop_Trigger_Price, trail_offset=150, qty_percent=100)
+
+
+
+
+// if (strategy.position_size < 0)
+//     strategy.exit('Main Short', loss=Short_SL, profit=Short_TP, comment='Main: TP/SL')
+
+///////////////////////////////////////////////////
+//////////////// Exit Trades End //////////////////
+///////////////////////////////////////////////////
+
+
+// //Normal Entry Signals
+// longEntry = false
+// shortEntry = false
+
+// if T3Green and ta.barssince(T3Red) > T3Stagger and HTFTMOGreen and MTFTMOGreen and ta.barssince(not MTFTMOGreen) == 1 and (MTFTMOSignalValue < -9 or MTFWasOS) and BFGreen and not CurrentGreenBearish
+//     longEntry := true
+
+// if T3Red and ta.barssince(T3Green) > T3Stagger and not HTFTMOGreen and not MTFTMOGreen and ta.barssince(MTFTMOGreen) == 1 and (MTFTMOSignalValue > 9 or MTFWasOB) and not BFGreen and not CurrentRedBullish
+//     shortEntry := true
+
+
+// //BF Entry Signals
+// bfLongEntry = false
+// bfShortEntry = false
+
+// if T3Green and ta.barssince(T3Red) > T3Stagger and HTFTMOGreen and BFGreen and not CurrentGreenBearish and close < f3 and LTFTMOSignalValue < -10 and HTFTMOSignalValue < 5
+//     bfLongEntry := true
+
+// if T3Red and ta.barssince(T3Green) > T3Stagger and not HTFTMOGreen and not BFGreen and not CurrentRedBullish and close > f3 and LTFTMOSignalValue > 10  and HTFTMOSignalValue > -5
+//     bfShortEntry := true
+
+
+
+
+// //TP/SL
+// longSL = 3.0
+// longTP = 5.0
+// shortSL = 3.0
+// shortTP = 5.0
+
+// if ta.barssince(BFGreen) < 150 or bfShortEntry
+//     shortSL := 3
+//     shortTP := 2.95
+
+// if ta.barssince(not BFGreen) < 150 or bfLongEntry
+//     longSL := 3
+//     longTP := 2.95
+
+
+
+
+
+// // //Entry Signals
+// // longEntry = false
+// // shortEntry = false
+
+// // if T3Green and HTFTMOGreen and HTFTMOSignalValue < 10 and MTFTMOGreen and MediumSignalOS and ta.barssince(not MTFTMOGreen) == 1 and not CurrentGreenBearish
+// //     longEntry := true
+
+// // if not T3Green and not HTFTMOGreen and HTFTMOSignalValue > -10 and not MTFTMOGreen and MediumSignalOB and ta.barssince(MTFTMOGreen) == 1
+// //     shortEntry := true
+
+
+
+
+
+
+
+// // Normal strat //
+
+
+
+// if (bfLongEntry and flat and delayElapsed)
+//     longTradeEntered := true
+//     strategy.entry("BF Long", strategy.long, comment="BF Strat Long")
+
+
+// if (bfShortEntry and flat and delayElapsed)
+//     shortTradeEntered := true
+//     strategy.entry("BF Short", strategy.short, comment="BF Strat Short")
+
+// //Calculate TP/SL
+
+
+
+// longATR = srcLower - atr * atrMultiplierLower
+// shortATR = srcUpper + atr * atrMultiplierUpper
+
+// Saved_Long_ATR = ta.valuewhen(longTradeEntered, longATR[atrNum], 0)
+// Saved_Short_ATR = ta.valuewhen(shortTradeEntered, shortATR[atrNum], 0)
+
+// Calc_Long_SL = ta.valuewhen(longTradeEntered, ((close - Saved_Long_ATR) / close) * 100, 0)
+// Calc_Long_TP = takeProfit * Calc_Long_SL
+
+// Calc_Short_SL = ta.valuewhen(shortTradeEntered, ((Saved_Short_ATR - close) / Saved_Short_ATR) * 100, 0)
+// Calc_Short_TP = takeProfit * Calc_Short_SL
+
+// savedLongSL = ta.valuewhen(longTradeEntered, longSL, 0)
+// savedLongTP = ta.valuewhen(longTradeEntered, longTP, 0)
+
+// savedShortSL = ta.valuewhen(shortTradeEntered, shortSL, 0)
+// savedShortTP = ta.valuewhen(shortTradeEntered, shortTP, 0)
+
+
+// // if Calc_Long_SL < minSL
+// //     Calc_Long_SL := minSL
+
+// // if Calc_Long_TP < minTP
+// //     Calc_Long_TP := minTP
+
+// // if Calc_Short_SL < minSL
+// //     Calc_Short_SL := minSL
+
+// // if Calc_Short_TP < minTP
+// //     Calc_Short_TP := minTP
+
+// Calc_Long_SL := savedLongSL
+
+// Calc_Long_TP := savedLongTP
+
+// Calc_Short_SL := savedShortSL
+
+// Calc_Short_TP := savedShortTP
+
+
+// Long_SL = percent2points(Calc_Long_SL)
+// Long_TP = percent2points(Calc_Long_TP)
+
+// Short_SL = percent2points(Calc_Short_SL)
+// Short_TP = percent2points(Calc_Short_TP)
+
+
+
+// if (strategy.position_size > 0)
+//     strategy.exit('Normal Long', loss=Long_SL, profit=Long_TP, comment='Normal: TP/SL')
+
+// if (strategy.position_size < 0)
+//     strategy.exit('Normal Short', loss=Short_SL, profit=Short_TP, comment='Normal: TP/SL')
+
+
+// if (strategy.position_size > 0)
+//     strategy.exit('BF Long', loss=Long_SL, profit=Long_TP, comment='BF: TP/SL')
+
+// if (strategy.position_size < 0)
+//     strategy.exit('BF Short', loss=Short_SL, profit=Short_TP, comment='BF: TP/SL')
+
+// // Track trade outcome
+// var int tradeProfit = na
+// var int tradeLoss = na
+// var int exitBarIndex = na
+
+// if (strategy.closedtrades > 0)
+//     exitBarIndex := ta.valuewhen(strategy.position_size == 0 and strategy.position_size[1] != 0, bar_index, 0)
+//     tradeProfit := ta.valuewhen(strategy.position_size == 0 and strategy.position_size[1] != 0, strategy.closedtrades.profit(strategy.closedtrades - 1) > 0 ? 1 : na, 0)
+//     tradeLoss := ta.valuewhen(strategy.position_size == 0 and strategy.position_size[1] != 0, strategy.closedtrades.profit(strategy.closedtrades - 1) < 0 ? 1 : na, 0)
+
+
+// // plotchar(15*Main3/tmolength, "mainLine3", "", location = location.top)
+// // plotchar(15*Signal3/tmolength, "signalLine3", "", location = location.top)
+// // plotchar(T3Green, "T3Green", "", location = location.top)
+// // plotchar(SlowSignalOS, "SlowSignalOS", "", location = location.top)
+// // plotchar(SlowSignalOB, "SlowSignalOB", "", location = location.top)
+
+// // plotchar(HTFTMOGreen, "HTFTMOGreen", "", location = location.top)
+// // plotchar(HTFTMOMainValue, "HTFTMOMainValue", "", location = location.top)
+// // plotchar(HTFTMOSignalValue, "HTFTMOSignalValue", "", location = location.top)
+
+

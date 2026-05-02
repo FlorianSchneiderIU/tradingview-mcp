@@ -1,0 +1,104 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Join our channel for more free tools:https://t.me/IndicatorsforTV
+
+// ——————————————————————————————————————————————————————————————————————————————————————
+// █▀▀ ▀█▀   █   ▀█▀ █▀█ █ █ █ █▀▄   █▀▄▀█ █ █▀█ █▀█ █▀█ █▀█
+// ▄█▄  █    █▄▄ ▄█▄ █▄█ █▄█ █ █▄▀   █ ▀ █ █ █▀▄ █▀▄ █▄█ █▀▄
+// ——————————————————————————————————————————————————————————————————————————————————————
+// @description ST-Liquid Exhaustion Mirror [ST-LEM]
+// @version     1.0 (2026 Release)
+// @author      SHARKO (Predator Logic)
+//
+// █ LOGIC:
+//   This system is engineered to weaponize market "Forced Liquidations".
+//   It doesn't follow the trend blindly; it mirrors the exhaustion point.
+//   When the herd is liquidated, the "Rocket" launches.
+//   When the FOMO is at its peak, the "Nuke" drops.
+// ——————————————————————————————————————————————————————————————————————————————————————
+
+//@version=5
+indicator("Liquidity Spike Hunter (LSH)", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// 1. INPUT CONFIGURATION
+// ============================================================================
+grp_trend    = "Trend Filter"
+emaLength    = input.int(50, "Macro EMA Length", group=grp_trend)
+stFactor     = input.float(3.0, "Supertrend Factor", group=grp_trend)
+stPeriod     = input.int(10, "Supertrend Period", group=grp_trend)
+
+grp_rev      = "Reversal Logic"
+breakoutLen  = input.int(20, "H/L Lookback Length", group=grp_rev)
+volLimit     = input.float(1.5, "Liquidation Vol Multiplier", step=0.1, tooltip="Volume spike multiplier. Lower values = more signals.", group=grp_rev)
+adxMin       = input.int(30, "Min ADX (Trend Intensity)", group=grp_rev)
+
+grp_disp     = "Visual Display"
+showEma      = input.bool(true, "Show Macro EMA", group=grp_disp)
+showLiqBg    = input.bool(true, "Highlight Liquidation Bars", group=grp_disp)
+
+// ============================================================================
+// 2. CORE CALCULATIONS
+// ============================================================================
+// Trend Baseline
+macroEma = ta.ema(close, emaLength)
+[_, direction] = ta.supertrend(stFactor, stPeriod)
+
+// Momentum & Exhaustion
+[_, _, adx] = ta.dmi(14, 14)
+[_, _, hist] = ta.macd(close, 12, 26, 9)
+
+// Volume Spike (Liquidation Proxy)
+volSma = ta.sma(volume, 20)
+isLiquidation = volume > (volSma * volLimit) 
+
+// Exhaustion Check
+momentumFade = (hist > 0 and hist < hist[1] * 1.02) or (hist < 0 and hist > hist[1] * 1.02)
+adxHigh      = adx > adxMin
+
+// Price Extremes
+recentHigh = ta.highest(high[1], breakoutLen)
+recentLow  = ta.lowest(low[1], breakoutLen)
+
+// ============================================================================
+// 3. ENTRY SIGNALS (MIRROR LOGIC)
+// ============================================================================
+// Short (SKY EXECUTION): Price hits New High + Vol Spike + Exhaustion
+topEscaping = (direction < 0) and (high >= recentHigh) and isLiquidation and adxHigh and momentumFade
+
+// Long (ABYSS PLUNDER): Price hits New Low + Vol Spike + Exhaustion
+bottomFishing = (direction > 0) and (low <= recentLow) and isLiquidation and adxHigh and momentumFade
+
+// ============================================================================
+// 4. VISUAL PRESENTATION (ROCKET & NUCLEAR)
+// ============================================================================
+plot(showEma ? macroEma : na, color=color.new(color.gray, 80), title="Macro EMA")
+
+// --- LONG: 🚀 ROCKET ASCENT ---
+if bottomFishing
+    var string longText = "🚀\n💨\n◤ PUMP ◢\nPLUNDER" 
+    label.new(bar_index, low, longText, 
+         color=color.new(#00ffbb, 10), 
+         textcolor=color.black, 
+         style=label.style_label_up, 
+         yloc=yloc.belowbar, 
+         size=size.normal)
+
+// --- SHORT: ☢️ NUCLEAR DOOM ---
+if topEscaping
+    var string shortText = "☢️\n💥\n◣ DUMP ◢\nEXECUTION" 
+    label.new(bar_index, high, shortText, 
+         color=color.new(#ff1155, 10), 
+         textcolor=color.white, 
+         style=label.style_label_down, 
+         yloc=yloc.abovebar, 
+         size=size.normal)
+
+// Bar Highlighting (Liquidation Bars)
+barcolor(showLiqBg and isLiquidation ? color.new(color.aqua, 60) : na)
+
+// ============================================================================
+// 5. ALERT SYSTEM
+// ============================================================================
+alertcondition(bottomFishing, "Abyss Plunder (Long)", "Rocket Ignition - Prepare for Ascent")
+alertcondition(topEscaping, "Sky Execution (Short)", "Nuke Deployed - Prepare for Doom")
+

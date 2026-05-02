@@ -1,0 +1,1746 @@
+//Made By Cio
+//Telegram ==>> https://t.me/+UAk3hqvoD89jZTlk
+//@version=5
+indicator("Best Smart Trail Algo V.1.2", overlay=true,max_labels_count = 100, max_lines_count = 100, max_boxes_count = 100, max_bars_back = 305)
+
+// Support and Resistances
+
+ShowSmartTrail = input.bool(true, 'Smart Trail      ', inline = 'overlayLine1', group = 'Smart Trail')
+
+enableSR   = input(false, "SR On/Off", group="🧊 Support and Resistances")
+colorSup   = input(color.new(#00DBFF,20), "Support Color", group="Support and Resistances")
+colorRes   = input(color.new(#9598a1,50), "Resistance Color", group="Support and Resistances")
+strengthSR = input.int(2, "S/R Strength", 1, group="Support and Resistances")
+lineStyle  = input.string("Dotted", "Line Style", ["Solid", "Dotted", "Dashed"], group="Support and Resistances")
+lineWidth  = input.int(1, "S/R Line Width", 1, group="Support and Resistances")
+useZones   = input(true, "Zones On/Off", group="Support and Resistances")
+useHLZones = input(true, "High Low Zones On/Off", group="Support and ResistancesSR")
+zoneWidth  = input.int(2, "Zone Width %", 0, tooltip="it's calculated using % of the distance between highest/lowest in last 300 bars", group="Support and Resistances")
+expandSR   = input(true, "Expand Support and Resistances")
+
+/////////////////////////////// S/R //////////////////////////////////////////
+
+
+trailType = input.string('modified', 'Trailtype', options=['modified', 'unmodified'], group = "S/R")
+ATRPeriod = input(200, 'ATR Period')
+ATRFactor = input.float(4.2, 'ATR Factor', minval = 2, maxval = 26,step=0.1,tooltip = "Changes the sensetivity of the signals.")
+Smoothing = input(4, 'Smoothing')
+
+///////////////////////////////////
+
+norm_o = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, open)
+norm_h = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, high)
+norm_l = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, low)
+norm_c = request.security(ticker.new(syminfo.prefix, syminfo.ticker), timeframe.period, close)
+//}
+
+
+
+//////// FUNCTIONS //////////////
+//{
+// Wilders ma //
+Wild_ma(_src, _malength) =>
+    _wild = 0.0
+    _wild := nz(_wild[1]) + (_src - nz(_wild[1])) / _malength
+    _wild
+
+/////////// TRUE RANGE CALCULATIONS /////////////////
+HiLo = math.min(norm_h - norm_l, 1.5 * nz(ta.sma(norm_h - norm_l, ATRPeriod)))
+
+HRef = norm_l <= norm_h[1] ? norm_h - norm_c[1] : norm_h - norm_c[1] - 0.5 * (norm_l - norm_h[1])
+
+LRef = norm_h >= norm_l[1] ? norm_c[1] - norm_l : norm_c[1] - norm_l - 0.5 * (norm_l[1] - norm_h)
+
+trueRange = trailType == 'modified' ? math.max(HiLo, HRef, LRef) : math.max(norm_h - norm_l, math.abs(norm_h - norm_c[1]), math.abs(norm_l - norm_c[1]))
+//}
+
+
+/////////// TRADE LOGIC ////////////////////////
+//{
+loss = ATRFactor * Wild_ma(trueRange, ATRPeriod)
+
+Up68 = norm_c - loss
+Dn68 = norm_c + loss
+
+TrendUp = Up68
+TrendDown = Dn68
+Trend = 1
+
+TrendUp := norm_c[1] > TrendUp[1] ? math.max(Up68, TrendUp[1]) : Up68
+TrendDown := norm_c[1] < TrendDown[1] ? math.min(Dn68, TrendDown[1]) : Dn68
+
+Trend := norm_c > TrendDown[1] ? 1 : norm_c < TrendUp[1] ? -1 : nz(Trend[1], 1)
+trail = Trend == 1 ? TrendUp : TrendDown
+
+ex = 0.0
+ex := ta.crossover(Trend, 0) ? norm_h : ta.crossunder(Trend, 0) ? norm_l : Trend == 1 ? math.max(ex[1], norm_h) : Trend == -1 ? math.min(ex[1], norm_l) : ex[1]
+//}
+
+// //////// PLOT TP and SL /////////////
+//{
+plot(trail, 'S/R - SIGNAL', style=plot.style_line, color=Trend == 1 ? color.rgb(0, 242, 255) : Trend == -1 ? color.rgb(255, 0, 200) : na,linewidth = 1, editable = false,display = display.none)
+
+//}
+
+////// FIBONACCI LEVELS ///////////
+//{
+state = Trend == 1 ? 'long' : 'short'
+
+fib1Level = 61.8
+fib2Level = 78.6
+fib3Level = 88.6
+
+f1 = ex + (trail - ex) * fib1Level / 100
+f2 = ex + (trail - ex) * fib2Level / 100
+f3 = ex + (trail - ex) * fib3Level / 100
+l100 = trail + 0
+
+Fib1 = plot(f1, 'Ranger A', display = display.none, color=color.new(#f3ee00, 0), editable = false,display = display.none)
+Fib2 = plot(f2, 'Ranger B', color=color.new(#f6ff00, 0),display = display.none, editable = false)
+Fib3 = plot(f3, 'Ranger C',color=color.new(#f6ff00, 0), editable = false,display = display.none)
+L100 = plot(l100, display = display.none, color=color.new(#f408a2, 0), editable = false,display = display.none)
+
+fill(plot(ShowSmartTrail ? (ta.sma(trail, Smoothing)) : na, style=plot.style_line,display = display.none, editable = false, color=Trend == 1 ? color.new(#2157f9, 0) : Trend == -1 ? color.new(#ff1100, 0) : na),
+ plot( ShowSmartTrail ? (ta.sma(f1, Smoothing)) : na, 'Fib 2', style=plot.style_line, editable = false,display = display.none),
+ color=state == 'long' ? color.new(#2157f9, 70) : state == 'short' ? color.new(#ff1100, 70) : na,display = display.none)
+
+fill(plot(ShowSmartTrail ? (ta.sma(trail, Smoothing)) : na, style=plot.style_line,display = display.none, editable = false, color=Trend == 1 ? color.new(#2157f9, 0) : Trend == -1 ? color.new(#ff1100, 0) : na),
+ plot( ShowSmartTrail ? (ta.sma(f2, Smoothing)) : na, 'Fib 2', style=plot.style_line,editable = false,display = display.none),
+ color=state == 'long' ? color.new(#2157f9, 71) : state == 'short' ? color.new(#ff1100, 72) : na,display = display.none)
+
+fill(plot(ShowSmartTrail ? (ta.sma(trail, Smoothing)) : na, style=plot.style_line, editable = false, color=Trend == 1 ? color.new(#2157f9, 0) : Trend == -1 ? color.new(#ff1100, 0) : na),
+ plot( ShowSmartTrail ? (ta.sma(f3, Smoothing)) : na, 'Fib 2', style=plot.style_line,  editable = false,display = display.none),
+ color=state == 'long' ? color.new(#2157f9, 72) : state == 'short' ? color.new(#ff1100, 71) : na)
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//@version=5
+//indicator('SimKle Zigzag UDT', 'SZU', true, max_bars_back = 500)
+
+// 0. Inputs
+// 1. Types
+// 2. Switches
+// 3. Variables and arrays
+// 4. Custom Functions
+// 5. Execution
+// 6. Constructs
+
+//#region ———————————————————— 0. Inputs
+K0 = 'Zigzag values\nDefault : 14\nMin : 2\nMax : 50'
+K1 = 'Short\nExamKle : L or LL\nLong\nExamKle : Low or Lower Low'
+K2 = 'Constrast : Constrast color of chart background\nCustom : Input color\nNone : Color follow Trend Color'
+K3 = 'Small font size recommended for mobile app or multiKle layout'
+K4 = 'Default\nStyle : Solid\nWidth : 4'
+length1     = input.int(            13,     ' Level ZigZag ', minval = 2, maxval = 50, tooltip = K0,group = " ZIGZAG HIGH - LOW")
+colorUp      = input.color(color.rgb(0, 250, 75),'Trend Color', inline = '0')
+colorDn      = input.color( color.rgb(202, 70, 70),           '', inline = '0')
+showLabel    = input.bool(         true,      'Label', group = 'Show / hide', inline = '1')
+showLine     = input.bool(         true,       'Line', group = 'Show / hide', inline = '1')
+disKlayLabel = input.string(     'HHLL',       'Text', group = 'Label', inline = '2', options = ['HHLL', 'HL'])
+nameHL       = input.string(    'Short',           '', group = 'Label', inline = '2', options = ['Short', 'Long'], tooltip = K1)
+colorLabel   = input.string(    'Trend',      'Color', group = 'Label', inline = '3', options = ['Contrast', 'Custom', 'Trend'])
+customLabel  = input.color(color.blue,           '', group = 'Label', inline = '3', tooltip = K2)
+sizeLabel    = input.string(   'normal',       'Size', group = 'Label', inline = '4', options = ['tiny',  'small', 'normal', 'large', 'huge'], tooltip = K3)
+lineType     = input.string(    'dash',    'DisKlay', group =  'Line', inline = '5', options = ['dash', 'dot', 'solid', 'arrow right', 'arrow left'])
+width        = input.int(             1,           '', group =  'Line', inline = '5', minval = 1, maxval = 4, tooltip = K4)
+colorLine    = input.string(    'Trend',      'Color', group =  'Line', inline = '6', options = ['Contrast', 'Custom', 'Trend'])
+customLine   = input.color(color.blue,           '', group =  'Line', inline = '6', tooltip = K2)
+//#endregion
+
+//#region ———————————————————— 1. Types
+// @type        Used for label
+// @field Hi    Float value of high
+// @field Lo    Float value of low
+type HL
+    string      Hi = na
+    string      Lo = na
+
+// @type        Used for point especially for array
+// @field x     int value for bar_index   
+// @field y     float value for price
+// @field sty   label style
+// @field col   color for text label
+// @field str   high or low string
+type point
+    int          x = na
+    float        y = na
+    string     sty = na
+    color      col = na
+    string     str = na
+
+// @type          Used for initial setup
+// @field hi      high value
+// @field lo      low value
+// @field colorHi color for high value
+// @field colorLo color for low value
+// @field strHi   string for high value
+// @field strLo   string for low value
+type startUp
+    float       hi = na
+    float       lo = na
+    color  colorHi = na
+    color  colorLo = na
+    string   strHi = na
+    string   strLo = na
+//#endregion
+
+//#region ———————————————————— 2. Switches
+[H, L]            = switch nameHL
+    'Short'       => [   'H',   'L']
+    'Long'        => ['HIGH', 'LOW']
+[Hi, Lo]          = switch nameHL
+    'Short'       => [       'H',       'L']
+    'Long'        => ['HIGHER\n', 'LOWER\n']
+switchLine        = switch lineType
+    'dash'        => line.style_dashed
+    'dot'         => line.style_dotted
+    'solid'       => line.style_solid
+    'arrow right' => line.style_arrow_right
+    'arrow left'  => line.style_arrow_left
+switchLabelColor  = switch colorLabel
+    'Contrast'    => chart.fg_color
+    'Custom'      => customLabel
+switchLineColor   = switch colorLine
+    'Contrast'    => chart.fg_color
+    'Custom'      => customLine
+//#endregion
+
+//#region ———————————————————— 3. Variables and arrays
+float Kh   = na,  Kh := ta.highestbars(high, length1 ) == 0 ? high : na
+float Kl   = na,  Kl := ta.lowestbars(  low, length1 ) == 0 ?  low : na  
+var  dir   =  0, dir := Kh and na(Kl) ? 1 : Kl and na(Kh) ? -1 : dir
+var zigzag = array.new<point>(0)
+oldzigzag  = zigzag.copy()
+dirchanged = ta.change(dir)
+hiLo       = HL.new(Hi, Lo)
+varSetup   = startUp.new(Kh, Kl, colorUp, colorDn, H, L)
+//#endregion
+
+//#region ———————————————————— 4. Custom Functions
+// @function         variable for point
+// @param   setup    type containing ternary conditional operator
+// @returns newPoint to be used later in initialize
+method dirVariables(startUp setup = na) =>
+    var point newPoint = na 
+    x   = bar_index
+    y   = dir == 1 ?               setup.hi : setup.lo
+    sty = dir == 1 ? label.style_label_down : label.style_label_up
+    col = dir == 1 ?          setup.colorHi : setup.colorLo
+    str = dir == 1 ?            setup.strHi : setup.strLo  
+    newPoint  := point.new(x, y, sty, col, str)
+    newPoint
+
+// @function         initialize zigzag array
+// @param   setup    type containing ternary conditional operator
+// @param   maxSize  maximum array size
+// @returns zigzag   array after cleanup
+method initialize(point[] zigzag = na, startUp setup = na, int maxSize = 10)=>
+    newPoint = setup.dirVariables()
+    zigzag.unshift(newPoint)
+    if zigzag.size() > maxSize
+        zigzag.pop()
+
+// @function         update zigzag array
+// @param   setup    type containing ternary conditional operator
+// @param   maxSize  maximum array size
+// @param   dir      direction value
+// @returns zigzag   array after cleanup   
+method update(point[] zigzag = na, startUp setup = na, maxSize = 10, int dir = na)=>
+    if array.size(zigzag) == 0
+        zigzag.initialize(setup, maxSize)
+    else
+        newPoint = setup.dirVariables()
+        dirOver = dir ==  1 and newPoint.y > zigzag.get(0).y
+        dirLess = dir == -1 and newPoint.y < zigzag.get(0).y
+        if dirOver or dirLess
+            zigzag.set(0, newPoint)
+        point.new(na, na, na, na, na)
+
+// @function          compare zigzag
+// @param   zigzag    original array
+// @param   oldzigzag copied array
+// @returns boolOr    Or statement
+// @returns boolAnd   And statement  
+method boolPoint(point[] zigzag = na, point[] oldzigzag = na, int offset = 0) =>
+    boolOr = zigzag.get(offset + 0).x != oldzigzag.get(offset + 0).x  or zigzag.get(offset + 0).y != oldzigzag.get(offset + 0).y
+    boolAnd = zigzag.get(offset + 1).x == oldzigzag.get(offset + 1).x and zigzag.get(offset + 1).y == oldzigzag.get(offset + 1).y
+    [boolOr, boolAnd]
+
+// @function         create label based on zigzag array
+// @param   zigzag   original array
+// @param   size     font size
+// @param   offset   default value zero
+// @returns          new label
+method createLabel(point[] zigzag = na, string size = na, int offset = 0) =>
+    label.new(   x         = int(zigzag.get(offset + 0).x),
+                 y         =     zigzag.get(offset + 0).y,
+                 text      =     zigzag.get(offset + 0).str,
+                 xloc      =               xloc.bar_index,
+                 color     = color.new(color.blue, 100),
+                 style     =     zigzag.get(offset + 0).sty,
+                 textcolor =     zigzag.get(offset + 0).col,
+                 size      =                         size,
+                 tooltip   =     zigzag.get(offset + 0).str + '\n' + str.tostring(zigzag.get(offset + 0).y)) 
+
+// @function         create line based on zigzag array
+// @param   zigzag   original array
+// @param   width    line thickness
+// @param   style    line style
+// @param   offset   default value zero
+// @returns          new line
+method createLine(point[] zigzag = na, int width = na, string style = na, int offset = 0) =>
+    line.new(x1    = int(zigzag.get(offset + 1).x),
+             y1    =     zigzag.get(offset + 1).y,
+             x2    = int(zigzag.get(offset + 0).x),
+             y2    =     zigzag.get(offset + 0).y,
+             xloc  =        xloc.bar_index,
+             color =     zigzag.get(offset + 0).col,
+             style = style,
+             width = width)
+
+// @function         create line based on zigzag array
+// @param   zigzag   original array
+// @param   hiLo     switch value
+// @param   offset   default value zero
+// @returns          ternary conditional of hiLo
+method compareHL(point[] zigzag = na, HL hiLo = na, int offset = 0) =>
+    dir ==   1 ? zigzag.get(offset + 0).y > zigzag.get(offset + 2).y ? hiLo.Hi : hiLo.Lo :
+                 zigzag.get(offset + 0).y < zigzag.get(offset + 2).y ? hiLo.Lo : hiLo.Hi
+
+// @function         set text and tooltip for label
+// @param   this     original array
+// @param   str      string value for text
+// @param   tip      string value for tooltip
+method textTip(label this = na, string str = na, string tip = na) =>
+    this.set_text(   str)
+    this.set_tooltip(tip)
+//#endregion
+
+//#region ———————————————————— 5. Execution
+if Kh or Kl
+    if dirchanged
+        zigzag.initialize( varSetup, 4)
+    else
+        zigzag.update(varSetup, 4, dir)
+//#endregion
+
+//#region ———————————————————— 6. Constructs
+if zigzag.size() >= 3
+    var line   dirLine   = na
+    var label  dirLabel  = na
+    var string dirString = na
+    [boolOr, boolAnd]    = zigzag.boolPoint(oldzigzag)
+    if boolOr
+        if boolAnd
+            dirLine.delete()
+            dirLabel.delete()
+        if showLabel
+            if disKlayLabel == 'HL' or disKlayLabel == 'HHLL'
+                dirLabel := zigzag.createLabel(sizeLabel)
+            if disKlayLabel == 'HHLL' and zigzag.size() >= 4                             
+                dirString  := zigzag.compareHL(hiLo)
+                dirLabel.textTip(dirString + zigzag.get(0).str, dirString + zigzag.get(0).str + '\n' + str.tostring(zigzag.get(0).y))
+            if colorLabel != 'Trend'
+                dirLabel.set_textcolor(switchLabelColor)
+        if showLine
+            dirLine := zigzag.createLine(width, switchLine)
+            if colorLine  != 'Trend'
+                dirLine.set_color(switchLineColor)
+// //#endregion
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © FluxChart
+
+//@version=5
+const bool DEBUG = false
+//indicator("Support & Resistance (MTF) | Flux Charts", overlay = true, max_labels_count = 100, max_lines_count = 100, max_boxes_count = 100, max_bars_back = 305)
+
+const int timeframeCount = 3
+const float labelOffsetsY = 1.001
+const int labelOffsetsXIndex = 30
+const float epsilon = 0.15 / 100.0
+const float retestEpsilon = 0.015 / 100.0
+const int maxPivotsBackSR = 15
+const int retestLabelEveryXBars = 4
+const int maxTraverse = 250  // Affects bar history limit. Default value 250.
+const int maxRetestLabels = 4
+const int maxSupports = 3
+const int maxResistances = 3
+const float retestPriceDifferencePercentMax = 0.40
+const bool calculateTimeSkipMS = false
+const int debug_maxPivotLabels = 25
+
+// _____ INPUTS _____
+resistanceSupportCount = input.int(3, "Support & Resistance Count", options = [1, 2, 3], group = "General Configuration")
+pivotRange = input.int(15, "Pivot Range", options = [5, 15, 30], tooltip = "Increase for more general pivots, decrease for more private pivots.", group = "General Configuration")
+strength = input.int(1, "Strength", options = [1, 2, 3, 4], tooltip = "X many times price touched relative price area in order to be considered a support/resistance zone.", group = "General Configuration")
+expandLines = input.bool(false,"Expand Lines & Zones", group = "General Configuration")
+
+enableZones = input.bool(false, "Enable Zones", group = "Support & Resistance Zones")
+zoneWidth1 = input.int(2, "Zone Width", options = [1,2,3], group = "Support & Resistance Zones")
+
+timeframe1Enabled = input.bool(false, title = "", group = "Timeframes", inline = "timeframe1")
+timeframe1 = input.timeframe("", title = "", group = "Timeframes", inline = "timeframe1")
+timeframe2Enabled = input.bool(false, title = "", group = "Timeframes", inline = "timeframe2")
+timeframe2 = input.timeframe("60", title = "", group = "Timeframes", inline = "timeframe2")
+timeframe3Enabled = input.bool(false, title = "", group = "Timeframes", inline = "timeframe3")
+timeframe3 = input.timeframe("240", title = "", group = "Timeframes", inline = "timeframe3")
+
+showBreaks = input.bool(false,"Show Breaks", group = "Breaks & Retests", inline = "ShowBR")
+showRetests = input.bool(false,"Show Retests", group = "Breaks & Retests", inline = "ShowBR")
+avoidFalseBreaks = input.bool(false,"Avoid False Breaks", group = "Breaks & Retests")
+falseBreakoutVolumeThreshold = input.int(30, "Break Volume Threshold %", minval = 0, maxval = 100, group = "Breaks & Retests", tooltip = "Only taken into account if Avoid False Breakouts is enabled.\nHigher values mean it's less likely to be a break.")
+inverseBrokenLineColor = input.bool(false,"Inverse Color After Broken", tooltip = "Needs Show Breaks & Expand Lines option enabled.", group = "Breaks & Retests")
+
+lineStyle1 = input.string("____", "Line Style", ["____", "----", "...."], group = "Style")
+lineWidth1 = input.int(2, "Line Width", minval = 1, group = "Style")
+supportColor = input.color(#08d0af14, "Support Color", group = "Style", inline = "RScolors")
+resistanceColor = input.color(#f4ba0b14, "Resistance Color", group = "Style", inline = "RScolors")
+textColor = input.color(#ffffff80, "Text Color", group = "Style", inline = "RScolors")
+
+enableRetestAlerts = input.bool(false, "Enable Retest Alerts", tooltip = "Needs Show Retests option enabled.", group = "Alerts")
+enableBreakAlerts = input.bool(false, "Enable Break Alerts", group = "Alerts")
+
+memoryOptimizatonEnabled = input.bool(false, "Enable Memory Optimization", tooltip = "Enable this option if you encounter memory errors.", group = "Advanced")
+// _____ INPUTS END _____
+
+// _____ DEBUG OPTIONS _____
+debug_labelPivots = not DEBUG ? "None" : input.string("None", title = "[DBG] Label Pivots", group = "DEBUG", options = ["All", "RS", "None"], tooltip = "All -> Debugs all pivot labels.\nRS -> Debugs RS pivot labels.\nNone -> Debugs none of the last R&S pivots.")
+debug_pivotLabelText = not DEBUG ? false : input.bool(false, title = "[DBG] Pivot Label Text", group = "DEBUG")
+debug_showBrokenOnLabel = not DEBUG ? false : input.bool(false, "[DBG] Show Broken Text On Label", group = "DEBUG")
+debug_removeDuplicateRS = not DEBUG ? true : input.bool(true, "[DBG] Remove Duplicate RS", group = "DEBUG")
+debug_lastXResistances = not DEBUG ? 3 : input.int(3, "[DBG] Show Last X Resistances", minval = 0, maxval = maxResistances, group = "DEBUG")
+debug_lastXSupports = not DEBUG ? 3 : input.int(3, "[DBG] Show Last X Supports", minval = 0, maxval = maxSupports, group = "DEBUG")
+debug_enabledHistory = not DEBUG ? true : input.bool(true, "[DBG] Enable History", group = "DEBUG")
+debug_maxHistoryRecords = not DEBUG ? 10 : input.int(10, "[DBG] Max History Records", options =  [1, 2, 5, 10, 25], group = "DEBUG")
+// _____ DEBUG OPTIONS END _____
+
+createRSLine (color) =>
+    line.new(na, na, na, na, extend = expandLines ? extend.both : extend.none, xloc=xloc.bar_time, color = color, width = lineWidth, style = lineStyle == "----" ? line.style_dashed : lineStyle == "...." ? line.style_dotted : line.style_solid)
+
+createRSBox (color, xlocType) =>
+    box.new(na, na, na, na, text_size = size.normal, xloc = xlocType, extend = extend.both, bgcolor = color, text_color = textColor, text_halign = expandLines ? text.align_right : text.align_center, border_color = #00000000)
+
+createRSLabel () =>
+    label.new(na, na, "", style = label.style_none, textcolor = textColor)
+
+createBreakLabel (RSType) =>
+    label.new(na,na,style = RSType == "Resistance" ? label.style_label_up : label.style_label_down, color=color.rgb(33, 149, 243, 100), textcolor = color.rgb(255, 255, 255, 100), xloc = xloc.bar_time, size = size.tiny)
+
+createRetestLabel (RSType) =>
+    label.new(na,na,style = RSType == "Resistance" ? label.style_label_down : label.style_label_up, color = RSType == "Resistance" ? resistanceColor : supportColor, textcolor = color.rgb(255, 255, 255, 100), xloc = xloc.bar_time, size = size.tiny)
+
+moveLine(_line, _x, _y, _x2) =>
+    line.set_xy1(_line, _x,  _y)
+    line.set_xy2(_line, _x2, _y)
+
+moveBox (_box, _topLeftX, _topLeftY, _bottomRightX, _bottomRightY) =>
+    box.set_lefttop(_box, _topLeftX, _topLeftY)
+    box.set_rightbottom(_box, _bottomRightX, _bottomRightY)
+
+moveRSInfoBox (_box, _startPointX, _price, _endPointX) =>
+    zoneWidthPercent = zoneWidth == 1 ? 0.05 : zoneWidth == 2 ? 0.06 : 0.075
+    topY = _price * (1.0 + (zoneWidthPercent / 2.0 / 100.0))
+    bottomY = _price * (1.0 - (zoneWidthPercent / 2.0 / 100.0))
+    moveBox(_box, _startPointX, topY, _endPointX, bottomY)
+
+// _____ TYPES _____
+
+type RSInfo
+    bool isBroken = na
+    int brokenTime = na
+    string RSType = na
+    float price = na
+    line line = na
+    box box = na
+    label priceLabel = na
+    chart.point[] points = na
+    label[] debugPoints = na
+    label breakLabel = na
+    label[] retestLabels = na
+    line breakLine = na
+    box breakBox = na
+
+newRSInfo (RSType) =>
+    newRSInfo = RSInfo.new()
+    newRSInfo.RSType := RSType
+    newRSInfo.price := na
+    newRSInfo.isBroken := false
+    newRSInfo.brokenTime := na
+
+    newRSInfo.line := enableZones ? na : createRSLine(RSType == "Resistance" ? resistanceColor : supportColor)
+    newRSInfo.box := enableZones ? createRSBox(RSType == "Resistance" ? resistanceColor : supportColor, xloc.bar_time) : na
+    newRSInfo.priceLabel := enableZones ? na : createRSLabel()
+    newRSInfo.points := array.new<chart.point>(0)
+    newRSInfo.debugPoints := array.new<label>(0)
+    newRSInfo.retestLabels := array.new<label>(0)
+    newRSInfo.breakLabel := na
+    newRSInfo.breakLine := na
+    newRSInfo.breakBox := na
+    
+    newRSInfo
+
+histRSInfo (RSInfo RSInfoF) =>
+    RSType = RSInfoF.RSType
+    newRS = RSInfo.new()
+    newRS.RSType := RSType
+    newRS.price := RSInfoF.price
+
+    newRS.debugPoints := array.new<label>(0)
+    newRS.retestLabels := array.new<label>(0)
+    newRS.points := array.new<chart.point>(0)
+
+    histText = "History | " + str.tostring(newRS.price, format.mintick)
+
+    startTime = math.min(time, RSInfoF.points.get(strength - 1).time)
+    endTime = RSInfoF.isBroken ? RSInfoF.brokenTime : time
+
+    if enableZones
+        newRS.box := createRSBox(RSType == "Resistance" ? resistanceColor : supportColor, xloc.bar_time)
+        moveRSInfoBox(newRS.box, startTime, newRS.price, endTime)
+        box.set_extend(newRS.box, expandLines ? extend.both : extend.none)
+        box.set_text(newRS.box, histText)
+    else
+        newRS.line := line.copy(RSInfoF.line)
+        moveLine(newRS.line, startTime, newRS.price, endTime)
+        line.set_extend(newRS.line, expandLines ? extend.both : extend.none)
+
+        newRS.priceLabel := label.copy(RSInfoF.priceLabel)
+        label.set_text(newRS.priceLabel, histText)
+        label.set_xloc(newRS.priceLabel, (startTime + endTime) / 2, xloc.bar_time)
+    
+    if not na(newRS.breakLabel)
+        newRS.breakLabel := label.copy(RSInfoF.breakLabel)
+    
+    newRS
+
+safeDeleteRSInfo (RSInfo RSInfoF) =>
+    if not na(RSInfoF)
+        line.delete(RSInfoF.line)
+        box.delete(RSInfoF.box)
+        label.delete(RSInfoF.priceLabel)
+
+        RSInfoF.points.clear()
+
+        if RSInfoF.debugPoints.size() > 0
+            for i = 0 to RSInfoF.debugPoints.size() - 1
+                label.delete(RSInfoF.debugPoints.get(i))
+            RSInfoF.debugPoints.clear()
+
+        if RSInfoF.retestLabels.size() > 0
+            for i = 0 to RSInfoF.retestLabels.size() - 1
+                label.delete(RSInfoF.retestLabels.get(i))
+            RSInfoF.retestLabels.clear()
+        
+        label.delete(RSInfoF.breakLabel)
+        line.delete(RSInfoF.breakLine)
+        box.delete(RSInfoF.breakBox)
+
+type timeframeInfo
+    int index = na
+    string timeframeStr = na
+    bool isEnabled = false
+
+    RSInfo[] resistances = na
+    RSInfo[] supports = na
+
+    float[] highPivots = na
+    int[] highTimes = na
+
+    float[] lowPivots = na
+    int[] lowTimes = na
+
+newTimeframeInfo (index, timeframeStr, isEnabled) =>
+    newTFInfo = timeframeInfo.new()
+    newTFInfo.index := index
+    newTFInfo.isEnabled := isEnabled
+    newTFInfo.timeframeStr := timeframeStr
+
+    newTFInfo.resistances := array.new<RSInfo>(debug_lastXResistances)
+    newTFInfo.supports := array.new<RSInfo>(debug_lastXSupports)
+    
+    newTFInfo.highPivots := array.new<float>()
+    newTFInfo.highTimes := array.new<int>()
+
+    newTFInfo.lowPivots := array.new<float>()
+    newTFInfo.lowTimes := array.new<int>()
+    newTFInfo
+
+// _____ TYPES END _____
+
+// _____ VARS _____
+
+var timeframeInfo[] timeframeInfos = array.from(newTimeframeInfo(1, timeframe1, timeframe1Enabled), newTimeframeInfo(2, timeframe2, timeframe2Enabled), newTimeframeInfo(3, timeframe3, timeframe3Enabled))
+var bool initRun = true
+var int maxTimeskipMS = 0
+
+var float[] allLowPivots = array.new<float>(0)
+var float[] allHighPivots = array.new<float>(0)
+var int[] allLowTimes = array.new<int>(0)
+var int[] allHighTimes = array.new<int>(0)
+
+var RSInfo[] history = array.new<RSInfo>(0)
+
+RSInfo[] curRSList = array.new<RSInfo>(0)
+RSInfo[] oldRSList = array.new<RSInfo>(0)
+
+int maxPivotsAllowed = memoryOptimizatonEnabled ? 10 : 15 // Affects memory limit. Default value 30.
+
+// _____ VARS END _____
+
+doValuesTouch (float value1, float value2) =>
+    if math.abs(value1 - value2) / ((value1 + value2) / 2.0) <= epsilon
+        true
+    else
+        false
+
+doValuesTouch (float value1, float value2, float customEpsilon) =>
+    if math.abs(value1 - value2) / ((value1 + value2) / 2.0) <= customEpsilon
+        true
+    else
+        false
+
+findLatestRS (timeframeInfo timeframeInfoF, string RSType, pivots, times, bannedValues) =>
+    RSInfo latestRSF = na
+    pivotsCount = pivots.size()
+    if pivotsCount > 0
+        for i = 0 to pivotsCount - 1
+            if i >= maxTraverse
+                break
+            
+            index = pivotsCount - i - 1
+            occurances = 0
+            invalidValue = false
+            pivotValue1 = pivots.get(index)
+            if bannedValues.size() > 0
+                for a = 0 to bannedValues.size() - 1
+                    if doValuesTouch(pivotValue1, bannedValues.get(a))
+                        invalidValue := true
+                        break
+            
+            if invalidValue
+                continue
+            
+            for j = 0 to pivotsCount - 1
+                if j >= maxTraverse
+                    break
+                
+                index2 = pivotsCount - j - 1
+                pivotValue2 = pivots.get(index2)
+                if doValuesTouch(pivotValue1, pivotValue2)
+                    occurances += 1
+                
+                if occurances >= strength
+                    latestRSF := newRSInfo(RSType)
+                    latestRSF.price := pivotValue1
+                    break
+                
+                if math.abs(index - index2) > maxPivotsBackSR * strength
+                    break
+                
+            if not na(latestRSF)
+                break
+            
+    if not na(latestRSF)
+        cnt = 0
+        if pivotsCount > 0
+            for i = 0 to pivotsCount - 1
+                if i >= maxTraverse
+                    break
+                
+                index = pivotsCount - i - 1
+                pivotValue = pivots.get(index)
+                if doValuesTouch(pivotValue, latestRSF.price)
+                    labelTime = times.get(index)
+                    latestRSF.points.push(chart.point.from_time(labelTime, pivotValue))
+                    cnt += 1
+                if cnt == strength
+                    break
+
+    if not (debug_labelPivots == "None")
+        if not (debug_labelPivots == "All")
+            if not na(latestRSF)
+                cnt = 0
+                if pivotsCount > 0
+                    for i = 0 to pivotsCount - 1
+                        index = pivotsCount - i - 1
+                        pivotValue = pivots.get(index)
+                        if doValuesTouch(pivotValue, latestRSF.price)
+                            labelTime = times.get(index)
+                            latestRSF.debugPoints.push(RSType == "Resistance" ? label.new(labelTime,pivotValue,text=debug_pivotLabelText ? str.tostring(pivotValue) : "",xloc=xloc.bar_time, color=resistanceColor, textcolor=color.white) : label.new(labelTime,pivotValue,text=debug_pivotLabelText ? str.tostring(pivotValue) : "",xloc=xloc.bar_time, color=supportColor,style = label.style_label_up, textcolor=color.white))
+                            cnt += 1
+                        if cnt == strength
+                            break
+        else
+            if not na(latestRSF)
+                if pivotsCount > 0
+                    for i = 0 to pivotsCount - 1
+                        index = pivotsCount - i - 1
+                        pivotValue = pivots.get(index)
+                        labelTime = times.get(index)
+                        latestRSF.debugPoints.push(RSType == "Resistance" ? label.new(labelTime,pivotValue,text=debug_pivotLabelText ? str.tostring(pivotValue) : "",xloc=xloc.bar_time, color=resistanceColor, textcolor=color.white) : label.new(labelTime,pivotValue,text=debug_pivotLabelText ? str.tostring(pivotValue) : "",xloc=xloc.bar_time, color=supportColor,style = label.style_label_up, textcolor=color.white))
+                        if latestRSF.debugPoints.size() > debug_maxPivotLabels
+                            break
+    latestRSF
+
+findLatestNthRS (timeframeInfo timeframeInfoF, string RSType, pivots, times, n) =>
+    float[] bannedValues = array.new<float>()
+    foundRS = 0
+    RSInfo foundLatestRS = na
+    while foundRS < n
+        foundLatestRS := findLatestRS(timeframeInfoF, RSType, pivots, times, bannedValues)
+        if not na(foundLatestRS)
+            foundRS += 1
+            bannedValues.push(foundLatestRS.price)
+        else
+            break
+    foundLatestRS
+
+isTimeframeLower (timeframe1F, timeframe2F) =>
+    timeframe.in_seconds(timeframe1F) < timeframe.in_seconds(timeframe2F)
+
+getMinTimeframe (timeframe1F, timeframe2F) =>
+    if isTimeframeLower(timeframe1F, timeframe2F)
+        timeframe1F
+    else
+        timeframe2F
+
+getMaxTimeframe (timeframe1F, timeframe2F) =>
+    if isTimeframeLower(timeframe1F, timeframe2F)
+        timeframe2F
+    else
+        timeframe1F
+
+getFirstBreak (RSInfo rsInfo) =>
+    if na(rsInfo)
+        [na, na]
+    
+    curIndex = 0
+    float foundBreakLevel = na
+    int foundBreakTime = na
+    while true
+        if curIndex >= maxTraverse
+            break
+        isBarBreak = rsInfo.RSType == "Resistance" ? (close[curIndex + 1] <= rsInfo.price and close[curIndex] > rsInfo.price) : (close[curIndex + 1] >= rsInfo.price and close[curIndex] < rsInfo.price)
+        if isBarBreak
+            isTrueBreakout = true
+            if avoidFalseBreaks
+                shortTerm = 5
+                longTerm = 15
+                
+                shortSum = 0.0
+                longSum = 0.0
+                
+                for i = 0 to shortTerm
+                    shortSum += volume[curIndex + i]
+                
+                for i = 0 to longTerm
+                    longSum += volume[curIndex + i]
+                
+                shortVolumeAvg = shortSum / shortTerm
+                longVolumeAvg = longSum / longTerm
+
+                volumeRatio = ((shortVolumeAvg - longVolumeAvg) / longVolumeAvg) * 100.0
+                isTrueBreakout := (volumeRatio >= falseBreakoutVolumeThreshold)
+
+            if isTrueBreakout
+                foundBreakLevel := rsInfo.RSType == "Resistance" ? low[curIndex] : high[curIndex]
+                foundBreakTime := time[curIndex]
+            
+        curIndex += 1
+        if time[curIndex] <= rsInfo.points.get(strength - 1).time
+            break
+    [foundBreakLevel, foundBreakTime]
+
+getRetests (RSInfo rsInfo) =>
+    if na(rsInfo)
+        [na,na]
+    
+    curIndex = 0
+    lastRetestIndex = -999
+    int[] retestTimes = array.new<int>()
+    float[] retestLevels = array.new<float>()
+
+    while true
+        if curIndex >= maxTraverse
+            break
+        if retestLevels.size() == maxRetestLabels
+            break
+        if rsInfo.isBroken and time[curIndex] >= rsInfo.brokenTime
+            curIndex += 1
+            continue
+
+        differencePercent = 100.0 * math.min(math.abs(rsInfo.price - close[curIndex]) / ((rsInfo.price + close[curIndex]) / 2), rsInfo.RSType == "Resistance" ? math.abs(rsInfo.price - high[curIndex]) / ((rsInfo.price + high[curIndex]) / 2) : math.abs(rsInfo.price - low[curIndex]) / ((rsInfo.price + low[curIndex]) / 2))
+        isRetest = (rsInfo.RSType == "Resistance" ? (doValuesTouch(rsInfo.price, close[curIndex], retestEpsilon) or doValuesTouch(rsInfo.price, high[curIndex], retestEpsilon) or high[curIndex] > rsInfo.price) : (doValuesTouch(rsInfo.price, close[curIndex], retestEpsilon) or doValuesTouch(rsInfo.price, low[curIndex], retestEpsilon) or low[curIndex] < rsInfo.price)) and differencePercent < retestPriceDifferencePercentMax
+        if isRetest and curIndex - lastRetestIndex >= retestLabelEveryXBars
+            retestLevels.push(rsInfo.RSType == "Resistance" ? high[curIndex] : low[curIndex])
+            retestTimes.push(time[curIndex])
+            lastRetestIndex := curIndex
+        curIndex += 1
+        if time[curIndex] <= rsInfo.points.get(strength - 1).time
+            break
+    [retestLevels, retestTimes]
+
+formatTimeframeString (formatTimeframe) =>
+    timeframeF = formatTimeframe == "" ? timeframe.period : formatTimeframe
+    
+    if str.contains(timeframeF, "D") or str.contains(timeframeF, "W") or str.contains(timeframeF, "S") or str.contains(timeframeF, "M")
+        timeframeF
+    else
+        seconds = timeframe.in_seconds(timeframeF)
+        if seconds >= 3600
+            hourCount = int(seconds / 3600)
+            str.tostring(hourCount) + " Hour" + (hourCount > 1 ? "s" : "")
+        else
+            timeframeF + " Min"
+
+getPivot (pivotType) =>
+    pivot = (pivotType == "high" ? ta.pivothigh(high, pivotRange, pivotRange) : ta.pivotlow(low, pivotRange, pivotRange))
+    pivot
+
+handleRSInfo (timeframeInfo timeframeInfoF, RSInfo RSInfoF, int index, string RSType) =>
+    if not na(RSInfoF)
+        if not na(timeframeInfoF)
+            curRSList.push(RSInfoF)
+        
+        [foundBreakLevel, foundBreakTime] = getFirstBreak(RSInfoF)
+        
+        RSInfoF.isBroken := na(foundBreakLevel) ? false : true
+        RSInfoF.brokenTime := na(foundBreakLevel) ? na : foundBreakTime
+
+        if not na(foundBreakLevel)
+            if showBreaks
+                if na(RSInfoF.breakLabel)
+                    RSInfoF.breakLabel := createBreakLabel(RSInfoF.RSType)
+                label.set_xy(RSInfoF.breakLabel, foundBreakTime, foundBreakLevel * (RSInfoF.RSType == "Resistance" ? (1.0 / labelOffsetsY) : labelOffsetsY))
+            
+            if expandLines
+                if na(RSInfoF.breakLine) and enableZones == false
+                    RSInfoF.breakLine := createRSLine(color.black)
+                
+                if na(RSInfoF.breakBox) and enableZones == true
+                    RSInfoF.breakBox := createRSBox(color.black, xloc.bar_time)
+
+                if not enableZones
+                    line.set_extend(RSInfoF.breakLine, extend.right)
+                else
+                    box.set_extend(RSInfoF.breakBox, extend.right)
+                
+                if inverseBrokenLineColor and showBreaks
+                    if not enableZones
+                        line.set_color(RSInfoF.breakLine, RSInfoF.RSType == "Resistance" ? supportColor : resistanceColor)
+                    else    
+                        box.set_bgcolor(RSInfoF.breakBox, RSInfoF.RSType == "Resistance" ? supportColor : resistanceColor)
+                else
+                    if not enableZones
+                        line.set_color(RSInfoF.breakLine, RSInfoF.RSType == "Resistance" ? resistanceColor : supportColor)
+                    else
+                        box.set_bgcolor(RSInfoF.breakBox, RSInfoF.RSType == "Resistance" ? resistanceColor : supportColor)
+
+        if showRetests
+            [retestLevels, retestTimes] = getRetests(RSInfoF)
+
+            if not na(retestLevels) and retestLevels.size() > 0
+                for i = 0 to retestLevels.size() - 1
+                    newRetestLabel = createRetestLabel(RSInfoF.RSType)
+                    label.set_xy(newRetestLabel, retestTimes.get(i), retestLevels.get(i) * (RSInfoF.RSType == "Support" ? (1.0 / labelOffsetsY) : labelOffsetsY))
+                    RSInfoF.retestLabels.push(newRetestLabel)
+
+        //timeSkipOffset = maxTimeskipMS / 4
+        timeSkipOffset = 0
+        if enableZones
+            zoneEndX = time + timeSkipOffset + timeframe.in_seconds(timeframe.period) * 1000 * labelOffsetsXIndex 
+            startTime = math.min(time, RSInfoF.points.get(strength - 1).time)
+            moveRSInfoBox(RSInfoF.box, startTime, RSInfoF.price, na(foundBreakTime) ? zoneEndX : foundBreakTime)
+            moveRSInfoBox(RSInfoF.breakBox, foundBreakTime, RSInfoF.price, zoneEndX)
+        else
+            endTime = time + timeSkipOffset + timeframe.in_seconds(timeframe.period) * 1000
+            startTime = math.min(time, RSInfoF.points.get(strength - 1).time)
+            moveLine(RSInfoF.line, startTime, RSInfoF.price, na(foundBreakTime) ? endTime : foundBreakTime)
+            moveLine(RSInfoF.breakLine, foundBreakTime, RSInfoF.price, endTime)
+            //log.info(str.tostring(RSInfoF.price) + " | " + str.tostring(RSInfoF.points.get(strength - 1).time) + " = "  + str.tostring(line.get_x1(RSInfoF.line)) + " | " + str.tostring(endTime) + " = " + str.tostring(line.get_x2(RSInfoF.line)))
+        
+        if expandLines
+            if not enableZones
+                line.set_extend(RSInfoF.line, (na(foundBreakTime)) ? extend.both : extend.left)
+            else    
+                box.set_extend(RSInfoF.box, (na(foundBreakTime)) ? extend.both : extend.left)
+        else
+            if not enableZones
+                line.set_extend(RSInfoF.line, na(foundBreakTime) ? extend.right : extend.none)
+            else
+                box.set_extend(RSInfoF.box, na(foundBreakTime) ? extend.right : extend.none)
+
+        //labelTitleOld = formatTimeframeString(timeframeInfoF.timeframeStr) + " " + RSInfoF.RSType + " " + str.tostring(index + 1) + " (" + str.tostring(RSInfoF.price,format.mintick) + ")" + (RSInfoF.isBroken ? " [Broken]" : "")
+        labelTitle = formatTimeframeString(timeframeInfoF.timeframeStr) + " | " + str.tostring(RSInfoF.price,format.mintick) + ((debug_showBrokenOnLabel and RSInfoF.isBroken)  ? " [B]" : "")
+        
+        if not enableZones
+            label.set_text(RSInfoF.priceLabel, enableZones ? "" : labelTitle)
+            label.set_y(RSInfoF.priceLabel, RSInfoF.price)
+        else
+            box.set_text(RSInfoF.box, (RSInfoF.isBroken and expandLines) ? "" : labelTitle)
+            box.set_text(RSInfoF.breakBox, labelTitle)
+        
+        if expandLines or not RSInfoF.isBroken
+            if not enableZones
+                label.set_xloc(RSInfoF.priceLabel, bar_index + labelOffsetsXIndex, xloc.bar_index)
+            else
+                box.set_text_halign(RSInfoF.breakBox, text.align_right)
+                box.set_text_halign(RSInfoF.box, text.align_right)
+        else
+            if not enableZones
+                label.set_xloc(RSInfoF.priceLabel, (RSInfoF.points.get(strength - 1).time + RSInfoF.brokenTime) / 2, xloc.bar_time)
+            else
+                box.set_text_halign(RSInfoF.box, text.align_center)
+                box.set_text_halign(RSInfoF.breakBox, text.align_center)
+    else
+        log.error("Couldn't find timeframe " + str.tostring(timeframeInfoF.index) + " " + str.tostring(index + 1) + "th " + RSType + " . Try decreasing pivot range in the settings.")
+
+handleTimeframe (timeframeIndex, lowPivots, highPivots, lowTimes, highTimes) =>
+    timeframeInfoF = timeframeInfos.get(timeframeIndex - 1)
+    
+    timeframeInfoF.lowPivots.clear()
+    timeframeInfoF.highPivots.clear()
+    timeframeInfoF.lowTimes.clear()
+    timeframeInfoF.highTimes.clear()
+
+    timeframeInfoF.lowPivots := lowPivots
+    timeframeInfoF.highPivots := highPivots
+    timeframeInfoF.lowTimes := lowTimes
+    timeframeInfoF.highTimes := highTimes
+
+getHigherTFData (timeframeStr) =>
+    request.security(syminfo.tickerid, getMaxTimeframe(timeframe.period, timeframeStr), [allLowPivots, allHighPivots, allLowTimes, allHighTimes])
+
+pushHighPivots (timeframeInfoF, highPivotF, timeF) =>
+    if not na(highPivotF)
+        timeframeInfoF.highPivots.push(highPivotF)
+        timeframeInfoF.highTimes.push(timeF)
+
+pushLowPivots (timeframeInfoF, lowPivotF, timeF) =>
+    if not na(lowPivotF)
+        timeframeInfoF.lowPivots.push(lowPivotF)
+        timeframeInfoF.lowTimes.push(timeF)
+
+handleTimeframeIfLower (timeframeInfo timeframeInfoF, highs, lows, int[] timesF) =>
+    if timeframeInfoF.isEnabled and isTimeframeLower(timeframeInfoF.timeframeStr, timeframe.period)
+        if highs.size() > 0
+            for i = 0 to highs.size() - 1
+                timeF = timesF.get(i)
+                pushHighPivots(timeframeInfoF, highs.get(i), timeF)
+        if lows.size() > 0
+            for i = 0 to lows.size() - 1
+                timeF = timesF.get(i)
+                pushLowPivots(timeframeInfoF, lows.get(i), timeF)
+
+getLowerTFData (timeframeStr) =>
+    lowPivots = isTimeframeLower(timeframeStr, timeframe.period) ? request.security_lower_tf(syminfo.tickerid, getMinTimeframe(timeframeStr, timeframe.period), ta.pivotlow(low, pivotRange, pivotRange)) : na
+    highPivots = isTimeframeLower(timeframeStr, timeframe.period) ? request.security_lower_tf(syminfo.tickerid, getMinTimeframe(timeframeStr, timeframe.period), ta.pivothigh(high, pivotRange, pivotRange)) : na
+    times = isTimeframeLower(timeframeStr, timeframe.period) ? request.security_lower_tf(syminfo.tickerid, getMinTimeframe(timeframeStr, timeframe.period), time[pivotRange]) : na
+    [lowPivots,highPivots,times,times]
+
+getTFData (timeframeStr) =>
+    if isTimeframeLower(timeframeStr, timeframe.period)
+        getLowerTFData(timeframeStr)
+    else
+        getHigherTFData(timeframeStr)
+
+checkIfRSAreSame (RSInfo rsInfo1, RSInfo rsInfo2) =>
+    if na(rsInfo1) or na(rsInfo2)
+        false
+    else if rsInfo1.RSType != rsInfo2.RSType
+        false
+    else if rsInfo1.price != rsInfo2.price
+        false
+    else
+        true
+
+checkIfArrHasRS (RSInfo[] arr, RSInfo rsInfoF) =>
+    if na(arr) or na(rsInfoF)
+        true
+    else if arr.size() == 0
+        false
+    else
+        foundRS = false
+        for i = 0 to arr.size() - 1
+            arrRS = arr.get(i)
+            if checkIfRSAreSame(arrRS, rsInfoF)
+                foundRS := true
+                break
+        if foundRS
+            true
+        else
+            false
+
+clearTimeframeRS (timeframeInfoF) =>
+    oldRetestsCount = 0
+    oldBreaksCount = 0
+
+    if timeframeInfoF.resistances.size() > 0
+        for j = 0 to timeframeInfoF.resistances.size() - 1
+            RSInfo RSInfoF = timeframeInfoF.resistances.get(j)
+            if not na(RSInfoF)
+                if debug_enabledHistory
+                    if checkIfArrHasRS(oldRSList, RSInfoF) == false
+                        oldRSList.push(RSInfoF)
+
+                oldRetestsCount += RSInfoF.retestLabels.size()
+                oldBreaksCount += RSInfoF.isBroken ? 1 : 0
+    
+    if timeframeInfoF.supports.size() > 0
+        for j = 0 to timeframeInfoF.supports.size() - 1
+            RSInfo RSInfoF = timeframeInfoF.supports.get(j)
+            if not na(RSInfoF)
+                if debug_enabledHistory
+                    if checkIfArrHasRS(history, RSInfoF) == false
+                        oldRSList.push(RSInfoF)
+                
+                oldRetestsCount += RSInfoF.retestLabels.size()
+                oldBreaksCount += RSInfoF.isBroken ? 1 : 0
+    
+    timeframeInfoF.resistances.clear()
+    timeframeInfoF.supports.clear()
+    [oldRetestsCount, oldBreaksCount]
+
+findTimeframeRS (timeframeInfoF, RSType, arr, count, pivots, times) =>
+    curRetestsCount = 0
+    curBreaksCount = 0
+
+    if count > 0
+        for j = 0 to count - 1
+            foundRS = findLatestNthRS(timeframeInfoF, RSType, pivots, times, j + 1)
+            if not na(foundRS)
+                notDuplicate = true
+                for a = 0 to timeframeInfos.size() - 1
+                    aInfo = timeframeInfos.get(a)
+                    if na(aInfo) or aInfo.isEnabled == false
+                        continue
+                    otherTimeframeArray = (RSType == "Resistance" ? aInfo.resistances : aInfo.supports)
+                    if otherTimeframeArray.size() > 0
+                        for b = 0 to otherTimeframeArray.size() - 1
+                            if checkIfRSAreSame(foundRS, otherTimeframeArray.get(b))
+                                notDuplicate := false
+                                break
+                    if notDuplicate == false
+                        break
+                
+                if notDuplicate or not debug_removeDuplicateRS
+                    arr.push(foundRS)
+        
+        if arr.size() > 0
+            for j = 0 to arr.size() - 1
+                curRS = arr.get(j)
+                if not na(curRS)
+                    handleRSInfo(timeframeInfoF, curRS, j, RSType)
+                    curRetestsCount += curRS.retestLabels.size()
+                    curBreaksCount += curRS.isBroken ? 1 : 0
+    [curRetestsCount, curBreaksCount]
+    
+lowPivot = getPivot("low")
+highPivot = getPivot("high")
+
+if not na(lowPivot)
+    allLowPivots.push(lowPivot)
+    allLowTimes.push(time[pivotRange])
+    if allLowPivots.size() > maxPivotsAllowed
+        allLowPivots.remove(0)
+        allLowTimes.remove(0)
+        
+
+if not na(highPivot)
+    allHighPivots.push(highPivot)
+    allHighTimes.push(time[pivotRange])
+    if allHighPivots.size() > maxPivotsAllowed
+        allHighPivots.remove(0)
+        allHighTimes.remove(0)
+
+if calculateTimeSkipMS
+    if last_bar_index - bar_index < 350 and time - time[1] > timeframe.in_seconds(timeframe.period) * 1000
+        maxTimeskipMS := math.max(maxTimeskipMS, time - time[1])
+
+[lowPivotsTF1, highPivotsTF1, lowTimesTF1, highTimesTF1] = getTFData(timeframe1)
+handleTimeframeIfLower(timeframeInfos.get(0), highPivotsTF1, lowPivotsTF1, highTimesTF1)
+
+[lowPivotsTF2, highPivotsTF2, lowTimesTF2, highTimesTF2] = getTFData(timeframe2)
+handleTimeframeIfLower(timeframeInfos.get(1), highPivotsTF2, lowPivotsTF2, highTimesTF2)
+
+[lowPivotsTF3, highPivotsTF3, lowTimesTF3, highTimesTF3] = getTFData(timeframe3)
+handleTimeframeIfLower(timeframeInfos.get(2), highPivotsTF3, lowPivotsTF3, highTimesTF3)
+
+//plot(nz(na,timeframeInfos.get(0).highPivots.size() > 0 ? timeframeInfos.get(0).highPivots.get(timeframeInfos.get(0).highPivots.size() - 1) : 0), color = color.blue, title = "High Pivots")
+//plot(nz(na,timeframeInfos.get(0).lowPivots.size() > 0 ? timeframeInfos.get(0).lowPivots.get(timeframeInfos.get(0).lowPivots.size() - 1) : 0), color = color.fuchsia, title = "Low Pivots")
+
+if barstate.islast
+    
+    if timeframe1Enabled and not isTimeframeLower(timeframe1, timeframe.period)
+        handleTimeframe(1, lowPivotsTF1, highPivotsTF1, lowTimesTF1, highTimesTF1)
+
+    if timeframe2Enabled and not isTimeframeLower(timeframe2, timeframe.period)
+        handleTimeframe(2, lowPivotsTF2, highPivotsTF2, lowTimesTF2, highTimesTF2)
+    
+    if timeframe3Enabled and not isTimeframeLower(timeframe3, timeframe.period)
+        handleTimeframe(3, lowPivotsTF3, highPivotsTF3, lowTimesTF3, highTimesTF3)
+
+    int enabledTimeframeCount = 0
+    for i = 0 to timeframeCount - 1
+        timeframeInfo curInfo = timeframeInfos.get(i)
+        if curInfo.isEnabled
+            enabledTimeframeCount += 1
+    
+    int oldRetestsCount = 0
+    int curRetestsCount = 0
+
+    int oldBreaksCount = 0
+    int curBreaksCount = 0
+
+    for i = 0 to timeframeCount - 1
+        timeframeInfo curInfo = timeframeInfos.get(i)
+        if not curInfo.isEnabled
+            continue
+
+        [oldRetests, oldBreaks] = clearTimeframeRS(curInfo)
+        oldRetestsCount += oldRetests
+        oldBreaksCount += oldBreaks
+
+        resistanceCount = math.min(DEBUG ? debug_lastXResistances : resistanceSupportCount, maxResistances - (enabledTimeframeCount > 1 ? 1 : 0))
+        resistanceCount := math.max(resistanceCount, 0)
+
+        supportCount = math.min(DEBUG ? debug_lastXSupports : resistanceSupportCount, maxSupports - (enabledTimeframeCount > 1 ? 1 : 0))
+        supportCount := math.max(supportCount, 0)
+
+        [curRetests1, curBreaks1] = findTimeframeRS(curInfo, "Resistance", curInfo.resistances, resistanceCount, curInfo.highPivots, curInfo.highTimes)
+        [curRetests2, curBreaks2] = findTimeframeRS(curInfo, "Support", curInfo.supports, supportCount, curInfo.lowPivots, curInfo.lowTimes)
+        curRetestsCount += curRetests1 + curRetests2
+        curBreaksCount += curBreaks1 + curBreaks2
+    
+    if debug_enabledHistory
+        historyIndexesToDelete = array.new<int>(0)
+        if history.size() > 0
+            for i = 0 to history.size() - 1
+                if checkIfArrHasRS(curRSList, history.get(i))
+                    historyIndexesToDelete.push(i)
+            
+            if historyIndexesToDelete.size() > 0
+                for i = 0 to historyIndexesToDelete.size() - 1
+                    deleteIndex = historyIndexesToDelete.get(historyIndexesToDelete.size() - i - 1)
+                    safeDeleteRSInfo(history.get(deleteIndex))
+                    history.remove(deleteIndex)
+        
+        if oldRSList.size() > 0
+            for i = 0 to oldRSList.size() - 1
+                curRS = oldRSList.get(i)
+                if checkIfArrHasRS(curRSList, curRS) == false
+                    history.push(histRSInfo(curRS))
+                    if history.size() > debug_maxHistoryRecords
+                        safeDeleteRSInfo(history.get(0))
+                        history.remove(0)
+
+    
+    if oldRSList.size() > 0
+        for i = 0 to oldRSList.size() - 1
+            safeDeleteRSInfo(oldRSList.get(i))
+    
+    curRSList.clear()
+    oldRSList.clear()
+
+    if DEBUG
+        log.info("History Size : " + str.tostring(history.size()))
+        log.info("Label Count : " + str.tostring(label.all.size()))
+        log.info("Line Count : " + str.tostring(line.all.size()))
+        log.info("Box Count : " + str.tostring(box.all.size()))
+
+    if enableRetestAlerts and curRetestsCount > oldRetestsCount and initRun == false
+        alert("New Retests Occured.")
+    
+    if enableBreakAlerts and curBreaksCount > oldBreaksCount and initRun == false
+        alert("New Breaks Occured.")
+    
+    initRun := false
+
+
+
+/////////////////////////////////////////////////////////////
+
+
+//@version=5
+//indicator(title="Parabolic SAR", shorttitle="SAR", overlay=true, timeframe="", timeframe_gaps=true)
+start = input(0.02)
+increment = input(0.02)
+maximum = input(0.2, "Max Value")
+out = ta.sar(start, increment, maximum)
+plot(out, "ParabolicSAR", style=plot.style_cross, color=#ffff00,display = display.none)
+
+
+
+/////////////////////////////////////////////////
+
+
+
+// Functions
+percWidth(len, perc) => (ta.highest(len) - ta.lowest(len)) * perc / 100
+// Get components
+rb            = 10
+prd           = 284
+ChannelW      = 10
+label_loc     = 55
+style         = lineStyle == "Solid" ? line.style_solid : lineStyle == "Dotted" ? line.style_dotted : line.style_dashed
+ph            = ta.pivothigh(rb, rb)
+pl            = ta.pivotlow (rb, rb)
+sr_levels     = array.new_float(21, na)
+prdhighest    = ta.highest(prd)
+prdlowest     = ta.lowest(prd)
+cwidth        = percWidth(prd, ChannelW)
+zonePerc      = percWidth(300, zoneWidth)
+aas           = array.new_bool(41, true)
+u1            = 0.0, u1 := nz(u1[1])
+d1            = 0.0, d1 := nz(d1[1])
+highestph     = 0.0, highestph := highestph[1]
+lowestpl      = 0.0, lowestpl := lowestpl[1]
+var sr_levs   = array.new_float(21, na)
+label hlabel  = na, label.delete(hlabel[1])
+label llabel  = na, label.delete(llabel[1])
+var sr_lines  = array.new_line(21, na)
+var sr_linesH = array.new_line(21, na)
+var sr_linesL = array.new_line(21, na)
+var sr_linesF = array.new_linefill(21, na)
+var sr_labels = array.new_label(21, na)
+if ph or pl
+    for x = 0 to array.size(sr_levels) - 1
+        array.set(sr_levels, x, na)
+    highestph := prdlowest
+    lowestpl := prdhighest
+    countpp = 0
+    for x = 0 to prd
+        if na(close[x])
+            break
+        if not na(ph[x]) or not na(pl[x])
+            highestph := math.max(highestph, nz(ph[x], prdlowest), nz(pl[x], prdlowest))
+            lowestpl := math.min(lowestpl, nz(ph[x], prdhighest), nz(pl[x], prdhighest))
+            countpp += 1
+            if countpp > 40
+                break
+            if array.get(aas, countpp)
+                upl = (ph[x] ? high[x + rb] : low[x + rb]) + cwidth
+                dnl = (ph[x] ? high[x + rb] : low[x + rb]) - cwidth
+                u1 := countpp == 1 ? upl : u1
+                d1 := countpp == 1 ? dnl : d1
+                tmp = array.new_bool(41, true)
+                cnt = 0
+                tpoint = 0
+                for xx = 0 to prd
+                    if na(close[xx])
+                        break
+                    if not na(ph[xx]) or not na(pl[xx])
+                        chg = false
+                        cnt += 1
+                        if cnt > 40
+                            break
+                        if array.get(aas, cnt)
+                            if not na(ph[xx])
+                                if high[xx + rb] <= upl and high[xx + rb] >= dnl
+                                    tpoint += 1
+                                    chg := true
+                            if not na(pl[xx])
+                                if low[xx + rb] <= upl and low[xx + rb] >= dnl
+                                    tpoint += 1
+                                    chg := true
+                        if chg and cnt < 41
+                            array.set(tmp, cnt, false)
+                if tpoint >= strengthSR
+                    for g = 0 to 40 by 1
+                        if not array.get(tmp, g)
+                            array.set(aas, g, false)
+                    if ph[x] and countpp < 21
+                        array.set(sr_levels, countpp, high[x + rb])
+                    if pl[x] and countpp < 21
+                        array.set(sr_levels, countpp, low[x + rb])
+// Plot
+var line highest_ = na, line.delete(highest_)
+var line lowest_  = na, line.delete(lowest_)
+var line highest_fill1 = na, line.delete(highest_fill1)
+var line highest_fill2 = na, line.delete(highest_fill2)
+var line lowest_fill1  = na, line.delete(lowest_fill1)
+var line lowest_fill2  = na, line.delete(lowest_fill2)
+hi_col = close >= highestph ? colorSup : colorRes
+lo_col = close >= lowestpl  ? colorSup : colorRes
+if enableSR
+    highest_ := line.new(bar_index - 311, highestph, bar_index, highestph, xloc.bar_index, expandSR ? extend.both : extend.right, hi_col, style, lineWidth)
+    lowest_  := line.new(bar_index - 311, lowestpl , bar_index, lowestpl , xloc.bar_index, expandSR ? extend.both : extend.right, lo_col, style, lineWidth)
+    if useHLZones
+        highest_fill1 := line.new(bar_index - 311, highestph + zonePerc, bar_index, highestph + zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        highest_fill2 := line.new(bar_index - 311, highestph - zonePerc, bar_index, highestph - zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        lowest_fill1  := line.new(bar_index - 311, lowestpl + zonePerc , bar_index, lowestpl + zonePerc , xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        lowest_fill2  := line.new(bar_index - 311, lowestpl - zonePerc , bar_index, lowestpl - zonePerc , xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        linefill.new(highest_fill1, highest_fill2, color.new(hi_col, 80))
+        linefill.new(lowest_fill1 , lowest_fill2 , color.new(lo_col, 80))
+if ph or pl
+    for x = 0 to array.size(sr_lines) - 1
+        array.set(sr_levs, x, array.get(sr_levels, x))
+for x = 0 to array.size(sr_lines) - 1
+    line.delete(array.get(sr_lines, x))
+    line.delete(array.get(sr_linesH, x))
+    line.delete(array.get(sr_linesL, x))
+    linefill.delete(array.get(sr_linesF, x))
+    if array.get(sr_levs, x) and enableSR
+        line_col = close >= array.get(sr_levs, x) ? colorSup : colorRes
+        array.set(sr_lines, x, line.new(bar_index - 355, array.get(sr_levs, x), bar_index, array.get(sr_levs, x), xloc.bar_index, expandSR ? extend.both : extend.right, line_col, style, lineWidth))
+        if useZones
+            array.set(sr_linesH, x, line.new(bar_index - 355, array.get(sr_levs, x) + zonePerc, bar_index, array.get(sr_levs, x) + zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na))
+            array.set(sr_linesL, x, line.new(bar_index - 355, array.get(sr_levs, x) - zonePerc, bar_index, array.get(sr_levs, x) - zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na))
+            array.set(sr_linesF, x, linefill.new(array.get(sr_linesH, x), array.get(sr_linesL, x), color.new(line_col, 80)))
+for x = 0 to array.size(sr_labels) - 1
+    label.delete(array.get(sr_labels, x))
+    if array.get(sr_levs, x) and enableSR
+        lab_loc = close >= array.get(sr_levs, x) ? label.style_label_up : label.style_label_down
+        lab_col = close >= array.get(sr_levs, x) ? colorSup             : colorRes
+        array.set(sr_labels, x, label.new(bar_index + label_loc, array.get(sr_levs, x), str.tostring(math.round_to_mintick(array.get(sr_levs, x))), color=lab_col , textcolor=#000000, style=lab_loc))
+hlabel := enableSR ? label.new(bar_index + label_loc + math.round(math.sign(label_loc)) * 20, highestph, "High Level : " + str.tostring(highestph), color=hi_col, textcolor=#000000, style=label.style_label_down) : na
+llabel := enableSR ? label.new(bar_index + label_loc + math.round(math.sign(label_loc)) * 20, lowestpl , "Low  Level : " + str.tostring(lowestpl) , color=lo_col, textcolor=#000000, style=label.style_label_up  ) : na
+
+
+
+
+
+
+
+//////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+// © Dreadblitz
+//@version=5
+//indicator(shorttitle='1 - Follow Line 2in1', title='1 - Follow Line 2in1', overlay=true)
+
+BBperiod1 = input.int(defval=21, title='BB Period', minval=1)
+BBdeviations1 = input.float(defval=1.00, title='BB Deviations', minval=0.1, step=0.05)
+UseATRfilter1 = input(defval=true, title='ATR Filter')
+ATRperiod1 = input.int(defval=5, title='ATR Period', minval=1)
+hl1 = input(defval=false, title='Hide Labels')
+//
+BBUpper1 = ta.sma(close, BBperiod1) + ta.stdev(close, BBperiod1) * BBdeviations1
+BBLower1 = ta.sma(close, BBperiod1) - ta.stdev(close, BBperiod1) * BBdeviations1
+//
+TrendLine1 = 0.0
+iTrend1 = 0.0
+buy1 = 0.0
+sell1 = 0.0
+//
+BBSignal1 = close > BBUpper1 ? 1 : close < BBLower1 ? -1 : 0
+// 
+if BBSignal1 == 1 and UseATRfilter1 == 1
+    TrendLine1 := low - ta.atr(ATRperiod1)
+    if TrendLine1 < TrendLine1[1]
+        TrendLine1 := TrendLine1[1]
+        TrendLine1
+if BBSignal1 == -1 and UseATRfilter1 == 1
+    TrendLine1 := high + ta.atr(ATRperiod1)
+    if TrendLine1 > TrendLine1[1]
+        TrendLine1 := TrendLine1[1]
+        TrendLine1
+if BBSignal1 == 0 and UseATRfilter1 == 1
+    TrendLine1 := TrendLine1[1]
+    TrendLine1
+//
+if BBSignal1 == 1 and UseATRfilter1 == 0
+    TrendLine1 := low
+    if TrendLine1 < TrendLine1[1]
+        TrendLine1 := TrendLine1[1]
+        TrendLine1
+if BBSignal1 == -1 and UseATRfilter1 == 0
+    TrendLine1 := high
+    if TrendLine1 > TrendLine1[1]
+        TrendLine1 := TrendLine1[1]
+        TrendLine1
+if BBSignal1 == 0 and UseATRfilter1 == 0
+    TrendLine1 := TrendLine1[1]
+    TrendLine1
+//
+iTrend1 := iTrend1[1]
+if TrendLine1 > TrendLine1[1]
+    iTrend1 := 1
+    iTrend1
+if TrendLine1 < TrendLine1[1]
+    iTrend1 := -1
+    iTrend1
+//
+buy1 := iTrend1[1] == -1 and iTrend1 == 1 ? 1 : na
+sell1 := iTrend1[1] == 1 and iTrend1 == -1 ? 1 : na
+//
+plot(TrendLine1, color=iTrend1 > 0 ? color.rgb(2, 248, 27) : color.red, style=plot.style_line, linewidth=2, title='Trend Line', transp=0)
+plotshape(buy1 == 1 and hl1 == false ? TrendLine1 - ta.atr(8) : na, text='Buy', style=shape.labelup, location=location.absolute, color=color.new(color.teal, 50), textcolor=color.new(color.white, 0), offset=0, size=size.auto)
+plotshape(sell1 == 1 and hl1 == false ? TrendLine1 + ta.atr(8) : na, text='Sell', style=shape.labeldown, location=location.absolute, color=color.new(#ff0000, 0), textcolor=color.new(color.white, 0), offset=0, size=size.auto)
+//
+alertcondition(sell1 == 1, title='sell1', message='sell1')
+alertcondition(buy1 == 1, title='buy1', message='buy1')
+alertcondition(buy1 == 1 or sell1 == 1, title='buy1/sell1', message='buy1/sell1')
+
+
+//////////////////////////////////
+
+
+
+
+//
+UCCR = input(true, title='Use Current Chart Resolution?')
+TYPE = input.string(title='Type Of MA', defval='EMA', options=['RMA', 'SMA', 'EMA', 'WMA', 'VWMA', 'SMMA', 'KMA', 'TMA', 'HullMA', 'DEMA', 'TEMA', 'CTI'])
+RES = input.timeframe('60', title='Resolution')
+LEN = input(21, title='Period')
+BBdeviations = input.float(defval=1.00, title='Deviations', minval=0.1, step=0.05)
+ATRperiod = input.int(defval=5, title='ATR Period', minval=1)
+SOUR = input(title='Source', defval=close)
+hl = input(defval=false, title='Hide Labels')
+//
+cd = 0.0
+cti(sm, src, cd) =>
+    di = (sm - 1.0) / 2.0 + 1.0
+    c1 = 2 / (di + 1.0)
+    c2 = 1 - c1
+    c3 = 3.0 * (cd * cd + cd * cd * cd)
+    c4 = -3.0 * (2.0 * cd * cd + cd + cd * cd * cd)
+    c5 = 3.0 * cd + 1.0 + cd * cd * cd + 3.0 * cd * cd
+    i1 = 0.0
+    i2 = 0.0
+    i3 = 0.0
+    i4 = 0.0
+    i5 = 0.0
+    i6 = 0.0
+    i1 := c1 * src + c2 * nz(i1[1])
+    i2 := c1 * i1 + c2 * nz(i2[1])
+    i3 := c1 * i2 + c2 * nz(i3[1])
+    i4 := c1 * i3 + c2 * nz(i4[1])
+    i5 := c1 * i4 + c2 * nz(i5[1])
+    i6 := c1 * i5 + c2 * nz(i6[1])
+
+    bfr = -cd * cd * cd * i6 + c3 * i5 + c4 * i4 + c5 * i3
+    bfr
+
+smma(src, len) =>
+    smma = 0.0
+    smma := na(smma[1]) ? ta.sma(src, len) : (smma[1] * (len - 1) + src) / len
+    smma
+
+ma(smoothing, src, length) =>
+    if smoothing == 'RMA'
+        ta.rma(src, length)
+    else
+        if smoothing == 'SMA'
+            ta.sma(src, length)
+        else
+            if smoothing == 'EMA'
+                ta.ema(src, length)
+            else
+                if smoothing == 'WMA'
+                    ta.wma(src, length)
+                else
+                    if smoothing == 'VWMA'
+                        ta.vwma(src, length)
+                    else
+                        if smoothing == 'SMMA'
+                            smma(src, length)
+                        else
+                            if smoothing == 'HullMA'
+                                ta.wma(2 * ta.wma(src, length / 2) - ta.wma(src, length), math.round(math.sqrt(length)))
+                            else
+                                if smoothing == 'LSMA'
+                                    src
+                                else
+                                    if smoothing == 'KMA'
+                                        xPrice = src
+                                        xvnoise = math.abs(xPrice - xPrice[1])
+                                        nfastend = 0.666
+                                        nslowend = 0.0645
+                                        nsignal = math.abs(xPrice - xPrice[length])
+                                        nnoise = math.sum(xvnoise, length)
+                                        nefratio = nnoise != 0 ? nsignal / nnoise : 0
+                                        nsmooth = math.pow(nefratio * (nfastend - nslowend) + nslowend, 2)
+                                        nAMA = 0.0
+                                        nAMA := nz(nAMA[1]) + nsmooth * (xPrice - nz(nAMA[1]))
+                                        nAMA
+                                    else
+                                        if smoothing == 'TMA'
+                                            ta.sma(ta.sma(close, length), length)
+                                        else
+                                            if smoothing == 'DEMA'
+                                                emaValue = ta.ema(src, length)
+                                                2 * emaValue - ta.ema(emaValue, length)
+                                            else
+                                                if smoothing == 'TEMA'
+                                                    ema1 = ta.ema(src, length)
+                                                    ema2 = ta.ema(ema1, length)
+                                                    ema3 = ta.ema(ema2, length)
+                                                    3 * ema1 - 3 * ema2 + ema3
+                                                else
+                                                    if smoothing == 'CTI'
+                                                        cti(length, src, cd)
+                                                    else
+                                                        src
+//
+final_res = UCCR ? timeframe.period : RES
+MA = ma(TYPE, SOUR, LEN)
+MA_MTF = request.security(syminfo.tickerid, final_res, MA)
+//
+close_ = request.security(syminfo.tickerid, final_res, close)
+low_ = request.security(syminfo.tickerid, final_res, low)
+high_ = request.security(syminfo.tickerid, final_res, high)
+atr_ = request.security(syminfo.tickerid, final_res, ta.atr(ATRperiod))
+//
+BBUpper = MA_MTF + ta.stdev(close_, LEN) * BBdeviations
+BBLower = MA_MTF - ta.stdev(close_, LEN) * BBdeviations
+//
+v = atr_
+max_bars_back(v, 1000)
+//
+TrendLine = 0.0
+iTrend = 0.0
+buy = 0.0
+sell = 0.0
+//
+BBSignal = close_ > BBUpper ? 1 : close_ < BBLower ? -1 : 0
+// 
+if BBSignal == 1
+    TrendLine := low_ - v
+    if TrendLine < TrendLine[1]
+        TrendLine := TrendLine[1]
+        TrendLine
+if BBSignal == -1
+    TrendLine := high_ + v
+    if TrendLine > TrendLine[1]
+        TrendLine := TrendLine[1]
+        TrendLine
+if BBSignal == 0
+    TrendLine := TrendLine[1]
+    TrendLine
+//
+iTrend := iTrend[1]
+if TrendLine > TrendLine[1]
+    iTrend := 1
+    iTrend
+if TrendLine < TrendLine[1]
+    iTrend := -1
+    iTrend
+//
+buy := iTrend[1] == -1 and iTrend == 1 ? 1 : na
+sell := iTrend[1] == 1 and iTrend == -1 ? 1 : na
+//
+plot(TrendLine, color=iTrend > 0 ? color.rgb(1, 248, 43) : color.red, style=plot.style_line, linewidth=2, title='Trend Line', transp=0)
+plotshape(buy == 1 and hl == false ? TrendLine - v : na, text='Smart Buy', style=shape.labelup, location=location.absolute, color=color.new(color.teal, 50), textcolor=color.new(color.white, 0), offset=0, size=size.auto)
+plotshape(sell == 1 and hl == false ? TrendLine + v : na, text='Smart Sell', style=shape.labeldown, location=location.absolute, color=color.new(#f60808, 0), textcolor=color.new(color.white, 0), offset=0, size=size.auto)
+//
+alertcondition(sell == 1, title='Sell', message='Sell')
+alertcondition(buy == 1, title='Buy', message='Buy')
+alertcondition(buy == 1 or sell == 1, title='Buy/Sell', message='Buy/Sell')
+
+/////////////////////////////
+
+
+
+filt2 = input.string("Smooth", options = ["No Filter", "Smooth", "Zero Lag"], title = "", group="Kernel Regression", inline="k", tooltip="Select Kernel Regression type from the dropdown box.")
+type2 = input.string("Rational Quadratic", options = ["Rational Quadratic", "Gaussian", "Periodic", "Locally Periodic"], title="", group="Kernel Regression", inline="k", tooltip="Select Kernel Regression type from the dropdown box.")
+h2 = input.int(8, 'Lookback Window', minval=3, tooltip='The number of bars used for the estimation. Recommended range: 3-50', group="Kernel Regression", inline="k")
+r2 = input.float(1., 'Weighting', step=0.25, tooltip='Relative weighting of time frames. Recommended range: 0.25-25', group="Kernel Regression", inline="kernel2")
+x2 = input.int(20, "Level", tooltip='Bar index on which to start regression. Recommended range: 2-25', group="Kernel Regression", inline="kernel2")
+lag2 = input.int(2, "Lag", tooltip="Lag for crossover detection. Recommended range: 1-2", inline='kernel2', group='Kernel Regression')
+
+rationalQuadratic(_src, _lookback, _relativeWeight, startAtBar, _filter) =>
+    float _currentWeight = 0.
+    float _cumulativeWeight = 0.
+    _size = array.size(array.from(_src))
+    for i = 0 to _size + startAtBar
+        y = _src[i]
+        w = math.pow(1 + (math.pow(i, 2) / ((math.pow(_lookback, 2) * 2 * _relativeWeight))), -_relativeWeight)
+        _currentWeight += y*w
+        _cumulativeWeight += w
+    yhatdelt = _currentWeight / _cumulativeWeight
+    float _currentWeight2 = 0.
+    float _cumulativeWeight2 = 0.
+    _size2 = array.size(array.from(yhatdelt))
+    for i = 0 to _size2 + startAtBar
+        y = yhatdelt[i]
+        w = math.pow(1 + (math.pow(i, 2) / ((math.pow(_lookback, 2) * 2 * _relativeWeight))), -_relativeWeight)
+        _currentWeight2 += y*w
+        _cumulativeWeight2 += w
+    yhatdelt2 = _currentWeight2 / _cumulativeWeight2
+    yhat = yhatdelt - (yhatdelt - yhatdelt2)
+    zlagcalc = yhatdelt + (yhatdelt - yhatdelt2)
+    lineout = _filter == "No Filter" ? yhatdelt : _filter == "Smooth" ? yhat : _filter == "Zero Lag" ? zlagcalc : na
+    lineout
+
+gaussian(_src, _lookback, startAtBar, _filter) =>
+    float _currentWeight = 0.
+    float _cumulativeWeight = 0.
+    _size = array.size(array.from(_src))
+    for i = 0 to _size + startAtBar
+        y = _src[i] 
+        w = math.exp(-math.pow(i, 2) / (2 * math.pow(_lookback, 2)))
+        _currentWeight += y*w
+        _cumulativeWeight += w
+    yhatdelt = _currentWeight / _cumulativeWeight
+    float _currentWeight2 = 0.
+    float _cumulativeWeight2 = 0.
+    _size2 = array.size(array.from(yhatdelt))
+    for i = 0 to _size2 + startAtBar
+        y = yhatdelt[i] 
+        w = math.exp(-math.pow(i, 2) / (2 * math.pow(_lookback, 2)))
+        _currentWeight2 += y*w
+        _cumulativeWeight2 += w
+    yhatdelt2 = _currentWeight2 / _cumulativeWeight2
+    yhat = yhatdelt - (yhatdelt - yhatdelt2)
+    zlagcalc = yhatdelt + (yhatdelt - yhatdelt2)
+    lineout = _filter == "No Filter" ? yhatdelt : _filter == "Smooth" ? yhat : _filter == "Zero Lag" ? zlagcalc : na
+    lineout
+
+periodic(_src, _lookback, _period, startAtBar, _filter) =>
+    float _currentWeight = 0.
+    float _cumulativeWeight = 0.
+    _size = array.size(array.from(_src))
+    for i = 0 to _size + startAtBar
+        y = _src[i]
+        w = math.exp(-2*math.pow(math.sin(math.pi * i / _period), 2) / math.pow(_lookback, 2))
+        _currentWeight += y*w
+        _cumulativeWeight += w
+    yhatdelt = _currentWeight / _cumulativeWeight
+    float _currentWeight2 = 0.
+    float _cumulativeWeight2 = 0.
+    _size2 = array.size(array.from(yhatdelt))
+    for i = 0 to _size2 + startAtBar
+        y = yhatdelt[i]
+        w = math.exp(-2*math.pow(math.sin(math.pi * i / _period), 2) / math.pow(_lookback, 2))
+        _currentWeight2 += y*w
+        _cumulativeWeight2 += w
+    yhatdelt2 = _currentWeight2 / _cumulativeWeight2
+    yhat = yhatdelt - (yhatdelt - yhatdelt2)
+    zlagcalc = yhatdelt + (yhatdelt - yhatdelt2)
+    lineout = _filter == "No Filter" ? yhatdelt : _filter == "Smooth" ? yhat : _filter == "Zero Lag" ? zlagcalc : na
+    lineout
+
+locallyPeriodic(_src, _lookback, _period, startAtBar, _filter) =>
+    float _currentWeight = 0.
+    float _cumulativeWeight = 0.
+    _size = array.size(array.from(_src))
+    for i = 0 to _size + startAtBar
+        y = _src[i]
+        w = math.exp(-2*math.pow(math.sin(math.pi * i / _period), 2) / math.pow(_lookback, 2)) * math.exp(-math.pow(i, 2) / (2 * math.pow(_lookback, 2)))
+        _currentWeight += y*w
+        _cumulativeWeight += w
+    yhatdelt = _currentWeight / _cumulativeWeight
+    float _currentWeight2 = 0.
+    float _cumulativeWeight2 = 0.
+    _size2 = array.size(array.from(yhatdelt))
+    for i = 0 to _size2 + startAtBar
+        y = yhatdelt[i]
+        w = math.exp(-2*math.pow(math.sin(math.pi * i / _period), 2) / math.pow(_lookback, 2)) * math.exp(-math.pow(i, 2) / (2 * math.pow(_lookback, 2)))
+        _currentWeight2 += y*w
+        _cumulativeWeight2 += w
+    yhatdelt2 = _currentWeight2 / _cumulativeWeight2
+    yhat = yhatdelt - (yhatdelt - yhatdelt2)
+    zlagcalc = yhatdelt + (yhatdelt - yhatdelt2)
+    lineout = _filter == "No Filter" ? yhatdelt : _filter == "Smooth" ? yhat : _filter == "Zero Lag" ? zlagcalc : na
+    lineout
+
+//src1 = input(close)
+src1 = close
+
+ksrc = type2 == "Rational Quadratic" ? rationalQuadratic(src1, h2, r2, x2, filt2) : type2 == "Gaussian" ? gaussian(src1, h2-lag2, x2, filt2) : type2 == "Periodic" ? periodic(src1, h2, lag2, x2, filt2) : type2 == "Locally Periodic" ? locallyPeriodic(src1, h2, lag2, x2, filt2) : na
+
+plot(ksrc, "Line2", color= ksrc > ksrc[1] ? color.rgb(9, 255, 95) : color.red, linewidth=2)
+
+
+
+
+
+/////////////////////// ORDER BLOCK FINDER /////////////////////////////////////
+
+
+colors = input.string(title='Color Scheme', defval='BRIGHT', options=['DARK', 'BRIGHT'])
+periods = input(5, 'Relevant Periods to identify OB')  // Required number of subsequent candles in the same direction to identify Order Block
+threshold = input.float(0.0, 'Min. Percent move to identify OB', step=0.1)  // Required minimum % move (from potential OB close to last subsequent candle to identify Order Block)
+usewicks = input(false, 'Use whole range [High/Low] for OB marking?')  // Display High/Low range for each OB instead of Open/Low for Bullish / Open/High for Bearish
+showbull = input(true, 'Show latest Bullish Channel?')  // Show Channel for latest Bullish OB?
+showbear = input(true, 'Show latest Bearish Channel?')  // Show Channel for latest Bearish OB?
+showdocu = input(false, 'Show Label for documentation tooltip?')  // Show Label which shows documentation as tooltip?
+info_pan = input(false, 'Show Latest OB Panel?')  // Show Info Panel with latest OB Stats
+
+ob_period = periods + 1  // Identify location of relevant Order Block candle
+absmove = math.abs(close[ob_period] - close[1]) / close[ob_period] * 100  // Calculate absolute percent move from potential OB to last candle of subsequent candles
+relmove = absmove >= threshold  // Identify "Relevant move" by comparing the absolute move to the threshold
+
+// Color Scheme
+bullcolor = colors == 'DARK' ? color.white : color.green
+bearcolor = colors == 'DARK' ? color.blue : color.red
+
+// Bullish Order Block Identification
+bullishOB = close[ob_period] < open[ob_period]  // Determine potential Bullish OB candle (red candle)
+
+int upcandles = 0
+for i = 1 to periods by 1
+    upcandles += (close[i] > open[i] ? 1 : 0)  // Determine color of subsequent candles (must all be green to identify a valid Bearish OB)
+    upcandles
+
+OB_bull = bullishOB and upcandles == periods and relmove  // Identification logic (red OB candle & subsequent green candles)
+OB_bull_high = OB_bull ? usewicks ? high[ob_period] : open[ob_period] : na  // Determine OB upper limit (Open or High depending on input)
+OB_bull_low = OB_bull ? low[ob_period] : na  // Determine OB lower limit (Low)
+OB_bull_avg = (OB_bull_high + OB_bull_low) / 2  // Determine OB middle line
+
+
+// Bearish Order Block Identification
+bearishOB = close[ob_period] > open[ob_period]  // Determine potential Bearish OB candle (green candle)
+
+int downcandles = 0
+for i = 1 to periods by 1
+    downcandles += (close[i] < open[i] ? 1 : 0)  // Determine color of subsequent candles (must all be red to identify a valid Bearish OB)
+    downcandles
+
+OB_bear = bearishOB and downcandles == periods and relmove  // Identification logic (green OB candle & subsequent green candles)
+OB_bear_high = OB_bear ? high[ob_period] : na  // Determine OB upper limit (High)
+OB_bear_low = OB_bear ? usewicks ? low[ob_period] : open[ob_period] : na  // Determine OB lower limit (Open or Low depending on input)
+OB_bear_avg = (OB_bear_low + OB_bear_high) / 2  // Determine OB middle line
+
+
+// Plotting
+
+plotshape(OB_bull, title='Bullish OB', style=shape.triangleup, color=bullcolor, textcolor=bullcolor, size=size.tiny, location=location.belowbar, offset=-ob_period, text=' Bullish', editable = false)  // Bullish OB Indicator
+plotshape(OB_bear, title='Bearish OB', style=shape.triangledown, color=bearcolor, textcolor=bearcolor, size=size.tiny, location=location.abovebar, offset=-ob_period, text=' Bearish', editable = false)  // Bearish OB Indicator
+
+
+
+
+
+
+
+
+
+
+
+
+

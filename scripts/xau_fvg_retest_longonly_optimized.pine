@@ -1,0 +1,151 @@
+//@version=6
+strategy(
+    title                   = "XAU FVG Retest KillZone+ Long Only",
+    shorttitle              = "XAUFVG",
+    overlay                 = true,
+    pyramiding              = 0,
+    default_qty_type        = strategy.percent_of_equity,
+    default_qty_value       = 2,
+    commission_type         = strategy.commission.percent,
+    commission_value        = 0.01,
+    slippage                = 2,
+    initial_capital         = 10000,
+    currency                = currency.USD,
+    calc_on_every_tick      = false,
+    process_orders_on_close = false,
+    max_bars_back           = 500
+)
+
+// Recommended chart: OANDA:XAUUSD on 15m.
+// Optimized long-only FVG retest model for London/NY kill zones.
+
+//------------------------------------------------------------------------------
+// Sessions
+//------------------------------------------------------------------------------
+grp_kz = "Kill Zones (UTC)"
+i_london = input.bool(true, "London 07:00-11:00 UTC", group = grp_kz)
+i_ny = input.bool(true, "NY 12:00-16:00 UTC", group = grp_kz)
+
+//------------------------------------------------------------------------------
+// ICT / FVG
+//------------------------------------------------------------------------------
+grp_ict = "ICT / FVG"
+i_fvg_life = input.int(14, "FVG lifetime (bars)", minval = 4, maxval = 100, group = grp_ict)
+i_touch_margin = input.float(0.20, "FVG touch margin (x FVG height)", minval = 0.0, step = 0.05, group = grp_ict)
+i_min_fvg_atr = input.float(0.20, "Min FVG size (x ATR)", minval = 0.0, step = 0.05, group = grp_ict)
+
+//------------------------------------------------------------------------------
+// Risk
+//------------------------------------------------------------------------------
+grp_risk = "Risk"
+i_rr = input.float(1.5, "R:R target", minval = 1.5, step = 0.25, group = grp_risk)
+i_sl_atr = input.float(0.8, "SL ATR multiplier", minval = 0.2, step = 0.1, group = grp_risk)
+i_cooldown_bars = input.int(5, "Cooldown bars", minval = 1, maxval = 100, group = grp_risk)
+
+//------------------------------------------------------------------------------
+// Trend
+//------------------------------------------------------------------------------
+grp_trend = "Trend"
+i_ema_fast = input.int(34, "EMA fast", minval = 10, maxval = 200, group = grp_trend)
+i_ema_slow = input.int(200, "EMA slow", minval = 50, maxval = 500, group = grp_trend)
+
+//------------------------------------------------------------------------------
+// Filters
+//------------------------------------------------------------------------------
+grp_filter = "Filters"
+i_use_stro = input.bool(true, "Use stochastic confirmation", group = grp_filter)
+i_stro_threshold = input.float(65.0, "Stochastic K threshold", minval = 20.0, step = 5.0, group = grp_filter)
+i_candle_strength = input.float(0.3, "Candle strength (x ATR) alternative confirm", minval = 0.0, step = 0.1, group = grp_filter)
+i_use_rsi = input.bool(true, "Use RSI filter", group = grp_filter)
+i_rsi_len = input.int(14, "RSI length", minval = 2, maxval = 50, group = grp_filter)
+i_rsi_max_long = input.int(58, "Max RSI for long entry", minval = 40, maxval = 90, group = grp_filter)
+
+//------------------------------------------------------------------------------
+// Session state
+//------------------------------------------------------------------------------
+london_active = not na(time(timeframe.period, "0700-1100", "UTC"))
+ny_active = not na(time(timeframe.period, "1200-1600", "UTC"))
+in_kz = (i_london and london_active) or (i_ny and ny_active)
+
+atr = ta.atr(14)
+
+//------------------------------------------------------------------------------
+// Trend and momentum state
+//------------------------------------------------------------------------------
+ema_fast = ta.ema(close, i_ema_fast)
+ema_slow = ta.ema(close, i_ema_slow)
+bias_bull = close > ema_fast and ema_fast > ema_slow
+
+rsi = ta.rsi(close, i_rsi_len)
+rsi_ok_long = not i_use_rsi or rsi <= i_rsi_max_long
+
+stro_k = ta.stoch(close, high, low, 14)
+candle_body = math.abs(close - open)
+candle_strong = candle_body >= i_candle_strength * atr
+confirm_long = not i_use_stro or stro_k < i_stro_threshold or candle_strong
+
+//------------------------------------------------------------------------------
+// Bullish FVG tracking
+//------------------------------------------------------------------------------
+bull_fvg_now = high[2] < low and (low - high[2]) >= atr * i_min_fvg_atr
+
+var float fvg_top = na
+var float fvg_bot = na
+var int fvg_bar = na
+var float pending_stop = na
+var float active_stop = na
+var float active_target = na
+
+if bull_fvg_now and bias_bull
+    fvg_top := low
+    fvg_bot := high[2]
+    fvg_bar := bar_index
+
+fvg_valid = not na(fvg_bar) and (bar_index - fvg_bar) <= i_fvg_life and not na(fvg_top) and not na(fvg_bot)
+fvg_h = fvg_valid ? (fvg_top - fvg_bot) : na
+
+retest_long = fvg_valid and bar_index > fvg_bar and low <= (fvg_top + fvg_h * i_touch_margin) and close >= fvg_bot
+
+//------------------------------------------------------------------------------
+// Trade frequency control
+//------------------------------------------------------------------------------
+var int last_signal_bar = na
+cooldown_ok = na(last_signal_bar) or (bar_index - last_signal_bar) >= i_cooldown_bars
+
+long_sig = barstate.isconfirmed and in_kz and bias_bull and rsi_ok_long and confirm_long and retest_long and strategy.position_size == 0 and cooldown_ok
+
+if long_sig
+    stop_candidate = math.min(fvg_bot - i_sl_atr * atr, close - syminfo.mintick)
+    if close - stop_candidate > syminfo.mintick * 2
+        pending_stop := stop_candidate
+        last_signal_bar := bar_index
+        strategy.entry("Long", strategy.long)
+        fvg_bar := na
+
+new_long_fill = strategy.position_size > 0 and strategy.position_size[1] <= 0
+
+if new_long_fill
+    active_stop := math.min(pending_stop, strategy.position_avg_price - syminfo.mintick)
+    risk = strategy.position_avg_price - active_stop
+    active_target := strategy.position_avg_price + risk * i_rr
+    pending_stop := na
+
+if strategy.position_size > 0 and not na(active_stop) and not na(active_target)
+    strategy.exit("Long-X", "Long", stop = active_stop, limit = active_target)
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    active_stop := na
+    active_target := na
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+bgcolor(london_active and i_london ? color.new(color.blue, 90) : na, title = "London KZ")
+bgcolor(ny_active and i_ny ? color.new(color.green, 90) : na, title = "NY KZ")
+bgcolor(long_sig ? color.new(color.lime, 65) : na, title = "Long Entry")
+
+plot(ema_fast, "EMA Fast", color = color.new(color.orange, 0))
+plot(ema_slow, "EMA Slow", color = color.new(color.red, 10))
+plot(fvg_valid ? fvg_top : na, "Bull FVG High", color = color.new(color.lime, 35), style = plot.style_linebr)
+plot(fvg_valid ? fvg_bot : na, "Bull FVG Low", color = color.new(color.lime, 65), style = plot.style_linebr)
+plotshape(long_sig, title = "Long Signal", style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), size = size.tiny, text = "L")

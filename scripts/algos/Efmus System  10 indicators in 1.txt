@@ -1,0 +1,175 @@
+//@version=5
+indicator(title='Efmus System : 10 indicators in 1')
+
+bar_color = input.bool(false, "BarColor On/Off")
+ema1 = input.int(21, minval=1, title='EMA 1')
+ema2 = input.int(55, minval=1, title='EMA 2')
+ema3 = input.int(89, minval=1, title='EMA 3')
+ema4 = input.int(144, minval=1, title='EMA 4')
+sma1 = input.int(50, minval=1, title='SMA 1')
+sma2 = input.int(200, minval=1, title='SMA 2')
+
+
+
+//RSI
+src = close
+len = input.int(9, minval=1, title='RSI Length')
+up = ta.rma(math.max(ta.change(src), 0), len)
+down = ta.rma(-math.min(ta.change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - 100 / (1 + up / down)
+//coloring method below
+src1 = close
+len1 = input.int(70, minval=1, title='RSI  UpLevel')
+src2 = close
+len2 = input.int(30, minval=1, title='RSI DownLevel')
+isup() =>
+    rsi > len1
+isdown() =>
+    rsi < len2
+isbull() =>
+    rsi > 50 and rsi <= 70
+isbear() =>
+    rsi < 50 and rsi >= 30
+isdown_1 = isdown()
+isbull_1 = isbull()
+isbear_1 = isbear()
+rsicolor = isup() ? color.green : isdown_1 ? color.maroon : isbull_1 ? color.lime : isbear_1 ? color.red : color.gray
+rsi_bullish = rsi > 50
+rsi_bearish = rsi < 50
+
+
+
+//MACD
+fastMA = input.int(title='MACD Fast moving average', defval=12, minval=7)
+slowMA = input.int(title='MACD Slow moving average', defval=26, minval=7)
+[currMacd, _, _] = ta.macd(close[0], fastMA, slowMA, 9)
+[prevMacd, _, _] = ta.macd(close[1], fastMA, slowMA, 9)
+macdColor = currMacd > 0 ? currMacd > prevMacd ? color.lime : color.green : currMacd < prevMacd ? color.maroon : color.red
+//plot(0, title = "Zero line", linewidth = 1, color = gray)
+macd_bullish = currMacd > 0
+macd_bearish = currMacd < 0
+
+
+
+//EMA Cross
+shortvalue = input.int(13, 'Fast EMA Cross', maxval=200)
+longvalue = input.int(48, 'Slow EMA Cross', maxval=200)
+short = ta.ema(close, shortvalue)
+long = ta.ema(close, longvalue)
+crossColor = short > long ? color.lime : long > short ? color.red : color.black
+cross_bullish = short > long
+cross_bearish = short < long
+
+
+
+//Pivot
+// Classic Pivot
+pivot = (high + low + close) / 3.0
+tf = timeframe.isintraday ? 'W' : 'M'
+wtime_pivot = request.security(syminfo.tickerid, tf, pivot[0])
+pivotcolor = wtime_pivot < close ? color.lime : wtime_pivot > close ? color.fuchsia : color.gray
+//plot(wtime_pivot, title="Pivot Line",style=line, color=fuchsia,linewidth=4) 
+pivot_bullish = wtime_pivot < close
+pivot_bearish = wtime_pivot > close
+
+
+
+
+//SMA EMA
+
+ma20 = ta.ema(src, ema1)
+ma50 = ta.sma(src, sma1)
+ma55 = ta.ema(src, ema2)
+ma89 = ta.ema(src, ema3)
+ma144 = ta.ema(src, ema4)
+ma200 = ta.sma(src, sma2)
+color_1 = color.new(color.red, 50)
+
+
+
+// Calculate TD price direction
+priceUp = close > close[4]
+priceDown = close < close[4]
+var int countUp = 0
+var int countDown = 0
+if priceUp
+    countUp := countUp + 1
+    countDown := 0
+else if priceDown
+    countDown := countDown + 1
+    countUp := 0
+else
+    countUp := 0
+    countDown := 0
+
+// Generate buy and sell signals
+buy = countDown == 9
+buyovershoot = countDown == 13
+buyovershoot1 = countDown == 14
+buyovershoot2 = countDown == 15
+buyovershoot3 = countDown == 16
+
+// Sell Setup //
+sell = countUp == 9
+sellovershoot = countUp == 13
+sellovershoot1 = countUp == 14
+sellovershoot2 = countUp == 15
+sellovershoot3 = countUp == 16
+
+td_long = buy or buyovershoot or buyovershoot2 or buyovershoot3
+td_short = sell or sellovershoot or sellovershoot2 or sellovershoot3
+plotchar(sell, 'Sell Pullback', '⤵',  size=size.tiny, display=display.all, color=color.red, force_overlay=true, location=location.abovebar)
+plotchar(sellovershoot, 'Sell Pullback', '⤵',  size=size.small, display=display.all, color=#ed6e6e, force_overlay=true, location=location.abovebar)
+plotchar(sellovershoot2, 'Sell Pullback', '⤵',  size=size.small, display=display.all, color=#ff8282, force_overlay=true, location=location.abovebar)
+plotchar(sellovershoot3, 'Sell Pullback', '⤵',  size=size.small, display=display.all, color=#ffa4a4, force_overlay=true, location=location.abovebar)
+
+plotchar(buy, 'Buy Pullback', '⤴',  size=size.tiny, display=display.all, color=color.green, force_overlay=true, location=location.belowbar)
+plotchar(buyovershoot, 'Buy Pullback', '⤴',  size=size.small, display=display.all, color=#5bc95e, force_overlay=true, location=location.belowbar)
+plotchar(buyovershoot2, 'Buy Pullback', '⤴',  size=size.small, display=display.all, color=#64e268, force_overlay=true, location=location.belowbar)
+plotchar(buyovershoot3, 'Buy Pullback', '⤴',  size=size.small, display=display.all, color=#72ff77, force_overlay=true, location=location.belowbar)
+
+
+
+//Plot Histogram
+plot(110, color=pivotcolor, style=plot.style_columns, title='PIVOT', linewidth=10, histbase=100)
+plot(95, color=macdColor, style=plot.style_columns, title='MACD', linewidth=10, histbase=85)
+plot(80, color=crossColor, title='EMA Cross', linewidth=10, style=plot.style_columns, histbase=70)
+plot(65, color=rsicolor, style=plot.style_columns, title='RSI', linewidth=10, histbase=55)
+
+plot(30, color=ma20 < close ? color.lime : color_1, style=plot.style_columns, title='EMA21', linewidth=5, histbase=25)
+plot(20, color=ma50 < close ? color.lime : color.red, style=plot.style_columns, title='SMA50', linewidth=5, histbase=15)
+plot(10, color=ma55 < close ? color.lime : color.red, style=plot.style_columns, title='EMA55', linewidth=5, histbase=05)
+plot(0, color=ma89 < close ? color.lime : color.red, style=plot.style_columns, title='EMA89', linewidth=5, histbase=-05)
+plot(-10, color=ma144 < close ? color.lime : color.red, style=plot.style_columns, title='EMA144', linewidth=5, histbase=-15)
+plot(-20, color=ma200 < close ? color.lime : color.red, style=plot.style_columns, title='SMA200', linewidth=5, histbase=-25)
+
+
+
+
+if barstate.islastconfirmedhistory
+    var text_size = size.small
+    var table = table.new(position = position.bottom_right, columns = 1, rows = 10, bgcolor = #000000, border_width = 1, force_overlay=true)
+    table.cell(table_id = table, column = 0, row = 0, text = "PIVOT", text_size=text_size, text_color = pivotcolor)
+    table.cell(table_id = table, column = 0, row = 1, text = "MACD", text_size=text_size, text_color = macdColor)
+    table.cell(table_id = table, column = 0, row = 2, text = "EMA Cross", text_size=text_size, text_color = crossColor)
+    table.cell(table_id = table, column = 0, row = 3, text = "RSI", text_size=text_size, text_color = rsicolor)
+    table.cell(table_id = table, column = 0, row = 4, text = "EMA 21", text_size=text_size, text_color = ma20 < close ? color.lime : color.red)
+    table.cell(table_id = table, column = 0, row = 5, text = "SMA 50", text_size=text_size, text_color = ma50 < close ? color.lime : color.red)
+    table.cell(table_id = table, column = 0, row = 6, text = "EMA 55", text_size=text_size, text_color = ma55 < close ? color.lime : color.red)
+    table.cell(table_id = table, column = 0, row = 7, text = "EMA 89", text_size=text_size, text_color = ma89 < close ? color.lime : color.red)
+    table.cell(table_id = table, column = 0, row = 8, text = "EMA 144", text_size=text_size, text_color = ma144 < close ? color.lime : color.red)
+    table.cell(table_id = table, column = 0, row = 9, text = "SMA 200", text_size=text_size, text_color = ma200 < close ? color.lime : color.red)
+
+
+
+//Global Signal
+signal_bullish = macd_bullish and pivot_bullish and cross_bullish and rsi_bullish
+signal_bearish = macd_bearish and pivot_bearish and cross_bearish and rsi_bearish
+color_signal = signal_bullish ? color.lime : color.red
+//plot(130, color=color_signal, style=plot.style_columns, title="Opportunity Signal", linewidth=10, histbase=120)
+barcolor(bar_color ? color_signal : na)
+
+//Alert
+alertcondition(signal_bullish, title='Bullish Signal', message='Bullish Signal')
+alertcondition(signal_bearish, title='Bearish Signal', message='Bearish Signal')
+

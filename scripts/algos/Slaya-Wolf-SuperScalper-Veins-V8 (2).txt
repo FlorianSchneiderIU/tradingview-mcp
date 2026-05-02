@@ -1,0 +1,593 @@
+/// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BrookstarNZ-"CRYPTO SLAYA"
+
+/// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Crypto_Wolf_Traders
+
+
+//@version=5
+strategy("Slaya-Wolf-SuperScalper-Veins-V8", overlay=true, max_labels_count=500, default_qty_type = strategy.percent_of_equity, default_qty_value = 25, initial_capital = 500)
+///////////////////////////////////////////////////////////////////////////////
+//-----------------------CRYPTO SLAYA-CRYPTO-WOLF-TRADERS---------------------//
+///////////////////////////////////////////////////////////////////////////////
+// SIGNAL MEANINGS//
+//"Buy Label" = Strong Buy//
+//"Sell Label" = Strong Sell//
+//"Don't Long" = Green Cross//
+//"Don't Short" = Red Cross//
+//"Weak Buy " = Green Circle//
+//"Weak Sell" = Red Circle//
+//"Reversal Buy" = Green Diamond//
+//"Reversal Sell" = Red Diamond//
+
+// Get user settings
+res               = input.timeframe(title='TIMEFRAME', defval='1h', group ="NON REPAINT HA")
+showBuySell       = input(true, "BUY/SELL SIGNALS ON/OFF", group="BUY & SELL SIGNALS")
+sensitivity       = input.float(2.7, "SENSITIVITY (1-6)", 0.1, 10, group="BUY & SELL SIGNALS")
+percentStop       = input.float(1.0, "STOP LOSS %", 0, group="BUY & SELL SIGNALS")
+percentTake       = input.float(0.2, "TAKE PROFIT %", 0, group="BUY & SELL SIGNALS")
+percentTake2      = input.float(0.4, "TAKE PROFIT2 %", 0, group="BUY & SELL SIGNALS")
+percentTake3      = input.float(0.6, "TAKE PROFIT3 %", 0, group="BUY & SELL SIGNALS")
+percentTake4      = input.float(0.8, "TAKE PROFIT4 %", 0, group="BUY & SELL SIGNALS")
+percentTake5      = input.float(1, "TAKE PROFIT5 %", 0, group="BUY & SELL SIGNALS")
+//Strong Buy/Sell
+showStrongBuySell  = input(true, "STRONG BUY/SELL SIGNALS ON/OFF", group="STRONG BUY & SELL SIGNALS")
+sensitivity2       = input.float(13, "SENSITIVITY", 0.1, 20, group="STRONG BUY & SELL SIGNALS")
+percentStrongStop       = input.float(1.0, "STOP LOSS %", 0)
+percentStrongTake       = input.float(0.2, "TAKE PROFIT %", 0)
+percentStrongTake2      = input.float(0.4, "TAKE PROFIT2 %", 0)
+percentStrongTake3      = input.float(0.6, "TAKE PROFIT3 %", 0)
+percentStrongTake4      = input.float(0.8, "TAKE PROFIT4 %", 0)
+percentStrongTake5      = input.float(1, "TAKE PROFIT5 %", 0)
+
+offsetSignal      = input.float(1, "SIGNAL OFFSET", 0, group="BUY & SELL SIGNALS")
+showReversal      = input(true, "REVERSAL SIGNALS ON/OFF", group="BUY & SELL SIGNALS")
+// Entry & Exit
+enableE           = input(false, "EXIT & ENTRY ON/OFF", group="EXIT & ENTRY")
+//Stop              = input.color(color.new(#83868f, 5), "STOP LOSS", group="EXIT & ENTRY")
+Entry             = input.color(color.new(#8d020e, 5), "ENTRY", group="EXIT & ENTRY")
+Tp1               = input.color(color.new(#038007, 5), "TAKE PROFIT", group="EXIT & ENTRY")
+// Supply & Demand
+enableSD          = input(true, "SUPPLY & DEMAND ON/OFF", group="SUPPLY & DEMAND")
+mitigation        = input.string('Wick', 'MITIGATION', options = ['Wick', 'Close'], group ="SUPPLY & DEMAND")
+length            = input.int(20, 'VOLUME PIVOT', minval = 1, group ="SUPPLY & DEMAND")
+bull_ext_last     = input.int(1, 'DEMAND', minval = 1, inline = 'bull', group ="SUPPLY & DEMAND")
+bull_avg_css      = input.color(color.new(#00dbff, 1), '', inline = 'bull', group ="SUPPLY & DEMAND")
+bull_css          = input.color(color.new(#00000000, 100), '', inline = 'bull', group ="SUPPLY & DEMAND")
+bg_bull_css       = input.color(color.new(#00ff0a, 90), '', inline = 'bull', group ="SUPPLY & DEMAND")
+bear_ext_last     = input.int(1, 'SUPPLY', minval = 1 , inline = 'bear', group ="SUPPLY & DEMAND")
+bear_avg_css      = input.color(color.new(#E91E63, 1), '', inline = 'bear', group ="SUPPLY & DEMAND")
+bear_css          = input.color(color.new(#00000000, 100), '', inline = 'bear', group ="SUPPLY & DEMAND")
+bg_bear_css       = input.color(color.new(#ff0015, 90), '', inline = 'bear', group ="SUPPLY & DEMAND")
+line_style        = input.string("Solid", "LINE STYLE", ["Solid", "Dotted", "Dashed"], group ="SUPPLY & DEMAND")
+line_width        = input.int(2, 'LINE WIDTH', minval = 1, group ="SUPPLY & DEMAND")
+// Support & Resistance
+enableSR          = input(true, "SUPPORT & RESISTANCE ON/Off", group="SUPPORT & RESISTANCE")
+colorSup          = input(#00dbff, "SUPPORT", group="SUPPORT & RESISTANCE")
+colorRes          = input(#E91E63, "RESISTANCE", group="SUPPORT & RESISTANCE")
+strengthSR        = input.int(6, "S/R STRENGTH", 1, group="SUPPORT & RESISTANCE")
+lineStyle1        = input.string("Solid", "LINE STYLE", ["Solid", "Dotted", "Dashed"], group="SUPPORT & RESISTANCE")
+lineWidth1        = input.int(2, "LINE WIDTH", 1, group="SUPPORT & RESISTANCE")
+expandSR          = input(true, "EXTEND LINES", group = "SUPPORT & RESISTANCE")
+useZones          = input(true, "ZONE ON/OFF", group="SUPPORT & RESISTANCE")
+useHLZones        = input(true, "HIGH LOW ZONES ON/OFF", group="SUPPORT & RESISTANCE")
+zoneWidth         = input.int(4, "ZONE WIDTH %", 0, tooltip="it's calculated using % of the distance between highest/lowest in last 300 bars", group="SUPPORT & RESISTANCE")
+// Trend Table
+showDashboard     = input(true, "TeiwazTrading ON/OFF", group="TeiwazTrading DASHBOARD")
+locationDashboard = input.string("Top Right", "Table Location", ["Top Right", "Middle Right", "Bottom Right", "Top Center", "Middle Center", "Bottom Center", "Top Left", "Middle Left", "Bottom Left"], group="TREND DASHBOARD")
+tableTextColor    = input(color.rgb(236, 233, 233), "TEXT", group="TeiwazTrading DASHBOARD")
+tableBgColor      = input(color.black, "BACKGROUND", group="TeiwazTrading DASHBOARD")
+sizeDashboard     = input.string("Small", "TABLE SIZE", ["Large", "Normal", "Small", "Tiny"], group="TeiwazTrading DASHBOARD")
+showPdHlc         = input(false, "PREVIOUS DAY H/L/C", group="PREVIOUS DAY HIGH LOW CLOSE")
+lineColor         = input.color(#028a07, "LINE COLORS", group="PREVIOUS DAY HIGH LOW CLOSE")
+lineStyle         = input.string("Solid", "LINE STYLE", ["Solid", "Dotted", "Dashed"], group ="PREVIOUS DAY HIGH LOW CLOSE")
+lineWidth         = input.int(1, "LINE WIDTH", group="PREVIOUS DAY HIGH LOW CLOSE")
+
+// Create non-repainting security function
+rp_security(_symbol, _res, _src) =>
+    request.security(_symbol, _res, _src[barstate.isrealtime ? 1 : 0])
+
+htfHigh = rp_security(syminfo.tickerid, res, high)
+htfLow = rp_security(syminfo.tickerid, res, low)
+
+// Main Indicator
+// Functions
+smoothrng(x, t, m) =>
+    wper = t * 2 - 1
+    avrng = ta.ema(math.abs(x - x[1]), t)
+    smoothrng = ta.ema(avrng, wper) * m
+rngfilt(x, r) =>
+    rngfilt = x
+    rngfilt := x > nz(rngfilt[1]) ? x - r < nz(rngfilt[1]) ? nz(rngfilt[1]) : x - r : x + r > nz(rngfilt[1]) ? nz(rngfilt[1]) : x + r
+percWidth(len, perc) => (ta.highest(len) - ta.lowest(len)) * perc / 100
+securityNoRep(sym, res, src) => request.security(sym, res, src, barmerge.gaps_off, barmerge.lookahead_on)
+swingPoints(prd) =>
+    pivHi = ta.pivothigh(prd, prd)
+    pivLo = ta.pivotlow (prd, prd)
+    last_pivHi = ta.valuewhen(pivHi, pivHi, 1)
+    last_pivLo = ta.valuewhen(pivLo, pivLo, 1)
+    hh = pivHi and pivHi > last_pivHi ? pivHi : na
+    lh = pivHi and pivHi < last_pivHi ? pivHi : na
+    hl = pivLo and pivLo > last_pivLo ? pivLo : na
+    ll = pivLo and pivLo < last_pivLo ? pivLo : na
+    [hh, lh, hl, ll]
+f_chartTfInMinutes() =>
+    float _resInMinutes = timeframe.multiplier * (
+      timeframe.isseconds ? 1                   :
+      timeframe.isminutes ? 1.                  :
+      timeframe.isdaily   ? 60. * 24            :
+      timeframe.isweekly  ? 60. * 24 * 7        :
+      timeframe.ismonthly ? 60. * 24 * 30.4375  : na)
+f_kc(src, len, sensitivity) =>
+    basis = ta.sma(src, len)
+    span  = ta.atr(len)
+    [basis + span * sensitivity, basis - span * sensitivity]
+wavetrend(src, chlLen, avgLen) =>
+    esa = ta.ema(src, chlLen)
+    d = ta.ema(math.abs(src - esa), chlLen)
+    ci = (src - esa) / (0.015 * d)
+    wt1 = ta.ema(ci, avgLen)
+    wt2 = ta.sma(wt1, 3)
+    [wt1, wt2]
+f_top_fractal(src) => src[4] < src[2] and src[3] < src[2] and src[2] > src[1] and src[2] > src[0]
+f_bot_fractal(src) => src[4] > src[2] and src[3] > src[2] and src[2] < src[1] and src[2] < src[0]
+f_fractalize (src) => f_top_fractal(src) ? 1 : f_bot_fractal(src) ? -1 : 0
+f_findDivs(src, topLimit, botLimit) =>
+    fractalTop = f_fractalize(src) > 0 and src[2] >= topLimit ? src[2] : na
+    fractalBot = f_fractalize(src) < 0 and src[2] <= botLimit ? src[2] : na
+    highPrev = ta.valuewhen(fractalTop, src[2], 0)[2]
+    highPrice = ta.valuewhen(fractalTop, high[2], 0)[2]
+    lowPrev = ta.valuewhen(fractalBot, src[2], 0)[2]
+    lowPrice = ta.valuewhen(fractalBot, low[2], 0)[2]
+    bearSignal = fractalTop and high[1] > highPrice and src[1] < highPrev
+    bullSignal = fractalBot and low[1] < lowPrice and src[1] > lowPrev
+    [bearSignal, bullSignal]
+
+// Get components
+source    = input(close, title = "Smoothring Source", group = "Smoothing")
+smrng1_input= input.int(200, "Smring1", 1, 200 , 1 , group = "Smoothing")
+smrng1_sens = input.float(defval = 13.0,title = "sens",minval = 0.1, maxval = 50 , step = 0.01 , group = "Smoothing")
+smrng2_input= input.int(32, "Smring2", 1, 500 , 1 , group = "Smoothing")
+smrng1    = smoothrng(source, smrng1_input, smrng1_sens)
+smrng2    = smoothrng(source, smrng2_input, sensitivity)
+smrng     = (smrng1 + smrng2) / 2
+filt      = rngfilt(source, smrng)
+up        = 0.0, up := filt > filt[1] ? nz(up[1]) + 1 : filt < filt[1] ? 0 : nz(up[1])
+dn        = 0.0, dn := filt < filt[1] ? nz(dn[1]) + 1 : filt > filt[1] ? 0 : nz(dn[1])
+bullCond  = bool(na), bullCond := source > filt and source > source[1] and up > 0 or source > filt and source < source[1] and up > 0
+bearCond  = bool(na), bearCond := source < filt and source < source[1] and dn > 0 or source < filt and source > source[1] and dn > 0
+lastCond  = 0, lastCond := bullCond ? 1 : bearCond ? -1 : lastCond[1]
+bull      = bullCond and lastCond[1] == -1
+bear      = bearCond and lastCond[1] == 1
+smrng3    = smoothrng(source, smrng2_input, sensitivity2)
+smrngstrong     = (smrng1 + smrng3) / 2
+filt2      = rngfilt(source, smrngstrong)
+up2        = 0.0, up2 := filt2 > filt2[1] ? nz(up2[1]) + 1 : filt2 < filt2[1] ? 0 : nz(up2[1])
+dn2        = 0.0, dn2 := filt2 < filt2[1] ? nz(dn2[1]) + 1 : filt2 > filt2[1] ? 0 : nz(dn2[1])
+strongbullCond  = bool(na), strongbullCond := source > filt2 and source > source[1] and up2 > 0 or source > filt2 and source < source[1] and up2 > 0
+strongbearCond  = bool(na), strongbearCond := source < filt2 and source < source[1] and dn2 > 0 or source < filt2 and source > source[1] and dn2 > 0
+lastCond2  = 0, lastCond2 := strongbullCond ? 1 : strongbearCond ? -1 : lastCond2[1]
+strongbull      = strongbullCond and lastCond2[1] == -1
+strongbear      = strongbearCond and lastCond2[1] == 1
+countBull = ta.barssince(bull)
+countBear = ta.barssince(bear)
+countStrongBull = ta.barssince(strongbull)
+countStrongBear = ta.barssince(strongbear)
+trigger   = nz(countBull, bar_index) < nz(countBear, bar_index) ? 1 : 0
+rsi       = ta.rsi(close, 28)
+rsiOb     = rsi > 68 and rsi > ta.ema(rsi, 10)
+rsiOs     = rsi < 28 and rsi < ta.ema(rsi, 10)
+dHigh     = securityNoRep(syminfo.tickerid, "D", high [1])
+dLow      = securityNoRep(syminfo.tickerid, "D", low  [1])
+dClose    = securityNoRep(syminfo.tickerid, "D", close[1])
+ema = ta.ema(close, 144)
+emaBull = close > ema
+equal_tf(res) => str.tonumber(res) == f_chartTfInMinutes() and not timeframe.isseconds
+higher_tf(res) => str.tonumber(res) > f_chartTfInMinutes() or timeframe.isseconds
+too_small_tf(res) => (timeframe.isweekly and res=="1") or (timeframe.ismonthly and str.tonumber(res) < 10)
+securityNoRep1(sym, res, src) =>
+    bool bull_ = na
+    bull_ := equal_tf(res) ? src : bull_
+    bull_ := higher_tf(res) ? request.security(sym, res, src, barmerge.gaps_off, barmerge.lookahead_on) : bull_
+    bull_array = request.security_lower_tf(syminfo.tickerid, higher_tf(res) ? str.tostring(f_chartTfInMinutes()) + (timeframe.isseconds ? "S" : "") : too_small_tf(res) ? (timeframe.isweekly ? "3" : "10") : res, src)
+    if array.size(bull_array) > 1 and not equal_tf(res) and not higher_tf(res)
+        bull_ := array.pop(bull_array)
+    array.clear(bull_array)
+    bull_
+TF1Bull   = securityNoRep1(syminfo.tickerid, "1"   , emaBull)
+TF3Bull   = securityNoRep1(syminfo.tickerid, "3"   , emaBull)
+TF5Bull   = securityNoRep1(syminfo.tickerid, "5"   , emaBull)
+TF15Bull  = securityNoRep1(syminfo.tickerid, "15"  , emaBull)
+TF30Bull  = securityNoRep1(syminfo.tickerid, "30"  , emaBull)
+TF60Bull  = securityNoRep1(syminfo.tickerid, "60"  , emaBull)
+TF120Bull = securityNoRep1(syminfo.tickerid, "120" , emaBull)
+TF240Bull = securityNoRep1(syminfo.tickerid, "240" , emaBull)
+TF480Bull = securityNoRep1(syminfo.tickerid, "480" , emaBull)
+TFDBull   = securityNoRep1(syminfo.tickerid, "1440", emaBull)
+[wt1, wt2] = wavetrend(close, 5, 10)
+[wtDivBear1, wtDivBull1] = f_findDivs(wt2, 15, -40)
+[wtDivBear2, wtDivBull2] = f_findDivs(wt2, 45, -65)
+wtDivBull = wtDivBull1 or wtDivBull2
+wtDivBear = wtDivBear1 or wtDivBear2
+
+
+// Colors
+white = #00e4fd, white30 = color.new(white, 100)
+blue = #fd00a4, blue30 = color.new(blue, 100)
+whiteish  = #ffffff, whiteish30  = color.new(whiteish , 100)
+
+// Plot
+off = percWidth(300, offsetSignal)
+barcolor(up > dn ? white : blue)
+plotshape(showBuySell and bull ? low  - off : na, "Buy Label" , shape.labelup  , location.absolute, color(#028a14), 0, "Buy" , color.white, size=size.tiny)
+plotshape(showBuySell and bear ? high + off : na, "Sell Label", shape.labeldown, location.absolute, color(#8b010d), 0, "Sell", color.white, size=size.tiny)
+plotshape(showStrongBuySell and strongbull ? low  - off : na, "Strong Buy Label" , shape.labelup  , location.absolute, color(#028a14), 0, "Strong-Buy" , color.white, size=size.tiny)
+plotshape(showStrongBuySell and strongbear ? high + off : na, "Strong Sell Label", shape.labeldown, location.absolute, color(#8b010d), 0, "Strong-Sell", color.white, size=size.tiny)
+plotshape(ta.crossover(wt1, wt2) and wt2 <= -53, "Don't Sell/Bottom" , shape.xcross, location.belowbar, color(#fd0015), size=size.tiny)
+plotshape(ta.crossunder(wt1, wt2) and wt2 >= 53, "Don't Buy/Top", shape.xcross, location.abovebar, color(#00ff22), size=size.tiny)
+plotshape(wtDivBull, "Weak Buy ", shape.circle  , location.belowbar, color(#00ff22), size=size.auto)
+plotshape(wtDivBear, "Weak Sell", shape.circle, location.abovebar, color(#fd0015), size=size.auto)
+plotshape(showReversal and rsiOs, "Reversal Buy" , shape.diamond, location.belowbar, color(#00ff22), size=size.tiny)
+plotshape(showReversal and rsiOb, "Reversal Sell", shape.diamond, location.abovebar, color(#fd0015), size=size.tiny)
+
+srcStop = close
+atrBand = srcStop * (percentStop / 700)
+atrBand2 = srcStop * (percentTake / 100)
+atrBand3 = srcStop * (percentTake2 / 100)
+atrBand4 = srcStop * (percentTake3 / 100)
+atrBand5 = srcStop * (percentTake4 / 100)
+atrBand6 = srcStop * (percentTake5 / 100)
+atrStop = trigger ? srcStop - atrBand : srcStop + atrBand
+atrTake = trigger ? srcStop - atrBand2 : srcStop + atrBand2
+atrTake2 = trigger ? srcStop - atrBand3 : srcStop + atrBand3
+atrTake3 = trigger ? srcStop - atrBand4 : srcStop + atrBand4
+atrTake4 = trigger ? srcStop - atrBand5 : srcStop + atrBand5
+atrTake5 = trigger ? srcStop - atrBand6 : srcStop + atrBand6
+lastTrade(src) => ta.valuewhen(bull or bear, src, 0)
+entry_y = lastTrade(srcStop)
+stop_y = lastTrade(atrStop)
+tp1_y = (entry_y - lastTrade(atrTake)) + entry_y
+tp2_y = (entry_y - lastTrade(atrTake2)) + entry_y
+tp3_y = (entry_y - lastTrade(atrTake3)) + entry_y
+tp4_y = (entry_y - lastTrade(atrTake4)) + entry_y
+tp5_y = (entry_y - lastTrade(atrTake5)) + entry_y
+
+// Labels
+labelTpSl(y, txt, color) =>
+    label labelTpSl = percentStop and enableE != 0 ? label.new(bar_index + 1, y, txt, xloc.bar_index, yloc.price, color, label.style_label_left, color.white, size.normal) : na
+    label.delete(labelTpSl[1])
+//labelTpSl(entry_y, "Entry: " + str.tostring(math.round_to_mintick(entry_y)), color = Entry)
+//labelTpSl(stop_y , "StopLoss: " + str.tostring(math.round_to_mintick(stop_y)), color = Stop)
+labelTpSl(tp1_y, "Take Profit 1: " + str.tostring(math.round_to_mintick(tp1_y)), color = Tp1)
+labelTpSl(tp2_y, "Take Profit 2: " + str.tostring(math.round_to_mintick(tp2_y)), color = Tp1)
+labelTpSl(tp3_y, "Take Profit 3: " + str.tostring(math.round_to_mintick(tp3_y)), color = Tp1)
+labelTpSl(tp4_y, "Take Profit 4: " + str.tostring(math.round_to_mintick(tp4_y)), color = Tp1)
+labelTpSl(tp5_y, "Take Profit 5: " + str.tostring(math.round_to_mintick(tp5_y)), color = Tp1)
+lineTpSl(y, color) =>
+    line lineTpSl = percentStop and enableE != 0 ? line.new(bar_index - (trigger ? countBull : countBear) + 4, y, bar_index + 1, y, xloc.bar_index, extend.none, color, line.style_solid) : na
+    line.delete(lineTpSl[1])
+//lineTpSl(entry_y, color = Entry)
+//lineTpSl(stop_y, color = Stop)
+lineTpSl(tp1_y, color = Tp1)
+lineTpSl(tp2_y, color = Tp1)
+lineTpSl(tp3_y, color = Tp1)
+lineTpSl(tp4_y, color = Tp1)
+lineTpSl(tp5_y, color = Tp1)
+
+// SUPPLY & DEMAND
+//Functions 
+
+//Line Style function
+get_line_style(style) =>
+    out = switch style
+        'Solid'  => line.style_solid
+        'Dashed' => line.style_dashed
+        'Dotted' => line.style_dotted
+
+//Function to get order block coordinates
+get_coordinates(condition, top, btm, ob_val)=>
+    var ob_top  = array.new_float(0)
+    var ob_btm  = array.new_float(0)
+    var ob_avg  = array.new_float(0)
+    var ob_left = array.new_int(0)
+
+    float ob = na
+
+    //Append coordinates to arrays
+    if condition and enableSD
+        avg = math.avg(top, btm)
+        
+        array.unshift(ob_top, top)
+        array.unshift(ob_btm, btm)
+        array.unshift(ob_avg, avg)
+        array.unshift(ob_left, time[length])
+        
+        ob := ob_val
+    
+    [ob_top, ob_btm, ob_avg, ob_left, ob]
+
+//Function to remove mitigated order blocks from coordinate arrays
+remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, target, bull)=>
+    mitigated = false
+    target_array = bull ? ob_btm : ob_top
+
+    for element in target_array
+        idx = array.indexof(target_array, element)
+
+        if (bull ? target < element : target > element)
+            mitigated := true
+
+            array.remove(ob_top, idx)
+            array.remove(ob_btm, idx)
+            array.remove(ob_avg, idx)
+            array.remove(ob_left, idx)
+    
+    mitigated
+
+//Function to set order blocks
+set_order_blocks(ob_top, ob_btm, ob_left, ob_avg, ext_last, bg_css, border_css, lvl_css)=>
+    var ob_box = array.new_box(0)
+    var ob_lvl = array.new_line(0)
+
+    //Fill arrays with boxes/lines
+    if barstate.isfirst
+        for i = 0 to ext_last-1
+            array.unshift(ob_box, box.new(na,na,na,na
+              , xloc = xloc.bar_time
+              , extend= extend.right
+              , bgcolor = bg_css
+              , border_color = color.new(border_css, 70)))
+
+            array.unshift(ob_lvl, line.new(na,na,na,na
+              , xloc = xloc.bar_time
+              , extend = extend.right
+              , color = lvl_css
+              , style = get_line_style(line_style)
+              , width = line_width))
+
+    //Set order blocks
+    if barstate.islast
+        if array.size(ob_top) > 0
+            for i = 0 to math.min(ext_last-1, array.size(ob_top)-1)
+                get_box = array.get(ob_box, i)
+                get_lvl = array.get(ob_lvl, i)
+
+                box.set_lefttop(get_box, array.get(ob_left, i), array.get(ob_top, i))
+                box.set_rightbottom(get_box, array.get(ob_left, i), array.get(ob_btm, i))
+
+                line.set_xy1(get_lvl, array.get(ob_left, i), array.get(ob_avg, i))
+                line.set_xy2(get_lvl, array.get(ob_left, i)+1, array.get(ob_avg, i))
+
+//Global elements 
+var os = 0
+var target_bull = 0.
+var target_bear = 0.
+
+n = bar_index
+upper = ta.highest(length)
+lower = ta.lowest(length)
+
+if mitigation == 'Close'
+    target_bull := ta.lowest(close, length)
+    target_bear := ta.highest(close, length)
+else
+    target_bull := lower
+    target_bear := upper
+
+os := high[length] > upper ? 0 : low[length] < lower ? 1 : os[1]
+
+phv = ta.pivothigh(volume, length, length)
+
+// Crypto_Wolf_Traders
+var tLog = table.new(position = position.bottom_center, rows = 1, columns = 2, border_width=-6)
+table.cell(tLog, row = 0, column = 0, text = " Slaya & Wolf ", text_size=size.normal, text_color = #00def6)
+table.cell(tLog, row = 0, column = 1, text = "SuperScalper-Veins ", text_size=size.normal, text_color = #f60087)
+
+//Get bullish/bearish order blocks coordinates 
+[bull_top
+  , bull_btm
+  , bull_avg
+  , bull_left
+  , bull_ob] = get_coordinates(phv and os == 1, hl2[length], low[length], low[length])
+
+[bear_top
+  , bear_btm
+  , bear_avg
+  , bear_left
+  , bear_ob] = get_coordinates(phv and os == 0, high[length], hl2[length], high[length])
+
+//Remove mitigated order blocks
+mitigated_bull = remove_mitigated(bull_top
+  , bull_btm
+  , bull_left
+  , bull_avg
+  , target_bull
+  , true)
+
+mitigated_bear = remove_mitigated(bear_top
+  , bear_btm
+  , bear_left
+  , bear_avg
+  , target_bear
+  , false)
+
+//Set bullish order blocks
+set_order_blocks(bull_top
+  , bull_btm
+  , bull_left
+  , bull_avg
+  , bull_ext_last
+  , bg_bull_css
+  , bull_css
+  , bull_avg_css)
+
+//Set bearish order blocks
+set_order_blocks(bear_top
+  , bear_btm
+  , bear_left
+  , bear_avg
+  , bear_ext_last
+  , bg_bear_css
+  , bear_css
+  , bear_avg_css)
+
+// SUPPORT & RESISTANCE
+
+percWidth1(len, perc) => (ta.highest(len) - ta.lowest(len)) * perc / 100
+
+// Get components
+rb            = 10
+prd           = 284
+ChannelW      = 10
+label_loc     = 55
+style1        = lineStyle1 == "Solid" ? line.style_solid : lineStyle1 == "Dotted" ? line.style_dotted :  line.style_dashed
+ph            = ta.pivothigh(rb, rb)
+pl            = ta.pivotlow (rb, rb)
+sr_levels     = array.new_float(21, na)
+prdhighest    = ta.highest(prd)
+prdlowest     = ta.lowest(prd)
+cwidth        = percWidth(prd, ChannelW)
+zonePerc      = percWidth(300, zoneWidth)
+aas           = array.new_bool(41, true)
+u1            = 0.0, u1 := nz(u1[1])
+d1            = 0.0, d1 := nz(d1[1])
+highestph     = 0.0, highestph := highestph[1]
+lowestpl      = 0.0, lowestpl := lowestpl[1]
+var sr_levs   = array.new_float(21, na)
+label hlabel  = na, label.delete(hlabel[1])
+label llabel  = na, label.delete(llabel[1])
+var sr_lines  = array.new_line(21, na)
+var sr_linesH = array.new_line(21, na)
+var sr_linesL = array.new_line(21, na)
+var sr_linesF = array.new_linefill(21, na)
+var sr_labels = array.new_label(21, na)
+if ph or pl
+    for x = 0 to array.size(sr_levels) - 1
+        array.set(sr_levels, x, na)
+    highestph := prdlowest
+    lowestpl := prdhighest
+    countpp = 0
+    for x = 0 to prd
+        if na(close[x])
+            break
+        if not na(ph[x]) or not na(pl[x])
+            highestph := math.max(highestph, nz(ph[x], prdlowest), nz(pl[x], prdlowest))
+            lowestpl := math.min(lowestpl, nz(ph[x], prdhighest), nz(pl[x], prdhighest))
+            countpp += 1
+            if countpp > 40
+                break
+            if array.get(aas, countpp)
+                upl = (ph[x] ? high[x + rb] : low[x + rb]) + cwidth
+                dnl = (ph[x] ? high[x + rb] : low[x + rb]) - cwidth
+                u1 := countpp == 1 ? upl : u1
+                d1 := countpp == 1 ? dnl : d1
+                tmp = array.new_bool(41, true)
+                cnt = 0
+                tpoint = 0
+                for xx = 0 to prd
+                    if na(close[xx])
+                        break
+                    if not na(ph[xx]) or not na(pl[xx])
+                        chg = false
+                        cnt += 1
+                        if cnt > 40
+                            break
+                        if array.get(aas, cnt)
+                            if not na(ph[xx])
+                                if high[xx + rb] <= upl and high[xx + rb] >= dnl
+                                    tpoint += 1
+                                    chg := true
+                            if not na(pl[xx])
+                                if low[xx + rb] <= upl and low[xx + rb] >= dnl
+                                    tpoint += 1
+                                    chg := true
+                        if chg and cnt < 41
+                            array.set(tmp, cnt, false)
+                if tpoint >= strengthSR
+                    for g = 0 to 40 by 1
+                        if not array.get(tmp, g)
+                            array.set(aas, g, false)
+                    if ph[x] and countpp < 21
+                        array.set(sr_levels, countpp, high[x + rb])
+                    if pl[x] and countpp < 21
+                        array.set(sr_levels, countpp, low[x + rb])
+
+// Plot
+var line highest_ = na, line.delete(highest_)
+var line lowest_  = na, line.delete(lowest_)
+var line highest_fill1 = na, line.delete(highest_fill1)
+var line highest_fill2 = na, line.delete(highest_fill2)
+var line lowest_fill1  = na, line.delete(lowest_fill1)
+var line lowest_fill2  = na, line.delete(lowest_fill2)
+hi_col = close >= highestph ? colorSup : colorRes
+lo_col = close >= lowestpl  ? colorSup : colorRes
+if enableSR
+    highest_ := line.new(bar_index - 311, highestph, bar_index, highestph, xloc.bar_index, expandSR ? extend.both : extend.right, hi_col, style1, lineWidth1)
+    lowest_  := line.new(bar_index - 311, lowestpl , bar_index, lowestpl , xloc.bar_index, expandSR ? extend.both : extend.right, lo_col, style1, lineWidth1)
+    if useHLZones
+        highest_fill1 := line.new(bar_index - 311, highestph + zonePerc, bar_index, highestph + zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        highest_fill2 := line.new(bar_index - 311, highestph - zonePerc, bar_index, highestph - zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        lowest_fill1  := line.new(bar_index - 311, lowestpl + zonePerc , bar_index, lowestpl + zonePerc , xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        lowest_fill2  := line.new(bar_index - 311, lowestpl - zonePerc , bar_index, lowestpl - zonePerc , xloc.bar_index, expandSR ? extend.both : extend.right, na)
+        linefill.new(highest_fill1, highest_fill2, color.new(hi_col, 90))
+        linefill.new(lowest_fill1 , lowest_fill2 , color.new(lo_col, 90))
+if ph or pl
+    for x = 0 to array.size(sr_lines) - 1
+        array.set(sr_levs, x, array.get(sr_levels, x))
+for x = 0 to array.size(sr_lines) - 1
+    line.delete(array.get(sr_lines, x))
+    line.delete(array.get(sr_linesH, x))
+    line.delete(array.get(sr_linesL, x))
+    linefill.delete(array.get(sr_linesF, x))
+    if array.get(sr_levs, x) and enableSR
+        line_col = close >= array.get(sr_levs, x) ? colorSup : colorRes
+        array.set(sr_lines, x, line.new(bar_index - 355, array.get(sr_levs, x), bar_index, array.get(sr_levs, x), xloc.bar_index, expandSR ? extend.both : extend.right, line_col, style1, lineWidth1))
+        if useZones
+            array.set(sr_linesH, x, line.new(bar_index - 355, array.get(sr_levs, x) + zonePerc, bar_index, array.get(sr_levs, x) + zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na))
+            array.set(sr_linesL, x, line.new(bar_index - 355, array.get(sr_levs, x) - zonePerc, bar_index, array.get(sr_levs, x) - zonePerc, xloc.bar_index, expandSR ? extend.both : extend.right, na))
+            array.set(sr_linesF, x, linefill.new(array.get(sr_linesH, x), array.get(sr_linesL, x), color.new(line_col, 90)))
+for x = 0 to array.size(sr_labels) - 1
+    label.delete(array.get(sr_labels, x))
+    if array.get(sr_levs, x) and enableSR
+        lab_loc = close >= array.get(sr_levs, x) ? label.style_label_up : label.style_label_down
+        lab_col = close >= array.get(sr_levs, x) ? colorSup             : colorRes
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Alerts
+// to automate put this in trendinview message:     {{strategy.order.alert_message}}
+i_alert_txt_entry_long = input.text_area(defval = "", title = "Long Entry Message", group = "Alerts")
+i_alert_txt_exit_long = input.text_area(defval = "", title = "Long Exit Message", group = "Alerts")
+i_alert_txt_entry_short = input.text_area(defval = "", title = "Short Entry Message", group = "Alerts")
+i_alert_txt_exit_short = input.text_area(defval = "", title = "Short Exit Message", group = "Alerts")
+i_alert_txt_TP_long1 = input.text_area(defval = "", title = "Long TP1 Message", group = "Alerts")
+i_alert_txt_TP_long2 = input.text_area(defval = "", title = "Long TP2 Message", group = "Alerts")
+i_alert_txt_TP_long3 = input.text_area(defval = "", title = "Long TP3 Message", group = "Alerts")
+i_alert_txt_TP_long4 = input.text_area(defval = "", title = "Long TP4 Message", group = "Alerts")
+i_alert_txt_TP_short1 = input.text_area(defval = "", title = "Short TP1 Message", group = "Alerts")
+i_alert_txt_TP_short2 = input.text_area(defval = "", title = "Short TP2 Message", group = "Alerts")
+i_alert_txt_TP_short3 = input.text_area(defval = "", title = "Short TP3 Message", group = "Alerts")
+i_alert_txt_TP_short4 = input.text_area(defval = "", title = "Short TP4 Message", group = "Alerts")
+
+
+
+// Entries
+if bull
+    strategy.entry("Long", strategy.long, alert_message = i_alert_txt_entry_long)
+    strategy.exit("TP 1", from_entry = "Long", limit = tp1_y , qty_percent = 30,  alert_message = i_alert_txt_TP_long1)
+    strategy.exit("TP 2", from_entry = "Long", limit = tp2_y , qty_percent = 30, alert_message = i_alert_txt_TP_long2)
+    strategy.exit("TP 3", from_entry = "Long", limit = tp3_y , qty_percent = 20, alert_message = i_alert_txt_TP_long3)
+    strategy.exit("TP 4", from_entry = "Long", limit = tp4_y , qty_percent = 20, alert_message = i_alert_txt_TP_long4)
+    
+
+if bear 
+    strategy.entry("Short", strategy.short,alert_message = i_alert_txt_entry_short)
+    strategy.exit("TP 1", from_entry = "Short", limit = tp1_y , qty_percent = 30, alert_message = i_alert_txt_TP_short1)
+    strategy.exit("TP 2", from_entry = "Short", limit = tp2_y , qty_percent = 30, alert_message = i_alert_txt_TP_short2)
+    strategy.exit("TP 3", from_entry = "Short", limit = tp3_y , qty_percent = 20, alert_message = i_alert_txt_TP_short3)
+    strategy.exit("TP 4", from_entry = "Short", limit = tp4_y , qty_percent = 20, alert_message = i_alert_txt_TP_short4)
+
+
+
+
+/// End Of The Code///

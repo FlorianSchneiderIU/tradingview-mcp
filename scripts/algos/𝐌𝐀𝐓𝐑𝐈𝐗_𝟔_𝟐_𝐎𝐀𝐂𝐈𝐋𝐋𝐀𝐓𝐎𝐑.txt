@@ -1,0 +1,446 @@
+
+//@version=5
+indicator(" ̶ ̶⫍̶𝐌𝐀𝐓𝐑𝐈𝐗 𝟔.𝟐 𝐎𝐀𝐂𝐈𝐋𝐋𝐀𝐓𝐎𝐑⫎̶̶̶̶ ̶ ̶", overlay = false, max_boxes_count=500,max_bars_back=5000, max_labels_count =500, max_lines_count =500)
+//=================================================================================================================================================================================================================
+dwTL = "Length of the hyper wave"
+smTL = "[SMA] Smooth signal with a simple moving average\n[EMA] Smooth signal with an exponential moving average\n[Input] Length of the smooth"
+dvTL = "Sensibility of the real time divergence : less sensibility = more short term divs; more sensibility = more long term divs"
+cmTL = "Show confluence meter at the side of the oscillator"
+caTL = "Show confluence area at the bottom/top of the oscillator"
+rfTL = "More factor will return in less signals but in a stronger way, less factor will return more signal with less strength"
+//=================================================================================================================================================================================================================
+//MAIN SETTINGS 
+//=================================================================================================================================================================================================================
+
+simple bool   Smf   = input.bool  (true                     , "Money Flow Length        ", inline = "mfi ", group = "SMART MONEY FLOW")
+simple int    mfL   = input.int   (10                       , "                         ", inline = "mfi ", group = "SMART MONEY FLOW", minval = 1, maxval = 55)
+simple int    mfS   = input.int   (4                        , "Smooth                   ", inline = "mfx ", group = "SMART MONEY FLOW", minval = 2 , maxval = 10)
+simple color  mfBL  = input.color (#22ab94                , "Money Flow Colors        ", inline = "mfiC", group = "SMART MONEY FLOW")
+simple color  mfBR  = input.color (#f7525f                , "                         ", inline = "mfiC", group = "SMART MONEY FLOW")
+simple color  cnBL  = input.color (#22ab94                 , "Confluence Colors        ", inline = "cf  ", group = "CONFLUENCE")
+simple color  cnBR  = input.color (#f7525f                , "                         ", inline = "cf  ", group = "CONFLUENCE")
+simple int    tCSS  = input.int   (00                      , "                          ", inline = "css ", group = "HYPER WAVE", minval =  00, maxval = 100)
+simple bool   sCNB  = input.bool  (true                     , "Show Confluence Areas    ", inline = "zx  ", group = "CONFLUENCE", tooltip = caTL)
+simple bool   dW    = input.bool  (false                    , "Main Length               ", inline = "1   ", group = "HYPER WAVE"                          , tooltip  = dwTL)
+simple int    mL    = input.int   (7                       , "                          ", inline = "1   ", group = "HYPER WAVE", minval = 5, maxval = 4999)
+simple string sT    = input.string("SMA"                   , "Signal                    ", inline = "s   ", group = "HYPER WAVE", options = ["SMA", "EMA"], tooltip  = smTL)
+simple int    sL    = input.int   (3                       , "                          ", inline = "s   ", group = "HYPER WAVE", minval = 0, maxval = 4999)
+simple color  fCSS  =  input.color (#00000000               , "Colors                    ", inline = "css ", group = "HYPER WAVE")
+simple color  sCSS  = input.color (#00000000               , "                          ", inline = "css ", group = "HYPER WAVE")
+string common = "Common Controls"
+float  source = input.source(           close,                 "Source", group=common)
+string   mode = input.string("Trend Strength", "Composite Cluster Mode", group=common, options=["Trend Strength", "Volatility"], tooltip="Trend Strength visualizes the directionality of the filter cluster. Volatility weights the score to the bandwidth of the cluster.")
+string filter = input.string(   "PhiSmoother",         "Cluster Filter", group=common, options=["PhiSmoother", "EMA", "DEMA", "TEMA", "WMA", "SMA"], tooltip="Choose a filter to build the moving average cluster with.")
+float   phase = input.float (             3.7,   "PhiSmoother Phase", group=common,  minval=0.0, step=0.1, tooltip="This allows for subtle adjustment (tweaking) of the phase/lag for PhiSmoother")
+string cluster = "Cluster Options"
+int    spacing = input.int(4,    "Cluster Dispersion", group=cluster,                 minval=1, maxval=10, tooltip="Choose the separation between the moving averages in the cluster.")
+int upper_trim = input.int(0, "Cluster Trim - Upper:", group=cluster, inline="trim",  minval=0, maxval=31)
+int lower_trim = input.int(0,              "Lower:", group=cluster, inline="trim",  minval=0, maxval=31, tooltip="The 'Upper' parameter modifies the shortest period of the moving averages, whereas 'Lower' parameter adjusts the longest period. Increasing the upper value reduces sensitivity, while increasing the lower value heightens sensitivity.")
+string output           = "Composite Post Smoothing"
+string post_smooth_filt = input.string("PhiSmoother", "PostSmooth - Filter:", group=output, inline="post", options=["PhiSmoother", "EMA", "DEMA", "TEMA", "WMA", "SMA"])
+int    post_smooth_len  = input.int   (            1,            "Length:", group=output, inline="post",  minval=1, tooltip="Period of the cluster's post smoothing.")
+string signal        = "Composite Signal Settings"
+string signal_filter = input.string("PhiSmoother", "Signal - Filter:", group=signal, inline="signal", options=["PhiSmoother", "EMA", "DEMA", "TEMA", "WMA", "SMA"])
+int    signal_length = input.int   (           20,        "Length:", group=signal, inline="signal",  minval=1, tooltip="Period of the momentum signal plot.")
+color  signal_color  = input.color (    color.white,     "Filter Color", group=signal)
+string threshold = "Threshold Levels"
+float upperLevel = input.float( 75.00, "Levels - Upper:", group=threshold, inline="level", minval=  1.0, maxval=99.0, step=2.0)
+float lowerLevel = input.float(-75.00,        "Lower:", group=threshold, inline="level", minval=-99.0, maxval=-1.0, step=2.0, tooltip="Fine-tune the thresholds to your liking")
+string colors            = "Coloring Preferences"
+//bool  candle_color       = input.bool (    false,      "Candle Coloring", group=colors)
+float transition_easing  = input.float(     50.0,    "Transition Easing", group=colors, maxval=  100.0, minval=0.0, step=5.0, tooltip="Adjust the sensitivity to ranging conditions.")
+bool  fill_bg            = input.bool (     false, "Fill Background", group=colors, inline= "fill")
+int   fill_alpha         = input.int  (       85,                     "", group=colors, inline= "fill", minval=0, maxval=100)
+color rising_bullish     = input.color(#1848cc,     "Bullish Color", group=colors, inline= "bull")
+color rising_transition  = input.color(#00000000,     "Transition Color", group=colors, inline="range")
+color falling_bearish    = input.color(#1848cc,     "Bearish Color", group=colors, inline= "bear")
+//=================================================================================================================================================================================================================
+// INPUT FUNCTIONS
+//=================================================================================================================================================================================================================
+type oL
+    float sig
+    float sgD
+    color cO
+
+type dP
+    int   n
+    float src
+    float p
+
+type smf
+    float mfi
+    color mfc
+    float blMFI
+    float brMFI
+
+type cnf
+    color   up
+    color   dn
+    float[] blT
+    float[] brT
+
+var oL  osc = oL.new (na, na, na    )
+var dP  div = dP.new (na, na, na    )
+var smf mf  = smf.new(na, na, na, na)
+var cnf cf  = cnf.new(
+       color.rgb(54, 58, 69, 60)
+     , color.rgb(54, 58, 69, 60)
+     , array.new<float>(1, na)
+     , array.new<float>(1, na)
+     )
+mfT() =>
+    switch
+        mf.mfi > 0 =>
+            if cf.brT.size() > 1
+                cf.brT.pop()
+            if cf.blT.size() > mfL
+                cf.blT.pop()
+            if mf.mfi > cf.blT.avg()
+                cf.blT.unshift(mf.mfi)
+            else
+                cf.blT.unshift(mf.mfi[mfL] > 0 
+                     ? mf.mfi[mfL] 
+                     : mf.mfi
+                     )
+
+        mf.mfi < 0 =>
+            if cf.blT.size() > 1
+                cf.blT.pop()
+            if cf.brT.size() > mfL
+                cf.brT.pop()
+            if mf.mfi < cf.blT.avg()
+                cf.brT.unshift(mf.mfi)
+            else
+                cf.brT.unshift(mf.mfi[mfL] < 0 
+                     ? mf.mfi[mfL] 
+                     : mf.mfi
+                     )
+method st(simple string src, float osc, simple int len) =>
+    float o = switch src
+        "SMA" => ta.sma(osc, len)
+        "EMA" => ta.ema(osc, len)
+
+method css(color x, int inv) =>
+    color out = inv == 1 
+         ? color.new(x, tCSS) 
+         : color.new(x, 0   )
+method transp(color x, int t) =>
+    color.new(x, t)
+osc(simple int len, simple int smt) =>
+    float hi = ta.highest(     len)
+    float lo = ta.lowest (     len)
+    float av = ta.sma    (hl2, len)
+
+    osc.sig := ta.ema(ta.linreg((close - math.avg(hi, lo, av)) / (hi - lo) * 100, len, 0), sL)
+    osc.sgD := sT.st(osc.sig, 2)
+    osc.cO  := osc.sig > osc.sgD ? fCSS.css(1) : sCSS.css(1)
+
+mfi() =>
+    mf.mfi := ta.sma(ta.mfi(hl2, mfL) - 50, mfS)
+
+    mf.mfc := mf.mfi > 0 
+         ? mfBL 
+         : mfBR
+
+    bL = mf.mfi - 10
+    bR = mf.mfi + 10
+
+    mf.blMFI := mf.mfi > 0 and mf.mfi > cf.blT.avg() 
+         ? bL 
+         : 0
+    mf.brMFI := mf.mfi < 0 and mf.mfi < cf.brT.avg() 
+         ? bR 
+         : 0
+cDiv() =>
+    mx = math.max(osc.sig, osc.sgD, osc.sig[1], osc.sgD[1])
+    mn = math.min(osc.sig, osc.sgD, osc.sig[1], osc.sgD[1])
+
+    mxid = mx == osc.sig[1] or mx == osc.sgD[1] ? 1 : 0
+    mnid = mn == osc.sig[1] or mn == osc.sgD[1] ? 1 : 0
+osc(mL, sL)
+mfi()
+mfT()
+//=================================================================================================================================================================================================================
+// HYPER WAVE
+//=================================================================================================================================================================================================================
+pO = plot(dW ? osc.sig : na, color = osc.cO.css(0)                        , title = "Hyper Wave 1")
+iO = plot(dW ? osc.sgD : na, color = osc.cO.css(0), display = display.none, title = "Hyper Wave 2")
+bL = plot(0                , color = color.black                        )
+fill(pO, iO, color = dW ? osc.cO : na)
+//=================================================================================================================================================================================================================
+//SMART MONEY FLOW
+//================================================================================================================================================================================================================= 
+pmf = plot(Smf                         ? mf.mfi   : na, color = mf.mfc                    )
+blT = plot(mf.blMFI > 0 and mf.mfi > 0 ? mf.blMFI : 0 , color = na, display = display.none)
+brT = plot(mf.brMFI < 0 and mf.mfi < 0 ? mf.brMFI : 0 , color = na, display = display.none)
+fill(bL, pmf, mf.mfc.transp(Smf ? 50 : 100))
+fill(bL, blT, mf.mfc.transp(Smf ?  0 : 100))
+fill(bL, brT, mf.mfc.transp(Smf ?  0 : 100))
+cf.up := color.rgb(54, 58, 69, 60)
+cf.dn := color.rgb(54, 58, 69, 60)
+switch
+    osc.sig > 0 and mf.mfi > 0 => cf.up := cnBL
+    osc.sig < 0 and mf.mfi < 0 => cf.dn := cnBR
+    => 
+        cf.dn := cnBR.transp(60)
+        cf.up := cnBL.transp(60)
+tLv = plot( 55, color = sCNB ? cf.up : na)
+bLv = plot(-55, color = sCNB ? cf.dn : na)
+tfL = plot( 50, display = display.none)
+dfL = plot(-50, display = display.none)
+fill(tLv, tfL, color = sCNB ? cf.up : na)
+fill(bLv, dfL, color = sCNB ? cf.dn : na)
+//=================================================================================================================================================================================================================
+//PHISMOOTHER FUNCTIONS
+//================================================================================================================================================================================================================= 
+PhiSmoother(series float source, simple int length, simple float phase=3.7)=>
+    var array<float> coefs = na
+    var int length_1 = length - 1
+    var float      W = 0.0
+    if na(coefs)
+        coefs := array.new<float>()
+        const float SQRT_PIx2  = math.sqrt(2.0 * math.pi)
+        const float MULTIPLIER = -0.5 / 0.93
+        var float     length_2 = length * 0.52353
+        for int i=0 to length_1
+            float alpha = (i + phase - length_2) * MULTIPLIER
+            float  beta = 1.0 / (0.2316419 * math.abs(alpha) + 1.0)
+            float   phi = (math.exp(math.pow(alpha, 2) * -0.5)
+                         *-0.398942280) * beta *
+                         ( 0.319381530  + beta *
+                         (-0.356563782  + beta *
+                         ( 1.781477937  + beta *
+                         (-1.821255978  + beta
+                         * 1.330274429)))) + 1.011
+            if alpha < 0.0
+                phi := 1.0 - phi
+            float weight = phi / SQRT_PIx2
+            coefs.push(weight)
+            W += weight
+    float sma2 = math.avg(source, nz(source[1], source))
+    float E = 0.0
+    for int i=0 to length_1
+        E += coefs.get(i) * sma2[i]
+    E / W
+ema(series float source, simple float length)=>
+    float alpha = 2.0 / (length + 1)
+    var float smoothed = na
+    smoothed := alpha * source + (1.0 - alpha) * nz(smoothed[1], source)
+
+dema(series float source, simple float length)=>
+    float ema1 = ema(source, length)
+    float ema2 = ema(  ema1, length)
+    2.0 * ema1 - ema2
+
+tema(series float source, simple float length)=>
+    float ema1 = ema(source, length)
+    float ema2 = ema(  ema1, length)
+    float ema3 = ema(  ema2, length)
+    (ema1 - ema2) * 3.0 + ema3
+
+wma(series float source, simple int length)=>
+    float weight_sum = length * 0.5 * (length + 1)
+    float sum = 0.0
+    for int i=0 to length - 1
+        sum += source[i] * (length - i)
+    sum / weight_sum
+
+sma(series float source, simple int length)=>
+    float sum = ta.cum(source)
+    if bar_index < length - 1
+        sum / (bar_index + 1)
+    else
+        (sum - sum[length]) / length
+filter(series float source,
+       simple int   length,
+       simple float  phase,
+       simple string style)=>
+    if length > 1
+        switch style
+            "PhiSmoother" => PhiSmoother(source, length, phase)
+            "EMA"         =>         ema(source, length)
+            "DEMA"        =>        dema(source, length)
+            "TEMA"        =>        tema(source, length)
+            "WMA"         =>         wma(source, length)
+            =>                       sma(source, length) // "SMA"
+    else
+        source
+method get_score(series array<float> source)=>
+    array<float> scores = array.new<float>()
+    for int i=0 to source.size() - 1
+        float current = source.get(i)
+        int score_sum = 0
+        for j = 0 to source.size() - 1
+            float check = source.get(j)
+            int polarity = i < j ? 1 : -1
+            if i != j
+                if current > check
+                    score_sum += polarity
+                else
+                    score_sum -= polarity
+        scores.push(score_sum)
+    scores
+method net_score(series array<float> scores)=>
+    int   value    = scores.size() - 1
+    float netScore = ((scores.avg() + value) / (value * 2.0) - 0.5) * 200.0
+    netScore
+method get_color(series float              score,
+                 simple float  transition_easing,
+                 simple bool     volatility_mode,
+                 simple color     rising_bullish,
+                 simple color    falling_bullish,
+                 simple color    falling_bearish,
+                 simple color     rising_bearish,
+                 simple color  rising_transition,
+                 simple color falling_transition)=>
+    var color grad = na
+    float    delta = score - nz(score[1], score)
+    color  bullish = delta >= 0.0 ? rising_bullish : falling_bullish
+    color  bearish = delta >  0.0 ? rising_bearish : falling_bearish
+    color  transit = score >  0.0 ? (delta >= 0.0 ? rising_transition : falling_transition)
+                                  : (delta >= 0.0 ? falling_transition : rising_transition)
+    if volatility_mode
+        float easing =   0.01 * transition_easing
+        float   crms = easing * math.sqrt(ta.cum(math.pow(math.abs(score), 2)) / (bar_index + 1))
+        grad := if score > 0.0
+            transition_easing > 0.0 ? color.from_gradient(score,  0.0, crms, transit, bullish) : bullish
+        else
+            transition_easing > 0.0 ? color.from_gradient(score, -crms, 0.0, bearish, transit) : bearish
+    else
+        grad := if score > 0.0
+            transition_easing > 0.0 ? color.from_gradient(score,  0.0, transition_easing, transit, bullish) : bullish
+        else
+            transition_easing > 0.0 ? color.from_gradient(score, -transition_easing, 0.0, bearish, transit) : bearish
+    grad
+//=================================================================================================================================================================================================================
+//VOLATILITY_MODE_ON
+//=================================================================================================================================================================================================================
+var bool VOLATILITY_MODE_ON = mode == "Volatility"
+price = input(title='Source', defval=close)
+alpha = input.int(title='Combined Smoothness', defval=21, minval=1)
+array<float> filter_cluster = array.new<float>(34)
+filter_cluster.set( 0,        source)
+filter_cluster.set( 1, filter(source,      spacing, phase, filter))
+filter_cluster.set( 2, filter(source, 2  * spacing, phase, filter))
+filter_cluster.set( 3, filter(source, 3  * spacing, phase, filter))
+filter_cluster.set( 4, filter(source, 4  * spacing, phase, filter))
+filter_cluster.set( 6, filter(source, 5  * spacing, phase, filter))
+filter_cluster.set( 7, filter(source, 6  * spacing, phase, filter))
+filter_cluster.set( 8, filter(source, 7  * spacing, phase, filter))
+filter_cluster.set( 9, filter(source, 8  * spacing, phase, filter))
+filter_cluster.set(10, filter(source, 9  * spacing, phase, filter))
+filter_cluster.set(11, filter(source, 10 * spacing, phase, filter))
+filter_cluster.set(12, filter(source, 11 * spacing, phase, filter))
+filter_cluster.set(13, filter(source, 12 * spacing, phase, filter))
+filter_cluster.set(14, filter(source, 13 * spacing, phase, filter))
+filter_cluster.set(15, filter(source, 14 * spacing, phase, filter))
+filter_cluster.set(16, filter(source, 15 * spacing, phase, filter))
+filter_cluster.set(17, filter(source, 16 * spacing, phase, filter))
+filter_cluster.set(18, filter(source, 17 * spacing, phase, filter))
+filter_cluster.set(19, filter(source, 18 * spacing, phase, filter))
+filter_cluster.set(20, filter(source, 19 * spacing, phase, filter))
+filter_cluster.set(21, filter(source, 20 * spacing, phase, filter))
+filter_cluster.set(22, filter(source, 21 * spacing, phase, filter))
+filter_cluster.set(23, filter(source, 22 * spacing, phase, filter))
+filter_cluster.set(24, filter(source, 23 * spacing, phase, filter))
+filter_cluster.set(25, filter(source, 24 * spacing, phase, filter))
+filter_cluster.set(26, filter(source, 25 * spacing, phase, filter))
+filter_cluster.set(27, filter(source, 26 * spacing, phase, filter))
+filter_cluster.set(28, filter(source, 27 * spacing, phase, filter))
+filter_cluster.set(29, filter(source, 28 * spacing, phase, filter))
+filter_cluster.set(30, filter(source, 29 * spacing, phase, filter))
+filter_cluster.set(31, filter(source, 30 * spacing, phase, filter))
+filter_cluster.set(32, filter(source, 31 * spacing, phase, filter))
+filter_cluster.set(33, filter(source, 32 * spacing, phase, filter))
+if upper_trim > 0
+    for int i=0 to math.min(upper_trim - 1, filter_cluster.size() - 1)
+        if  filter_cluster.size() > 2
+            filter_cluster.shift()
+        else
+            break
+if lower_trim > 0
+    for int i=0 to math.min(lower_trim - 1, filter_cluster.size() - 1)
+        if  filter_cluster.size() > 2
+            filter_cluster.pop()
+        else
+            break
+float ribbon_max   = filter_cluster.max()
+float ribbon_min   = filter_cluster.min()
+float ribbon_width = ribbon_max - ribbon_min
+float ribbon_rank  = VOLATILITY_MODE_ON ? nz(ribbon_width / math.avg(ribbon_max, ribbon_min)) : 1
+array<float> score = filter_cluster.get_score()
+float    net_score = filter(score.net_score() * ribbon_rank, post_smooth_len, 3.7, post_smooth_filt)
+float signal_value = signal_length < 2 ? na : filter(ta.sma(net_score, 2), signal_length, 3.7, signal_filter)
+top    = hline(VOLATILITY_MODE_ON ? na :      100.0,    "Top",       #ff4d4d)
+upper  = hline(VOLATILITY_MODE_ON ? na : upperLevel, "+Level",  rising_bullish, hline.style_dotted, 2)
+center = hline(                                 0.0, "Center",       #747474)
+lower  = hline(VOLATILITY_MODE_ON ? na : lowerLevel, "+Level", falling_bearish, hline.style_dotted, 2)
+bottom = hline(VOLATILITY_MODE_ON ? na :     -100.0, "Bottom",       #00ff00)
+const color invisible = #00000000
+fill(   top, upper,      100.0, upperLevel, #800000, invisible)
+fill(center, upper, upperLevel,        0.0, color.new( rising_bullish, 100),  color.new(rising_bullish, fill_bg ? fill_alpha : 100))
+fill(center, lower,        0.0, lowerLevel, color.new(falling_bearish, fill_bg ? fill_alpha : 100), color.new(falling_bearish, 100))
+fill(bottom, lower, lowerLevel,     -100.0, invisible, #004e00)
+//=================================================================================================================================================================================================================
+//BARCOLOR(candle_color ? main_color : na)
+//=================================================================================================================================================================================================================
+color1 = net_score>signal_value ? #00FF00 : #ff0000
+net  = plot(net_score, "Score", color1, 2)
+zero = plot(      0.0,      "", invisible)
+plot(signal_value, "Signal", signal_color, 1)
+fill(net, zero,  net_score > 0.0 ? net_score : 0.0,
+                 net_score > 0.0 ? 0.0 : net_score,
+                 net_score > 0.0 ? color.new(rising_bullish, fill_bg and VOLATILITY_MODE_ON ? fill_alpha : 100) : color.new(falling_bearish, 100),
+                 net_score > 0.0 ? color.new(rising_bullish, 100) : color.new(falling_bearish, fill_bg and VOLATILITY_MODE_ON ? fill_alpha : 100))
+
+//=================================================================================================================================================================================================================
+f_LazyLine(_data, _length) =>
+    w1 = 0
+    w2 = 0
+    w3 = 0
+    L1 = 0.0
+    L2 = 0.0
+    L3 = 0.0
+    w = _length / 3
+    if _length > 2
+        w2 := math.round(w)
+        w1 := math.round((_length - w2) / 2)
+        w3 := int((_length - w2) / 2)
+
+        L1 := ta.wma(_data, w1)
+        L2 := ta.wma(L1, w2)
+        L3 := ta.wma(L2, w3)
+        L3
+    else
+        L3 := _data
+        L3
+    L3
+//=================================================================================================================================================================================================================
+//SIGNAL LINE SS_WMA 
+//================================================================================================================================================================================================================= 
+LL = f_LazyLine(price, alpha)
+c_up = color.new(#33ff00, 0)
+c_dn = color.new(#ff76a6,0)
+uptrend = LL > LL[1]
+plot(LL, 'SS_WMA Line', color=uptrend ? c_up : c_dn, linewidth=3,force_overlay=true)
+plot(ta.wma(price, alpha), 'WMA', color=color.rgb(254, 252, 252), display=display.none,force_overlay=true)
+//=================================================================================================================================================================================================================
+//SECOND SWING SIGNAL
+//=================================================================================================================================================================================================================
+// v2: add optional up/dn arrow signal on change of direction (swing) 
+ShowSig = input(title='Up/Dn Swing Signal?', defval=false)
+SigMulti = input.float(title='Signal Locator %', defval=1.0, step=0.2, minval=0, maxval=20)
+SignalOn = ShowSig and barstate.isconfirmed  // ensure the signal plots *only* after "the bar closes" :) -- insert jokes :)
+SwingDn = uptrend[1] and not uptrend
+SwingUp = uptrend and not uptrend[1]
+plot(mf.mfi > 0 and Smf ? cf.blT.avg() : na, color = mfBL, style = plot.style_linebr, title = "Bullish Threshold")
+plot(mf.mfi < 0 and Smf ? cf.brT.avg() : na, color = mfBR, style = plot.style_linebr, title = "Bearish Threshold") 
+ 
+///////////////////===================================================================================/////END SCRIPT/////==========================================================================/////////////////
+// ==========================================================================================
+
+// === Dashboard with Telegram Link ===
+var table myTable = table.new(position.top_center, 1, 1, border_width=1, frame_color=color.black, bgcolor=color.white)
+
+// Add Telegram Message to Dashboard
+table.cell(myTable, 0, 0, "Join Telegram @free_fx_pro", bgcolor=color.blue, text_color=color.white, text_size=size.normal)

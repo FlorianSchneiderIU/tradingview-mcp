@@ -1,0 +1,289 @@
+//@version=6
+strategy("TD Sequential 9–13 — Strategy + TDST", overlay=true, initial_capital=100000, pyramiding=0,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.01)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+lenSetup     = input.int(9,   "Setup length (fixed = 9)", minval=1, tooltip="Classic TD Setup uses 9 bars vs close[4].")
+lookbackC    = input.int(4,   "Setup lookback (fixed = 4)", minval=1)
+countdownMax = input.int(13,  "Countdown length (fixed = 13)", minval=1)
+requirePerf  = input.bool(true, "Require Setup Perfection on 9?", tooltip="Sell: bar 8 or 9 high >= high of bars 6 or 7. Buy: bar 8 or 9 low <= low of bars 6 or 7.")
+
+enterOn9     = input.bool(false, "Enter on Setup 9")
+enterOn13    = input.bool(true,  "Enter on Countdown 13")
+
+useEMAFilter = input.bool(false, "Use EMA trend filter?")
+emaLen       = input.int(200, "EMA length", minval=1)
+
+useATRExit   = input.bool(true,  "Use ATR stop/target")
+atrLen       = input.int(14,     "ATR length", minval=1)
+atrSLmult    = input.float(2.0,  "Stop: ATR ×", step=0.1, minval=0.0)
+atrTPmult    = input.float(3.0,  "Target: ATR ×", step=0.1, minval=0.0)
+
+trailPerc    = input.float(0.0,  "Optional trailing stop (%)", step=0.1, minval=0.0, tooltip="0 = off")
+
+// ── TDST options
+tdstEnable      = input.bool(true,  "Enable TDST")
+tdstVariant     = input.string("Bar1 True Extreme", "TDST Variant", options=["Bar1 True Extreme", "Setup Range Extreme"],
+     tooltip="Bar1: uses true high/low of Setup bar #1. Range: uses highest true high / lowest true low over Setup bars 1–9.")
+tdstFilterEntry = input.bool(true,  "Only enter while TDST holds (filter)")
+tdstUseAsStop   = input.bool(true,  "Use TDST as protective stop")
+tdstBreakClose  = input.bool(true,  "Invalidate on CLOSE beyond TDST? (if off: intrabar high/low)")
+tdstBufferTicks = input.int(0,      "Stop buffer (ticks)", minval=0, tooltip="Adds/subtracts ticks beyond TDST for stop placement")
+
+showNumbers  = input.bool(true,  "Show Setup/Countdown numbers")
+maxLabels    = input.int(800,    "Max labels kept (performance)", minval=100, step=50)
+
+// Colors
+colBuySetup  = color.teal
+colSellSetup = color.red
+colBuyCD     = color.new(color.teal, 0)
+colSellCD    = color.new(color.red,  0)
+colNine      = color.new(color.yellow, 0)
+colThirteen  = color.new(color.orange, 0)
+colTDSTSup   = color.new(color.teal, 30)
+colTDSTRes   = color.new(color.red,  30)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+ema = ta.ema(close, emaLen)
+atr = ta.atr(atrLen)
+
+has4 = bar_index >= lookbackC
+has2 = bar_index >= 2
+has1 = bar_index >= 1
+
+buySetupCond  = has4 and close < close[lookbackC]
+sellSetupCond = has4 and close > close[lookbackC]
+
+buyCDCond  = has2 and close <= low[2]   // Buy Countdown: close ≤ low two bars earlier
+sellCDCond = has2 and close >= high[2]  // Sell Countdown: close ≥ high two bars earlier
+
+trueHighBar = has1 ? math.max(high, close[1]) : high
+trueLowBar  = has1 ? math.min(low,  close[1]) : low
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Setup counters (1..9, strict consecutive)
+// ─────────────────────────────────────────────────────────────────────────────
+var int buySetup  = 0
+var int sellSetup = 0
+
+buySetup  := buySetupCond  ? math.min(buySetup  + 1, lenSetup) : 0
+sellSetup := sellSetupCond ? math.min(sellSetup + 1, lenSetup) : 0
+
+// Make setups mutually exclusive on a qualifying bar
+if buySetupCond
+    sellSetup := 0
+if sellSetupCond
+    buySetup := 0
+
+// Events
+buySetupStart  = buySetup == 1 and nz(buySetup[1]) == 0
+sellSetupStart = sellSetup == 1 and nz(sellSetup[1]) == 0
+
+setup9BuyEvent  = buySetup  == lenSetup and nz(buySetup[1])  != lenSetup
+setup9SellEvent = sellSetup == lenSetup and nz(sellSetup[1]) != lenSetup
+
+// Setup perfection check at the bar of #9 (bars 8/9 vs 6/7)
+buyPerfect  = (low    <= math.min(low[2],  low[3])) or (low[1]  <= math.min(low[2],  low[3]))
+sellPerfect = (high   >= math.max(high[2], high[3])) or (high[1] >= math.max(high[2], high[3]))
+buySetupOK  = setup9BuyEvent  and (not requirePerf or buyPerfect)
+sellSetupOK = setup9SellEvent and (not requirePerf or sellPerfect)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Countdown (1..13, non-consecutive)
+// ─────────────────────────────────────────────────────────────────────────────
+var int  buyCD = 0
+var int  sellCD = 0
+var bool inBuyCD = false
+var bool inSellCD = false
+
+if buySetupOK
+    inBuyCD := true
+    buyCD := 0
+    inSellCD := false
+    sellCD := 0
+if sellSetupOK
+    inSellCD := true
+    sellCD := 0
+    inBuyCD := false
+    buyCD := 0
+
+if inBuyCD
+    if buyCDCond and buyCD < countdownMax
+        buyCD += 1
+    if sellSetupOK
+        inBuyCD := false
+        buyCD := 0
+
+if inSellCD
+    if sellCDCond and sellCD < countdownMax
+        sellCD += 1
+    if buySetupOK
+        inSellCD := false
+        sellCD := 0
+
+cd13BuyEvent  = inBuyCD  and buyCD  == countdownMax and nz(buyCD[1])  != countdownMax
+cd13SellEvent = inSellCD and sellCD == countdownMax and nz(sellCD[1]) != countdownMax
+
+if cd13BuyEvent
+    inBuyCD := false
+if cd13SellEvent
+    inSellCD := false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDST Calculation (two variants) + persistence & invalidation
+// ─────────────────────────────────────────────────────────────────────────────
+var float tdstSupport = na  // from Buy Setup (down move)
+var float tdstResistance = na  // from Sell Setup (up move)
+
+// Track start-bar "true" extremes and running range during the setup
+var float buyBar1TrueLow  = na
+var float sellBar1TrueHigh = na
+var float curBuyRangeTrueLow  = na
+var float curSellRangeTrueHigh = na
+
+if tdstEnable
+    // Start-of-setup captures
+    if buySetupStart
+        buyBar1TrueLow := trueLowBar
+        curBuyRangeTrueLow := trueLowBar
+    else if buySetup > 0
+        curBuyRangeTrueLow := na(curBuyRangeTrueLow) ? trueLowBar : math.min(curBuyRangeTrueLow, trueLowBar)
+    else if buySetup == 0
+        curBuyRangeTrueLow := na
+
+    if sellSetupStart
+        sellBar1TrueHigh := trueHighBar
+        curSellRangeTrueHigh := trueHighBar
+    else if sellSetup > 0
+        curSellRangeTrueHigh := na(curSellRangeTrueHigh) ? trueHighBar : math.max(curSellRangeTrueHigh, trueHighBar)
+    else if sellSetup == 0
+        curSellRangeTrueHigh := na
+
+    // Finalize TDST when a valid 9 completes
+    if buySetupOK
+        tdstSupport := tdstVariant == "Bar1 True Extreme" ? buyBar1TrueLow : curBuyRangeTrueLow
+    if sellSetupOK
+        tdstResistance := tdstVariant == "Bar1 True Extreme" ? sellBar1TrueHigh : curSellRangeTrueHigh
+
+    // Invalidation (break of TDST)
+    supBroken = tdstBreakClose ? (close < tdstSupport) : (low < tdstSupport)
+    resBroken = tdstBreakClose ? (close > tdstResistance) : (high > tdstResistance)
+
+    if not na(tdstSupport) and supBroken
+        tdstSupport := na
+        inBuyCD := false
+        buyCD := 0
+    if not na(tdstResistance) and resBroken
+        tdstResistance := na
+        inSellCD := false
+        sellCD := 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Labels / numbers
+// ─────────────────────────────────────────────────────────────────────────────
+var label[] lbs = array.new_label()
+
+f_add_label(_text, _isBuy, _isSetup, _isBig) =>
+    _yl = _isBuy ? yloc.belowbar : yloc.abovebar
+    _col = _isSetup ? (_isBuy ? colBuySetup : colSellSetup) : (_isBuy ? colBuyCD : colSellCD)
+    _txtCol = color.white
+    _style = _isBig ? label.style_label_center : label.style_label_center
+    _size = _isBig ? size.normal : size.tiny
+    _bg = _isBig ? (_isSetup ? colNine : colThirteen) : _col
+    _lb = label.new(bar_index, na, _text, xloc.bar_index, _yl, _bg, _style, _txtCol, _size)
+    array.push(lbs, _lb)
+    if array.size(lbs) > maxLabels
+        label.delete(array.shift(lbs))
+
+if showNumbers
+    if buySetup > 0 and buySetup != nz(buySetup[1])
+        f_add_label(str.tostring(buySetup), true,  true,  buySetup == 9)
+    if sellSetup > 0 and sellSetup != nz(sellSetup[1])
+        f_add_label(str.tostring(sellSetup), false, true,  sellSetup == 9)
+    if inBuyCD and buyCD > 0 and buyCD != nz(buyCD[1])
+        f_add_label(str.tostring(buyCD), true,  false, buyCD == 13)
+    if inSellCD and sellCD > 0 and sellCD != nz(sellCD[1])
+        f_add_label(str.tostring(sellCD), false, false, sellCD == 13)
+
+plotshape(setup9BuyEvent,  "Buy 9",  shape.labelup,   location.belowbar, colNine,   size=size.tiny, text="9")
+plotshape(setup9SellEvent, "Sell 9", shape.labeldown, location.abovebar, colNine,   size=size.tiny, text="9")
+plotshape(cd13BuyEvent,    "Buy 13", shape.triangleup,   location.belowbar, colThirteen, size=size.small, text="13")
+plotshape(cd13SellEvent,   "Sell 13",shape.triangledown, location.abovebar, colThirteen, size=size.small, text="13")
+
+// TDST lines
+plot(tdstEnable ? tdstSupport    : na, "TDST Support",    color=colTDSTSup, style=plot.style_linebr, linewidth=2)
+plot(tdstEnable ? tdstResistance : na, "TDST Resistance", color=colTDSTRes, style=plot.style_linebr, linewidth=2)
+
+// Baseline / filter
+plot(useEMAFilter ? ema : na, "EMA", color=color.new(color.gray, 0))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entries (with optional TDST filter)
+// ─────────────────────────────────────────────────────────────────────────────
+longTrendOK  = not useEMAFilter or close > ema
+shortTrendOK = not useEMAFilter or close < ema
+
+// TDST filter: only trade if the relevant TDST level has not been violated
+longTDSTok  = not tdstEnable or not tdstFilterEntry or na(tdstSupport)    or (tdstBreakClose ? close >= tdstSupport : low >= tdstSupport)
+shortTDSTok = not tdstEnable or not tdstFilterEntry or na(tdstResistance) or (tdstBreakClose ? close <= tdstResistance : high <= tdstResistance)
+
+longSig9   = enterOn9  and buySetupOK
+shortSig9  = enterOn9  and sellSetupOK
+longSig13  = enterOn13 and cd13BuyEvent
+shortSig13 = enterOn13 and cd13SellEvent
+
+longSignal  = longTrendOK  and longTDSTok  and (longSig13  or longSig9)
+shortSignal = shortTrendOK and shortTDSTok and (shortSig13 or shortSig9)
+
+if longSignal and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exits: ATR stop/limit + optional TDST stop + optional trailing
+// ─────────────────────────────────────────────────────────────────────────────
+longStopATR  = useATRExit ? strategy.position_avg_price - atrSLmult * atr : na
+longLimitATR = useATRExit and atrTPmult > 0 ? strategy.position_avg_price + atrTPmult * atr : na
+shortStopATR  = useATRExit ? strategy.position_avg_price + atrSLmult * atr : na
+shortLimitATR = useATRExit and atrTPmult > 0 ? strategy.position_avg_price - atrTPmult * atr : na
+
+buf = tdstBufferTicks * syminfo.mintick
+longStopTDST  = tdstEnable and tdstUseAsStop and not na(tdstSupport)    ? tdstSupport - buf : na
+shortStopTDST = tdstEnable and tdstUseAsStop and not na(tdstResistance) ? tdstResistance + buf : na
+
+// Combine stops: choose the tighter one (closer to market)
+// For longs, higher stop price is tighter; for shorts, lower stop price is tighter (but both should be on protective side in practice)
+longStop  = na(longStopATR)  ? longStopTDST  : (na(longStopTDST)  ? longStopATR  : math.max(longStopATR,  longStopTDST))
+shortStop = na(shortStopATR) ? shortStopTDST : (na(shortStopTDST) ? shortStopATR : math.min(shortStopATR, shortStopTDST))
+
+trailPts = trailPerc > 0 ? strategy.position_avg_price * trailPerc / 100.0 : na
+
+strategy.exit("Long Exit",  "Long",  stop=longStop,  limit=longLimitATR,  trail_points = na(trailPts) ? na : trailPts)
+strategy.exit("Short Exit", "Short", stop=shortStop, limit=shortLimitATR, trail_points = na(trailPts) ? na : trailPts)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(setup9BuyEvent,  title="TD Buy Setup 9",  message="TD Buy Setup 9 on {{ticker}} {{interval}}")
+alertcondition(setup9SellEvent, title="TD Sell Setup 9", message="TD Sell Setup 9 on {{ticker}} {{interval}}")
+alertcondition(cd13BuyEvent,    title="TD Buy Countdown 13",  message="TD Buy Countdown 13 on {{ticker}} {{interval}}")
+alertcondition(cd13SellEvent,   title="TD Sell Countdown 13", message="TD Sell Countdown 13 on {{ticker}} {{interval}}")
+
+supBrokenAlert = tdstEnable and not na(tdstSupport)    and (tdstBreakClose ? close < tdstSupport : low < tdstSupport)
+resBrokenAlert = tdstEnable and not na(tdstResistance) and (tdstBreakClose ? close > tdstResistance : high > tdstResistance)
+alertcondition(supBrokenAlert, title="TDST Support Broken",    message="TDST Support broken on {{ticker}} {{interval}}")
+alertcondition(resBrokenAlert, title="TDST Resistance Broken", message="TDST Resistance broken on {{ticker}} {{interval}}")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notes:
+// - TDST Support = Buy Setup anchor; TDST Resistance = Sell Setup anchor.
+// - Variant 'Bar1 True Extreme' uses true low/high of setup bar #1 (min(low, prev close) / max(high, prev close)).
+// - Variant 'Setup Range Extreme' uses min/max true lows/highs across setup bars 1–9.
+// - Invalidation occurs when price closes (or trades, if disabled) beyond the line; this also cancels any active countdown in that direction.
+// - Entry filter requires TDST to hold; TDST can also be blended with ATR stop (tighter stop is used).
+// ─────────────────────────────────────────────────────────────────────────────
