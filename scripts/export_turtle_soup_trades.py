@@ -28,6 +28,16 @@ def trade_rows(symbol: str, df: pd.DataFrame, cfg: Config) -> list[dict[str, Any
     return rows
 
 
+def build_event_key_from_row(row: pd.Series) -> str:
+    symbol = str(row.get("symbol", "")).upper()
+    direction = str(row.get("direction", "")).lower()
+    sweep_time = pd.to_datetime(row.get("sweep_time"), utc=True, errors="coerce")
+    sweep_iso = sweep_time.isoformat() if pd.notna(sweep_time) else ""
+    zone_top = float(row.get("zone_top", float("nan")))
+    zone_bottom = float(row.get("zone_bottom", float("nan")))
+    return f"{symbol}|{direction}|{sweep_iso}|{zone_top:.8f}|{zone_bottom:.8f}"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export Turtle Soup backtest trades for research.")
     parser.add_argument("--symbols", nargs="+", default=[])
@@ -55,12 +65,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zone-hold-min-prob", type=float, default=0.0)
     parser.add_argument("--zone-hold-filter-tf", default="1h")
     parser.add_argument("--reject-unscored-zone-hold", action="store_true")
+    parser.add_argument("--allowed-event-keys-csv", type=Path)
+    parser.add_argument("--allowed-event-keys-column", default="event_key")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     symbols = expand_symbol_args(args.symbols, args.symbol_set)
+    allowed_event_keys: set[str] | None = None
+    if args.allowed_event_keys_csv:
+        if not args.allowed_event_keys_csv.exists():
+            raise SystemExit(f"Allowed event-key file not found: {args.allowed_event_keys_csv}")
+        allow_df = pd.read_csv(args.allowed_event_keys_csv)
+        if args.allowed_event_keys_column not in allow_df.columns:
+            raise SystemExit(
+                f"Column {args.allowed_event_keys_column!r} not found in {args.allowed_event_keys_csv}."
+            )
+        allowed_event_keys = set(
+            allow_df[args.allowed_event_keys_column].dropna().astype(str).tolist()
+        )
+        print(f"Loaded {len(allowed_event_keys)} allowed event keys from {args.allowed_event_keys_csv}")
+
     interval = normalize_timeframe(args.interval)
     warmup = parse_utc_datetime(args.warmup_start)
     start = parse_utc_datetime(args.start)
@@ -100,6 +126,11 @@ def main() -> None:
         if not frame.empty:
             frame["entry_time"] = pd.to_datetime(frame["entry_time"], utc=True)
             frame = frame[(frame["entry_time"] >= pd.Timestamp(start)) & (frame["entry_time"] < pd.Timestamp(end))]
+            frame["event_key"] = frame.apply(build_event_key_from_row, axis=1)
+            if allowed_event_keys is not None:
+                before = len(frame)
+                frame = frame[frame["event_key"].isin(allowed_event_keys)].copy()
+                print(f"{symbol}: meta-gate kept {len(frame)}/{before} trades")
         frames.append(frame)
         print(f"{symbol}: exported {len(frame)} trades")
 
