@@ -159,6 +159,11 @@ class Trade:
     entry_index: int
     exit_index: int
     zone_hold_prob: float
+    zone_source: str = "ob_break"
+    liquidity_level: float = math.nan
+    liquidity_pivot_time: pd.Timestamp | None = None
+    liquidity_confirm_time: pd.Timestamp | None = None
+    liquidity_sfp_strict: bool = False
 
 
 @dataclass
@@ -226,6 +231,14 @@ class Config:
     zone_hold_bfm_tf_sets: str = DEFAULT_BFM_ZONE_TF_SETS
     zone_hold_bfm_invalidation: str = "wick"
     zone_hold_bfm_max_extension_bars: int = 300
+    use_sfp_liquidity_zones: bool = False
+    sfp_timeframes: str = "15m,1h,4h"
+    sfp_left: int = 15
+    sfp_right: int = 10
+    sfp_level_width_atr: float = 0.15
+    sfp_strict: bool = True
+    sfp_require_open_reclaim: bool = True
+    sfp_max_active_levels: int = 80
 
 
 _ZONE_HOLD_MODEL_CACHE: dict[str, dict] = {}
@@ -434,6 +447,78 @@ def build_htf_zone_events(
                 })
             low_crossed = True
 
+    return high_events, low_events
+
+
+def parse_timeframe_list(raw: str | None, default: str = "15m,1h,4h") -> list[str]:
+    text = raw if raw is not None and str(raw).strip() else default
+    out: list[str] = []
+    for chunk in str(text).split(","):
+        timeframe = normalize_timeframe(chunk.strip())
+        if timeframe not in out:
+            out.append(timeframe)
+    return out
+
+
+def build_sfp_liquidity_zone_events(
+    exec_df: pd.DataFrame,
+    *,
+    timeframes: list[str],
+    left: int,
+    right: int,
+    width_atr: float,
+) -> tuple[list[dict], list[dict]]:
+    """Confirmed pivot liquidity levels used by SFP/Turtle Soup style sweeps."""
+    high_events: list[dict] = []
+    low_events: list[dict] = []
+    left = max(1, int(left))
+    right = max(1, int(right))
+    width_atr = max(0.01, float(width_atr))
+
+    for timeframe in timeframes:
+        htf = add_atr(resample_ohlc(exec_df, timeframe))
+        if len(htf) <= left + right:
+            continue
+        atrs = htf["atr"].bfill().ffill().to_list()
+        for item in build_confirmed_pivots(htf["high"], left, right, "high"):
+            pivot_idx = int(item["pivot_index"])
+            confirm_idx = pivot_idx + right
+            if confirm_idx >= len(htf):
+                continue
+            level = float(item["value"])
+            width = max(float(atrs[confirm_idx]) * width_atr, abs(level) * 0.00001)
+            high_events.append({
+                "time": htf.iloc[confirm_idx]["close_time"],
+                "pivot_time": htf.iloc[pivot_idx]["close_time"],
+                "confirm_time": htf.iloc[confirm_idx]["close_time"],
+                "top": level + width,
+                "bottom": level,
+                "width": width,
+                "level": level,
+                "source": "sfp_pivot",
+                "tf": timeframe,
+            })
+        for item in build_confirmed_pivots(htf["low"], left, right, "low"):
+            pivot_idx = int(item["pivot_index"])
+            confirm_idx = pivot_idx + right
+            if confirm_idx >= len(htf):
+                continue
+            level = float(item["value"])
+            width = max(float(atrs[confirm_idx]) * width_atr, abs(level) * 0.00001)
+            low_events.append({
+                "time": htf.iloc[confirm_idx]["close_time"],
+                "pivot_time": htf.iloc[pivot_idx]["close_time"],
+                "confirm_time": htf.iloc[confirm_idx]["close_time"],
+                "top": level,
+                "bottom": level - width,
+                "width": width,
+                "level": level,
+                "source": "sfp_pivot",
+                "tf": timeframe,
+            })
+
+    high_events.sort(key=lambda item: item["time"])
+    low_events.sort(key=lambda item: item["time"])
     return high_events, low_events
 
 
@@ -1501,6 +1586,11 @@ def trade_from_position(position: dict, exit_index: int, exit_time: pd.Timestamp
         entry_index=position["entry_index"],
         exit_index=exit_index,
         zone_hold_prob=position["setup"].get("zone_hold_prob", math.nan),
+        zone_source=position["setup"].get("zone_source", "ob_break"),
+        liquidity_level=float(position["setup"].get("liquidity_level", math.nan)),
+        liquidity_pivot_time=position["setup"].get("liquidity_pivot_time"),
+        liquidity_confirm_time=position["setup"].get("liquidity_confirm_time"),
+        liquidity_sfp_strict=bool(position["setup"].get("liquidity_sfp_strict", False)),
     )
 
 
@@ -1548,6 +1638,16 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
         cfg.htf_ob_search_bars,
         cfg.ob_use_body,
     )
+    sfp_high: list[dict] = []
+    sfp_low: list[dict] = []
+    if cfg.use_sfp_liquidity_zones:
+        sfp_high, sfp_low = build_sfp_liquidity_zone_events(
+            exec_df,
+            timeframes=parse_timeframe_list(cfg.sfp_timeframes),
+            left=cfg.sfp_left,
+            right=cfg.sfp_right,
+            width_atr=cfg.sfp_level_width_atr,
+        )
     structure_events = build_structure_choch_events(exec_df, structure_tf, cfg.structure_left, cfg.structure_right)
     structure_event_times = [event["time"] for event in structure_events]
     bias_4h_events = build_htf_bias_events(exec_df, "4h", cfg.htf_bias_len)
@@ -1557,12 +1657,15 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
     day_context = build_daily_context(exec_df)
 
     tf1_hi_ptr = tf1_lo_ptr = tf2_hi_ptr = tf2_lo_ptr = 0
+    sfp_hi_ptr = sfp_lo_ptr = 0
     bias_4h_ptr = bias_1d_ptr = 0
     htf_sma50_ptr = 0
     tf1_res_zones: list[dict] = []
     tf1_sup_zones: list[dict] = []
     tf2_res_zones: list[dict] = []
     tf2_sup_zones: list[dict] = []
+    sfp_res_zones: list[dict] = []
+    sfp_sup_zones: list[dict] = []
     current_bias_4h = 0
     current_bias_1d = 0
     current_htf_sma50_bias = 0
@@ -1651,6 +1754,18 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
         while tf2_lo_ptr < len(tf2_low) and tf2_low[tf2_lo_ptr]["time"] <= visible_time:
             tf2_sup_zones.append(dict(tf2_low[tf2_lo_ptr], used=False, touch_count=0, tf=tf2, id=f"{tf2}-sup-{tf2_lo_ptr}"))
             tf2_lo_ptr += 1
+        while sfp_hi_ptr < len(sfp_high) and sfp_high[sfp_hi_ptr]["time"] <= visible_time:
+            zone = dict(sfp_high[sfp_hi_ptr], used=False, touch_count=0, id=f"sfp-res-{sfp_hi_ptr}")
+            sfp_res_zones.append(zone)
+            if cfg.sfp_max_active_levels > 0 and len(sfp_res_zones) > cfg.sfp_max_active_levels:
+                sfp_res_zones = sfp_res_zones[-cfg.sfp_max_active_levels :]
+            sfp_hi_ptr += 1
+        while sfp_lo_ptr < len(sfp_low) and sfp_low[sfp_lo_ptr]["time"] <= visible_time:
+            zone = dict(sfp_low[sfp_lo_ptr], used=False, touch_count=0, id=f"sfp-sup-{sfp_lo_ptr}")
+            sfp_sup_zones.append(zone)
+            if cfg.sfp_max_active_levels > 0 and len(sfp_sup_zones) > cfg.sfp_max_active_levels:
+                sfp_sup_zones = sfp_sup_zones[-cfg.sfp_max_active_levels :]
+            sfp_lo_ptr += 1
         while bias_4h_ptr < len(bias_4h_events) and bias_4h_events[bias_4h_ptr]["time"] <= visible_time:
             current_bias_4h = bias_4h_events[bias_4h_ptr]["bias"]
             bias_4h_ptr += 1
@@ -1669,6 +1784,8 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
         tf2_sup_zones = [zone for zone in tf2_sup_zones if not zone["used"] and lows[i] >= zone["bottom"]]
         tf1_res_zones = [zone for zone in tf1_res_zones if not zone["used"] and highs[i] <= zone["top"]]
         tf2_res_zones = [zone for zone in tf2_res_zones if not zone["used"] and highs[i] <= zone["top"]]
+        sfp_sup_zones = [zone for zone in sfp_sup_zones if not zone["used"] and lows[i] >= zone["bottom"]]
+        sfp_res_zones = [zone for zone in sfp_res_zones if not zone["used"] and highs[i] <= zone["top"]]
 
         def sweep_candidates(zones: list[dict]) -> list[dict]:
             candidates = [zone for zone in reversed(zones) if not zone["used"]]
@@ -1677,14 +1794,38 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
             return candidates
 
         if cfg.prioritize_higher_tf:
-            support_zones = (sweep_candidates(tf2_sup_zones) if cfg.use_tf2 else []) + (sweep_candidates(tf1_sup_zones) if cfg.use_tf1 else [])
-            resistance_zones = (sweep_candidates(tf2_res_zones) if cfg.use_tf2 else []) + (sweep_candidates(tf1_res_zones) if cfg.use_tf1 else [])
+            support_zones = (sweep_candidates(tf2_sup_zones) if cfg.use_tf2 else []) + (sweep_candidates(tf1_sup_zones) if cfg.use_tf1 else []) + sweep_candidates(sfp_sup_zones)
+            resistance_zones = (sweep_candidates(tf2_res_zones) if cfg.use_tf2 else []) + (sweep_candidates(tf1_res_zones) if cfg.use_tf1 else []) + sweep_candidates(sfp_res_zones)
         else:
-            support_zones = (sweep_candidates(tf1_sup_zones) if cfg.use_tf1 else []) + (sweep_candidates(tf2_sup_zones) if cfg.use_tf2 else [])
-            resistance_zones = (sweep_candidates(tf1_res_zones) if cfg.use_tf1 else []) + (sweep_candidates(tf2_res_zones) if cfg.use_tf2 else [])
+            support_zones = (sweep_candidates(tf1_sup_zones) if cfg.use_tf1 else []) + (sweep_candidates(tf2_sup_zones) if cfg.use_tf2 else []) + sweep_candidates(sfp_sup_zones)
+            resistance_zones = (sweep_candidates(tf1_res_zones) if cfg.use_tf1 else []) + (sweep_candidates(tf2_res_zones) if cfg.use_tf2 else []) + sweep_candidates(sfp_res_zones)
 
-        active_support_zones = tf1_sup_zones + tf2_sup_zones
-        active_resistance_zones = tf1_res_zones + tf2_res_zones
+        active_support_zones = tf1_sup_zones + tf2_sup_zones + sfp_sup_zones
+        active_resistance_zones = tf1_res_zones + tf2_res_zones + sfp_res_zones
+
+        def sfp_filter_passes(zone: dict, direction: str, index: int) -> bool:
+            if zone.get("source") != "sfp_pivot" or not cfg.sfp_strict:
+                return True
+            level = float(zone.get("level", zone["top"] if direction == "long" else zone["bottom"]))
+            start = max(0, index - max(1, int(cfg.sfp_left)) + 1)
+            eps = max(abs(level) * 1e-10, 1e-12)
+            if direction == "long":
+                open_ok = (not cfg.sfp_require_open_reclaim) or opens[index] > level
+                return (
+                    lows[index] < level
+                    and closes[index] > level
+                    and open_ok
+                    and lows[index] <= min(lows[start:index + 1]) + eps
+                    and min(closes[start:index + 1]) >= level - eps
+                )
+            open_ok = (not cfg.sfp_require_open_reclaim) or opens[index] < level
+            return (
+                highs[index] > level
+                and closes[index] < level
+                and open_ok
+                and highs[index] >= max(highs[start:index + 1]) - eps
+                and max(closes[start:index + 1]) <= level + eps
+            )
 
         def zone_hold_filter_passes(
             direction: str,
@@ -1788,6 +1929,7 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
                 and closes[i] > zone["top"]
                 and reclaim_pos >= cfg.min_sweep_reclaim_pos
                 and vol_ok
+                and sfp_filter_passes(zone, "long", i)
             ):
                 ok, prob, zone_hold_meta = zone_hold_filter_passes(
                     "long",
@@ -1836,6 +1978,7 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
                 and closes[i] < zone["bottom"]
                 and reclaim_pos >= cfg.min_sweep_reclaim_pos
                 and vol_ok
+                and sfp_filter_passes(zone, "short", i)
             ):
                 ok, prob, zone_hold_meta = zone_hold_filter_passes(
                     "short",
@@ -1888,6 +2031,11 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
                 "limit_price": None,
                 "planned_stop": None,
                 "zone_hold_prob": bull_zone.get("zone_hold_prob", math.nan),
+                "zone_source": bull_zone.get("source", "ob_break"),
+                "liquidity_level": float(bull_zone.get("level", bull_zone["top"])),
+                "liquidity_pivot_time": bull_zone.get("pivot_time"),
+                "liquidity_confirm_time": bull_zone.get("confirm_time", bull_zone.get("time")),
+                "liquidity_sfp_strict": bool(bull_zone.get("source") == "sfp_pivot"),
             }
 
         if bear_zone and cfg.allow_shorts:
@@ -1911,6 +2059,11 @@ def run_backtest(exec_df: pd.DataFrame, cfg: Config, return_state: bool = False)
                 "limit_price": None,
                 "planned_stop": None,
                 "zone_hold_prob": bear_zone.get("zone_hold_prob", math.nan),
+                "zone_source": bear_zone.get("source", "ob_break"),
+                "liquidity_level": float(bear_zone.get("level", bear_zone["bottom"])),
+                "liquidity_pivot_time": bear_zone.get("pivot_time"),
+                "liquidity_confirm_time": bear_zone.get("confirm_time", bear_zone.get("time")),
+                "liquidity_sfp_strict": bool(bear_zone.get("source") == "sfp_pivot"),
             }
 
         if long_setup and not long_setup["choch_found"]:

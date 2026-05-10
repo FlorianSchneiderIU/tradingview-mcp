@@ -1,0 +1,97 @@
+//@version=6
+strategy(
+  "Million Moves Algo V4.3 Strategy",
+  "MM_V43",
+  overlay                 = true,
+  initial_capital         = 10000,
+  default_qty_type        = strategy.percent_of_equity,
+  default_qty_value       = 10,
+  commission_type         = strategy.commission.percent,
+  commission_value        = 0.04,
+  pyramiding              = 0,
+  process_orders_on_close = true,
+  calc_on_every_tick      = false)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Inputs
+// ──────────────────────────────────────────────────────────────────────────
+i_sensitivity = input.float(2.5, "Supertrend Sensitivity",  minval = 0.1, maxval = 20.0, group = "Signal")
+factor        = 11   // fixed in original indicator
+i_ema_len     = input.int(200, "EMA Filter Length",          minval = 10,  group = "Signal")
+i_sl_mult     = input.float(2.2, "SL ATR Multiplier",        minval = 0.1, group = "Risk")
+i_tp_mult     = input.float(1.0, "TP Strength Multiplier",   minval = 0.1, group = "Risk")
+
+// ──────────────────────────────────────────────────────────────────────────
+// Indicators
+// ──────────────────────────────────────────────────────────────────────────
+ema200 = ta.ema(close, i_ema_len)
+sma13  = ta.sma(close, 13)
+atr14  = ta.atr(14)
+
+// Supertrend — source = open, as in the original indicator
+supertrend_calc(_src, _factor, _atrLen) =>
+    _atr       = ta.atr(_atrLen)
+    _upperRaw  = _src + _factor * _atr
+    _lowerRaw  = _src - _factor * _atr
+    _prevLower = nz(_lowerRaw[1])
+    _prevUpper = nz(_upperRaw[1])
+    _lower     = _lowerRaw > _prevLower or close[1] < _prevLower ? _lowerRaw : _prevLower
+    _upper     = _upperRaw < _prevUpper or close[1] > _prevUpper ? _upperRaw : _prevUpper
+    int   _dir = na
+    float _st  = na
+    _prevSt    = _st[1]
+    if na(_atr[1])
+        _dir := 2
+    else if _prevSt == _prevUpper
+        _dir := close > _upper ? -1 : 1
+    else
+        _dir := close < _lower ? 1 : -1
+    _st := _dir == -1 ? _lower : _upper
+    [_st, _dir]
+
+[supertrend, stDir] = supertrend_calc(open, i_sensitivity, factor)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Entry Signals  (Smart Signals — EMA200-aligned)
+// Long  : crossover above supertrend  +  close >= SMA13  +  ABOVE EMA200
+// Short : crossunder below supertrend +  close <= SMA13  +  BELOW EMA200
+// ──────────────────────────────────────────────────────────────────────────
+aboveEma = close[1] > ema200 and close > ema200
+Sbull    = ta.crossover (close, supertrend) and close >= sma13 and      aboveEma
+Sbear    = ta.crossunder(close, supertrend) and close <= sma13 and not aboveEma
+
+// ──────────────────────────────────────────────────────────────────────────
+// Strategy Execution
+// ──────────────────────────────────────────────────────────────────────────
+if Sbull
+    sl   = low  - atr14 * i_sl_mult
+    risk = math.max(close - sl, syminfo.mintick)
+    tp1  = close + i_tp_mult * 1 * risk
+    tp2  = close + i_tp_mult * 2 * risk
+    tp3  = close + i_tp_mult * 3 * risk
+    strategy.entry("Long",  strategy.long,  comment = "SBuy")
+    strategy.exit("L-TP1", "Long", qty_percent = 33,  limit = tp1, stop = sl, comment = "TP1")
+    strategy.exit("L-TP2", "Long", qty_percent = 50,  limit = tp2, stop = sl, comment = "TP2")
+    strategy.exit("L-TP3", "Long", qty_percent = 100, limit = tp3, stop = sl, comment = "TP3/SL")
+
+if Sbear
+    sl   = high + atr14 * i_sl_mult
+    risk = math.max(sl - close, syminfo.mintick)
+    tp1  = close - i_tp_mult * 1 * risk
+    tp2  = close - i_tp_mult * 2 * risk
+    tp3  = close - i_tp_mult * 3 * risk
+    strategy.entry("Short", strategy.short, comment = "SSell")
+    strategy.exit("S-TP1", "Short", qty_percent = 33,  limit = tp1, stop = sl, comment = "TP1")
+    strategy.exit("S-TP2", "Short", qty_percent = 50,  limit = tp2, stop = sl, comment = "TP2")
+    strategy.exit("S-TP3", "Short", qty_percent = 100, limit = tp3, stop = sl, comment = "TP3/SL")
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plots
+// ──────────────────────────────────────────────────────────────────────────
+plot(ema200,     "EMA 200",    close > ema200  ? color.green : color.red,  linewidth = 2)
+plot(supertrend, "Supertrend", stDir  == -1    ? color.teal  : color.red,  linewidth = 2)
+
+bullColor = color.new(#00ffcc, 0)
+bearColor = color.new(#e43a72, 0)
+plotshape(Sbull, "Smart Buy",  shape.labelup,   location.belowbar, bullColor, text = "Smart\nBuy",  textcolor = color.black, size = size.normal)
+plotshape(Sbear, "Smart Sell", shape.labeldown,  location.abovebar, bearColor, text = "Smart\nSell", textcolor = color.white, size = size.normal)

@@ -1,0 +1,90 @@
+{
+  "failed_or_skipped": 8,
+  "models_dir": "/app/models",
+  "rows": [
+    {
+      "instrument_status": "Closed",
+      "status": "instrument_not_trading",
+      "symbol": "MKRUSDT"
+    },
+    {
+      "bars": 82598,
+      "path": "/app/models/STXUSDT_dt.pkl",
+      "status": "saved",
+      "symbol": "STXUSDT"
+    },
+    {
+      "bars": 82598,
+      "path": "/app/models/AAVEUSDT_dt.pkl",
+      "status": "saved",
+      "symbol": "AAVEUSDT"
+    },
+    {
+      "bars": 82598,
+      "status": "skipped_or_rejected",
+      "symbol": "ETCUSDT"
+    },
+    {
+      "bars": 82598,
+      "status": "skipped_or_rejected",
+      "symbol": "CAKEUSDT"
+    },
+    {
+      "bars": 79650,
+      "path": "/app/models/JUPUSDT_dt.pkl",
+      "status": "saved",
+      "symbol": "JUPUSDT"
+    },
+    {
+      "bars": 82598,
+      "status": "skipped_or_rejected",
+      "symbol": "ARBUSDT"
+    },
+    {
+      "bars": 82598,
+      "status": "skipped_or_rejected",
+      "symbol": "XLMUSDT"
+    },
+    {
+      "bars": 81588,
+      "path": "/app/models/WIFUSDT_dt.pkl",
+      "status": "saved",
+      "symbol": "WIFUSDT"
+    },
+    {
+      "bars": 82598,
+      "path": "/app/models/TRXUSDT_dt.pkl",
+      "status": "saved",
+      "symbol": "TRXUSDT"
+    },
+    {
+      "bars": 82598,
+      "status": "skipped_or_rejected",
+      "symbol": "GRTUSDT"
+    },
+    {
+      "bars": 82598,
+      "path": "/app/models/NEARUSDT_dt.pkl",
+      "status": "saved",
+      "symbol": "NEARUSDT"
+    },
+    {
+      "bars": 82599,
+      "path": "/app/models/LINKUSDT_dt.pkl",
+      "status": "saved",
+      "symbol": "LINKUSDT"
+    },
+    {
+      "bars": 82599,
+      "status": "skipped_or_rejected",
+      "symbol": "WLDUSDT"
+    },
+    {
+      "bars": 82599,
+      "status": "skipped_or_rejected",
+      "symbol": "XRPUSDT"
+    }
+  ],
+  "saved": 7,
+  "trained_at": "2026-05-10T09:32:27.459314+00:00"
+}

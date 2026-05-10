@@ -1,5 +1,8 @@
 node_modules/
 screenshots/
+bot/logs/
+bot/.env
+bot/models/*.pkl
 scripts/current.pine
 temp_*
 *.log
@@ -23,3 +26,5 @@ scripts/*.pdf
 scripts/*.jsonl
 scripts/*.html
 scripts/*.err
+scripts/**/*.joblib
+scripts/**/*.csv

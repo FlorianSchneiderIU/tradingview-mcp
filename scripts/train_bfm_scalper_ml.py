@@ -14,11 +14,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.backtest_turtle_soup import normalize_binance_spot_symbol
+from scripts.backtest_turtle_soup import BFM_ZONE_FEATURE_COLUMNS, normalize_binance_spot_symbol
 from scripts.channel_state_research.backtest import strategy_metrics
 from scripts.channel_state_research.data import load_base_candles, prepare_timeframe_bars
 from scripts.channel_state_research.production import load_production_config
+from scripts.coin_cluster_feature_study import add_ker_columns
 from scripts.plot_zone_channel_history import build_bfm_magic_lines, parse_timeframes
+from scripts.tune_horizontal_turtle_bfm import build_horizontal_levels, parse_horizontal_pivots
 from scripts.tune_bfm_scalper import (
     ScalpSpec,
     build_candidates,
@@ -67,6 +69,10 @@ NUMERIC_FEATURES = [
     "max_risk_atr",
     "stop_lookback_bars",
     "risk_atr",
+    "level_age_bars",
+    "horizontal_rank",
+    "level_close_gap_atr",
+    "level_body_reclaim_atr",
     "target_rr_planned",
     "max_hold_bars",
     "close_vs_ema20_atr",
@@ -84,6 +90,45 @@ NUMERIC_FEATURES = [
     "daily_close_vs_ema200_pct",
     "event_hour",
     "event_dayofweek",
+    "event_ker20",
+    "event_ker60",
+    "event_nearest_fvg_dist_atr",
+    "event_same_side_fvg_dist_atr",
+    "event_inside_fvg",
+    "event_open_fvg_count",
+    "event_weekly_poc_abs_dist_atr",
+    "event_weekly_poc_dir_dist_atr",
+    "event_volume_share_15m",
+    "event_volume_share_1h",
+    "event_volume_rvol20",
+    "horizontal_same_gap_atr",
+    "horizontal_same_close_gap_atr",
+    "horizontal_same_swept",
+    "horizontal_same_tf_rank",
+    "horizontal_same_age_bars",
+    "horizontal_same_level_count",
+    "horizontal_opp_gap_atr",
+    "horizontal_opp_tf_rank",
+    "horizontal_opp_age_bars",
+    "horizontal_opp_level_count",
+    "choch_wait_bars",
+    "signal_after_choch_bars",
+    "entry_after_signal_bars",
+    "choch_to_entry_bars",
+    "ob_width_atr_signal",
+    "entry_to_ob_mid_atr",
+    "entry_to_zone_mid_atr",
+    "stop_beyond_zone_atr",
+    "entry_vs_signal_close_atr",
+    "signal_close_vs_zone_atr",
+    "sweep_same_bar_reaction_atr",
+    "sweep_same_bar_close_reaction_atr",
+    "sweep_same_bar_adverse_atr",
+    "sweep_reclaim_body_atr",
+    "sweep_range_atr",
+    "choch_break_gap_atr",
+    *[f"bfm_sweep_{column[4:]}" for column in BFM_ZONE_FEATURE_COLUMNS],
+    *[f"bfm_signal_{column[4:]}" for column in BFM_ZONE_FEATURE_COLUMNS],
 ]
 
 
@@ -93,6 +138,8 @@ CATEGORICAL_FEATURES = [
     "entry_strategy",
     "trigger_family",
     "channel_tf",
+    "channel_source",
+    "horizontal_tf",
     "trend_filter",
 ]
 
@@ -138,6 +185,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--schedule-mode", choices=["per_symbol", "global"], default="per_symbol")
     parser.add_argument("--write-dataset", action="store_true")
     parser.add_argument("--reuse-dataset", type=Path, default=None)
+    parser.add_argument("--add-confluence-features", action="store_true")
+    parser.add_argument(
+        "--confluence-cache",
+        type=Path,
+        default=None,
+        help="Optional enriched candidate CSV cache. Read if it exists, otherwise write after enrichment.",
+    )
+    parser.add_argument("--horizontal-timeframes", default="1h,4h,1d")
+    parser.add_argument("--horizontal-pivots", default="1h=5:5;4h=3:3;1d=2:2")
+    parser.add_argument("--max-horizontal-scan", type=int, default=800)
+    parser.add_argument("--event-fvg-lookback", type=int, default=500)
+    parser.add_argument("--event-poc-lookback-bars", type=int, default=2016)
+    parser.add_argument("--event-poc-bins", type=int, default=160)
     parser.add_argument("--output-prefix", type=Path, default=Path("scripts/bfm_scalper_ml_majors5"))
     return parser.parse_args()
 
@@ -165,6 +225,20 @@ def main() -> None:
 
     if dataset.empty:
         raise RuntimeError("No labeled candidates were generated.")
+
+    if args.add_confluence_features:
+        if args.confluence_cache and args.confluence_cache.exists():
+            dataset = pd.read_csv(
+                args.confluence_cache,
+                parse_dates=["event_time", "entry_time", "exit_time", "label_end_time"],
+            )
+            print(f"Loaded enriched confluence dataset {args.confluence_cache}: {len(dataset):,} labeled candidates")
+        else:
+            dataset = enrich_confluence_features(args, dataset)
+            if args.confluence_cache:
+                args.confluence_cache.parent.mkdir(parents=True, exist_ok=True)
+                dataset.to_csv(args.confluence_cache, index=False)
+                print(f"Wrote enriched confluence dataset {args.confluence_cache}")
 
     dataset = add_ml_columns(dataset)
     if float(args.label_min_r) != 0.0:
@@ -320,6 +394,338 @@ def build_labeled_dataset(
         if not labeled.empty:
             frames.append(labeled)
     return pd.concat(frames, ignore_index=True).sort_values("entry_time").reset_index(drop=True) if frames else pd.DataFrame()
+
+
+def safe_div(num: float, den: float) -> float:
+    return float(num / den) if den and math.isfinite(den) else math.nan
+
+
+def enrich_confluence_features(args: argparse.Namespace, dataset: pd.DataFrame) -> pd.DataFrame:
+    out = dataset.copy()
+    for column in NUMERIC_FEATURES:
+        if column.startswith(("event_", "horizontal_")) and column not in out.columns:
+            out[column] = np.nan
+
+    out["event_time"] = pd.to_datetime(out["event_time"], utc=True, errors="coerce")
+    horizontal_timeframes = parse_timeframes(args.horizontal_timeframes, "1h")
+    horizontal_pivots = parse_horizontal_pivots(args.horizontal_pivots, horizontal_timeframes)
+    feature_columns = [
+        column
+        for column in NUMERIC_FEATURES
+        if column.startswith(("event_", "horizontal_")) and column not in {"event_hour", "event_dayofweek"}
+    ]
+
+    for raw_symbol, group in out.groupby("symbol", sort=False):
+        symbol = normalize_binance_spot_symbol(str(raw_symbol))
+        print(f"  enriching confluence for {symbol}: {len(group):,} rows")
+        base = load_base_candles(symbol, args.start, args.end, cache_dir=args.cache_dir, interval="5m")
+        all_timeframes = unique_preserve_order([args.exec_timeframe, *horizontal_timeframes])
+        bars_by_tf = {
+            timeframe: prepare_timeframe_bars(base, timeframe, atr_length=14)
+            for timeframe in all_timeframes
+        }
+        exec_bars = bars_by_tf[args.exec_timeframe].reset_index(drop=True)
+        levels = build_horizontal_levels(bars_by_tf, horizontal_pivots)
+        requested = (
+            group[["event_index", "direction"]]
+            .dropna()
+            .drop_duplicates()
+            .assign(event_index=lambda frame: pd.to_numeric(frame["event_index"], errors="coerce").astype(int))
+        )
+        event_features = build_event_confluence_features(
+            exec_bars=exec_bars,
+            levels=levels,
+            requested=requested,
+            max_horizontal_scan=int(args.max_horizontal_scan),
+            fvg_lookback=int(args.event_fvg_lookback),
+            poc_lookback_bars=int(args.event_poc_lookback_bars),
+            poc_bins=int(args.event_poc_bins),
+        )
+        left = group.drop(columns=feature_columns, errors="ignore")
+        merged = left.merge(event_features, on=["event_index", "direction"], how="left", sort=False)
+        for column in feature_columns:
+            if column in merged.columns:
+                out.loc[group.index, column] = merged[column].to_numpy()
+        print(
+            f"    {len(requested):,} unique event/direction states; "
+            f"{len(levels):,} confirmed horizontal levels"
+        )
+    return out
+
+
+def build_event_confluence_features(
+    *,
+    exec_bars: pd.DataFrame,
+    levels: list[Any],
+    requested: pd.DataFrame,
+    max_horizontal_scan: int,
+    fvg_lookback: int,
+    poc_lookback_bars: int,
+    poc_bins: int,
+) -> pd.DataFrame:
+    if requested.empty:
+        return pd.DataFrame(columns=["event_index", "direction"])
+
+    request_map: dict[int, set[str]] = {}
+    for _, row in requested.iterrows():
+        idx = int(row["event_index"])
+        if 0 <= idx < len(exec_bars):
+            request_map.setdefault(idx, set()).add(str(row["direction"]))
+    if not request_map:
+        return pd.DataFrame(columns=["event_index", "direction"])
+
+    frame = add_ker_columns(exec_bars).reset_index(drop=True)
+    opens = pd.to_datetime(frame["open_time"], utc=True, errors="coerce")
+    close_times = pd.to_datetime(frame["close_time"], utc=True, errors="coerce").reset_index(drop=True)
+    highs = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=float)
+    lows = pd.to_numeric(frame["low"], errors="coerce").to_numpy(dtype=float)
+    closes = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
+    volumes = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
+    volume_arr = volumes.to_numpy(dtype=float)
+    atrs = pd.to_numeric(frame["atr"], errors="coerce").bfill().ffill().to_numpy(dtype=float)
+    ker20 = pd.to_numeric(frame["ker20"], errors="coerce").to_numpy(dtype=float)
+    ker60 = pd.to_numeric(frame["ker60"], errors="coerce").to_numpy(dtype=float)
+
+    volume_15 = volumes.groupby(opens.dt.floor("15min")).transform("sum").to_numpy(dtype=float)
+    volume_1h = volumes.groupby(opens.dt.floor("1h")).transform("sum").to_numpy(dtype=float)
+    volume_sma20 = volumes.rolling(20, min_periods=5).mean().shift(1).to_numpy(dtype=float)
+
+    time_values = close_times.to_numpy(dtype="datetime64[ns]").astype("int64")
+    supports = [level for level in levels if level.side == "support"]
+    resistances = [level for level in levels if level.side == "resistance"]
+    support_ptr = 0
+    resistance_ptr = 0
+    active_supports: list[Any] = []
+    active_resistances: list[Any] = []
+    level_confirm_indices = {
+        level.level_id: int(np.searchsorted(time_values, int(level.confirm_time.tz_convert("UTC").value), side="left"))
+        for level in levels
+    }
+
+    price_bins = build_price_bins(closes, int(poc_bins))
+    price_bucket = bucketize_prices(closes, price_bins)
+    poc_volume_by_bin = np.zeros(max(1, len(price_bins) - 1), dtype=float)
+
+    active_bull_fvgs: list[tuple[int, float, float]] = []
+    active_bear_fvgs: list[tuple[int, float, float]] = []
+    rows: list[dict[str, Any]] = []
+
+    for index in range(len(frame)):
+        now = pd.Timestamp(close_times.iloc[index]).tz_convert("UTC")
+        while support_ptr < len(supports) and supports[support_ptr].confirm_time <= now:
+            active_supports.append(supports[support_ptr])
+            support_ptr += 1
+        while resistance_ptr < len(resistances) and resistances[resistance_ptr].confirm_time <= now:
+            active_resistances.append(resistances[resistance_ptr])
+            resistance_ptr += 1
+
+        active_bull_fvgs = [
+            gap for gap in active_bull_fvgs
+            if index - gap[0] <= fvg_lookback and lows[index] > gap[1]
+        ]
+        active_bear_fvgs = [
+            gap for gap in active_bear_fvgs
+            if index - gap[0] <= fvg_lookback and highs[index] < gap[2]
+        ]
+        if index >= 2 and lows[index] > highs[index - 2]:
+            active_bull_fvgs.append((index, float(highs[index - 2]), float(lows[index])))
+        if index >= 2 and highs[index] < lows[index - 2]:
+            active_bear_fvgs.append((index, float(highs[index]), float(lows[index - 2])))
+
+        if index in request_map:
+            close = float(closes[index])
+            atr = float(atrs[index])
+            for direction in sorted(request_map[index]):
+                base = {
+                    "event_index": int(index),
+                    "direction": direction,
+                    "event_ker20": float(ker20[index]) if math.isfinite(float(ker20[index])) else math.nan,
+                    "event_ker60": float(ker60[index]) if math.isfinite(float(ker60[index])) else math.nan,
+                    "event_volume_share_15m": safe_div(float(volume_arr[index]), float(volume_15[index])),
+                    "event_volume_share_1h": safe_div(float(volume_arr[index]), float(volume_1h[index])),
+                    "event_volume_rvol20": safe_div(float(volume_arr[index]), float(volume_sma20[index])),
+                }
+                base.update(fast_fvg_snapshot(active_bull_fvgs, active_bear_fvgs, close, atr, direction))
+                base.update(
+                    rolling_poc_snapshot(
+                        price_bins=price_bins,
+                        volume_by_bin=poc_volume_by_bin,
+                        close=close,
+                        atr=atr,
+                        direction=direction,
+                    )
+                )
+                base.update(
+                    horizontal_snapshot(
+                        direction=direction,
+                        index=index,
+                        close=close,
+                        high=float(highs[index]),
+                        low=float(lows[index]),
+                        atr=atr,
+                        active_supports=active_supports,
+                        active_resistances=active_resistances,
+                        level_confirm_indices=level_confirm_indices,
+                        max_scan=max_horizontal_scan,
+                    )
+                )
+                rows.append(base)
+
+        active_supports = [level for level in active_supports if closes[index] >= float(level.value)]
+        active_resistances = [level for level in active_resistances if closes[index] <= float(level.value)]
+
+        bucket = int(price_bucket[index])
+        if bucket >= 0:
+            poc_volume_by_bin[bucket] += float(volume_arr[index])
+        old_index = index - int(poc_lookback_bars)
+        if old_index >= 0:
+            old_bucket = int(price_bucket[old_index])
+            if old_bucket >= 0:
+                poc_volume_by_bin[old_bucket] = max(0.0, poc_volume_by_bin[old_bucket] - float(volume_arr[old_index]))
+
+    return pd.DataFrame(rows)
+
+
+def build_price_bins(closes: np.ndarray, bins: int) -> np.ndarray:
+    finite = closes[np.isfinite(closes)]
+    if len(finite) == 0 or finite.max() <= finite.min():
+        return np.array([0.0, 1.0], dtype=float)
+    return np.linspace(float(finite.min()), float(finite.max()), max(4, int(bins)) + 1)
+
+
+def bucketize_prices(closes: np.ndarray, bins: np.ndarray) -> np.ndarray:
+    out = np.searchsorted(bins, closes, side="right") - 1
+    out = np.where(np.isfinite(closes), np.clip(out, 0, len(bins) - 2), -1)
+    return out.astype(int)
+
+
+def distance_to_zone(price: float, low: float, high: float) -> float:
+    if low <= price <= high:
+        return 0.0
+    return min(abs(price - low), abs(price - high))
+
+
+def fast_fvg_snapshot(
+    active_bull_fvgs: list[tuple[int, float, float]],
+    active_bear_fvgs: list[tuple[int, float, float]],
+    close: float,
+    atr: float,
+    direction: str,
+) -> dict[str, float]:
+    if atr <= 0.0 or not math.isfinite(atr):
+        return {
+            "event_nearest_fvg_dist_atr": math.nan,
+            "event_same_side_fvg_dist_atr": math.nan,
+            "event_inside_fvg": 0.0,
+            "event_open_fvg_count": 0.0,
+        }
+    nearest = math.inf
+    same_side = math.inf
+    inside = 0.0
+    for _, low, high in [*active_bull_fvgs, *active_bear_fvgs]:
+        dist = distance_to_zone(close, low, high)
+        nearest = min(nearest, dist)
+        if low <= close <= high:
+            inside = 1.0
+    if direction == "long":
+        for _, low, high in active_bull_fvgs:
+            if close >= low:
+                same_side = min(same_side, distance_to_zone(close, low, high))
+    else:
+        for _, low, high in active_bear_fvgs:
+            if close <= high:
+                same_side = min(same_side, distance_to_zone(close, low, high))
+    return {
+        "event_nearest_fvg_dist_atr": float(nearest / atr) if math.isfinite(nearest) else 999.0,
+        "event_same_side_fvg_dist_atr": float(same_side / atr) if math.isfinite(same_side) else 999.0,
+        "event_inside_fvg": inside,
+        "event_open_fvg_count": float(len(active_bull_fvgs) + len(active_bear_fvgs)),
+    }
+
+
+def rolling_poc_snapshot(
+    *,
+    price_bins: np.ndarray,
+    volume_by_bin: np.ndarray,
+    close: float,
+    atr: float,
+    direction: str,
+) -> dict[str, float]:
+    if atr <= 0.0 or not math.isfinite(atr) or volume_by_bin.sum() <= 0.0:
+        return {"event_weekly_poc_abs_dist_atr": math.nan, "event_weekly_poc_dir_dist_atr": math.nan}
+    bucket = int(np.argmax(volume_by_bin))
+    poc = float((price_bins[bucket] + price_bins[bucket + 1]) / 2.0)
+    sign = 1.0 if direction == "long" else -1.0
+    return {
+        "event_weekly_poc_abs_dist_atr": abs(close - poc) / atr,
+        "event_weekly_poc_dir_dist_atr": sign * (close - poc) / atr,
+    }
+
+
+def horizontal_snapshot(
+    *,
+    direction: str,
+    index: int,
+    close: float,
+    high: float,
+    low: float,
+    atr: float,
+    active_supports: list[Any],
+    active_resistances: list[Any],
+    level_confirm_indices: dict[str, int],
+    max_scan: int,
+) -> dict[str, float]:
+    missing = {
+        "horizontal_same_gap_atr": 999.0,
+        "horizontal_same_close_gap_atr": 999.0,
+        "horizontal_same_swept": 0.0,
+        "horizontal_same_tf_rank": -1.0,
+        "horizontal_same_age_bars": -1.0,
+        "horizontal_same_level_count": 0.0,
+        "horizontal_opp_gap_atr": 999.0,
+        "horizontal_opp_tf_rank": -1.0,
+        "horizontal_opp_age_bars": -1.0,
+        "horizontal_opp_level_count": 0.0,
+    }
+    if atr <= 0.0 or not math.isfinite(atr):
+        return missing
+    if direction == "long":
+        same_levels = active_supports[-max_scan:]
+        opp_levels = active_resistances[-max_scan:]
+        penetration = low
+        same_ref = low
+        opp_candidates = [(float(level.value) - close, level) for level in opp_levels if float(level.value) >= close]
+    else:
+        same_levels = active_resistances[-max_scan:]
+        opp_levels = active_supports[-max_scan:]
+        penetration = high
+        same_ref = high
+        opp_candidates = [(close - float(level.value), level) for level in opp_levels if float(level.value) <= close]
+
+    missing["horizontal_same_level_count"] = float(len(same_levels))
+    missing["horizontal_opp_level_count"] = float(len(opp_levels))
+    if same_levels:
+        same = min(same_levels, key=lambda level: abs(float(level.value) - same_ref))
+        value = float(same.value)
+        missing["horizontal_same_gap_atr"] = abs(value - penetration) / atr
+        missing["horizontal_same_close_gap_atr"] = ((close - value) / atr) if direction == "long" else ((value - close) / atr)
+        missing["horizontal_same_swept"] = 1.0 if (
+            (direction == "long" and low <= value <= close)
+            or (direction == "short" and close <= value <= high)
+        ) else 0.0
+        missing["horizontal_same_tf_rank"] = float(getattr(same, "rank", -1))
+        missing["horizontal_same_age_bars"] = float(index - int(level_confirm_indices.get(same.level_id, index)))
+    if not opp_candidates and opp_levels:
+        if direction == "long":
+            opp_candidates = [(abs(float(level.value) - close), level) for level in opp_levels]
+        else:
+            opp_candidates = [(abs(close - float(level.value)), level) for level in opp_levels]
+    if opp_candidates:
+        distance, opp = min(opp_candidates, key=lambda item: item[0])
+        missing["horizontal_opp_gap_atr"] = float(distance) / atr
+        missing["horizontal_opp_tf_rank"] = float(getattr(opp, "rank", -1))
+        missing["horizontal_opp_age_bars"] = float(index - int(level_confirm_indices.get(opp.level_id, index)))
+    return missing
 
 
 def build_specs(args: argparse.Namespace) -> list[ScalpSpec]:

@@ -15,6 +15,13 @@ SYMBOL_SETS: dict[str, list[str]] = {
         "BINANCE:SOLUSDT",
         "BINANCE:BNBUSDT",
     ],
+    "majors5": [
+        "BINANCE:BTCUSDT",
+        "BINANCE:ETHUSDT",
+        "BINANCE:SOLUSDT",
+        "BINANCE:XRPUSDT",
+        "BINANCE:BNBUSDT",
+    ],
     "liquid6": [
         "BINANCE:BTCUSDT",
         "BINANCE:ETHUSDT",

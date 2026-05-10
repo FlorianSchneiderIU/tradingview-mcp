@@ -1,0 +1,35 @@
+{
+  "_comment": "Top 20 coins by OOS DT Sharpe from million_moves_v43_multi.py WFO sweep.",
+  "_comment2": "Keys are Bybit linear perp symbols (no slash). Remove or add entries to change the watched list.",
+  "_fields": {
+    "sl":       "ATR multiplier for the hard stop-loss distance",
+    "tp1":      "R-multiple at which the trailing stop activates (= risk × tp1)",
+    "trail":    "ATR multiplier for the trailing stop distance",
+    "dt_sh":    "OOS DT-filtered Sharpe from walkforward (informational)",
+    "trail_sh": "OOS trail-only Sharpe from walkforward (informational)",
+    "dt_pos":   "Positive WFO folds with DT filter",
+    "trail_pos":"Positive WFO folds without DT filter",
+    "use_dt":   "true = load DT model from MODELS_DIR and filter signals; false = trail-only"
+  },
+
+  "MKRUSDT":    {"sl": 2.0, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.6042, "trail_sh": 0.1805, "dt_pos": "2/3", "trail_pos": "2/3", "use_dt": true},
+  "STXUSDT":    {"sl": 2.5, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.5573, "trail_sh": 0.1568, "dt_pos": "4/6", "trail_pos": "4/6", "use_dt": true},
+  "AAVEUSDT":   {"sl": 2.0, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.4743, "trail_sh": 0.0736, "dt_pos": "4/6", "trail_pos": "4/6", "use_dt": true},
+  "ETCUSDT":    {"sl": 3.5, "tp1": 0.75, "trail": 0.5, "dt_sh": 0.3853, "trail_sh": 0.0735, "dt_pos": "4/6", "trail_pos": "4/6", "use_dt": true},
+  "CAKEUSDT":   {"sl": 2.5, "tp1": 1.50, "trail": 0.5, "dt_sh": 0.3631, "trail_sh": 0.2511, "dt_pos": "4/6", "trail_pos": "5/6", "use_dt": true},
+  "JUPUSDT":    {"sl": 3.0, "tp1": 0.75, "trail": 0.5, "dt_sh": 0.3238, "trail_sh": 0.1952, "dt_pos": "4/6", "trail_pos": "5/6", "use_dt": true},
+  "ARBUSDT":    {"sl": 1.5, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.2964, "trail_sh": 0.1685, "dt_pos": "4/6", "trail_pos": "5/6", "use_dt": true},
+  "XLMUSDT":    {"sl": 3.5, "tp1": 1.00, "trail": 0.5, "dt_sh": 0.2902, "trail_sh": 0.1885, "dt_pos": "5/6", "trail_pos": "5/6", "use_dt": true},
+  "WIFUSDT":    {"sl": 2.5, "tp1": 1.50, "trail": 0.5, "dt_sh": 0.2869, "trail_sh": 0.1072, "dt_pos": "4/5", "trail_pos": "4/5", "use_dt": true},
+  "TRXUSDT":    {"sl": 1.5, "tp1": 1.50, "trail": 0.5, "dt_sh": 0.2826, "trail_sh": 0.1928, "dt_pos": "5/6", "trail_pos": "4/6", "use_dt": true},
+  "GRTUSDT":    {"sl": 3.5, "tp1": 1.50, "trail": 0.5, "dt_sh": 0.2675, "trail_sh": 0.1058, "dt_pos": "6/6", "trail_pos": "4/6", "use_dt": true},
+  "NEARUSDT":   {"sl": 3.0, "tp1": 1.50, "trail": 0.5, "dt_sh": 0.2549, "trail_sh": 0.0943, "dt_pos": "4/6", "trail_pos": "5/6", "use_dt": true},
+  "ADAUSDT":    {"sl": 3.0, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.2408, "trail_sh": 0.1081, "dt_pos": "3/6", "trail_pos": "5/6", "use_dt": false},
+  "TIAUSDT":    {"sl": 2.5, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.2300, "trail_sh": 0.1281, "dt_pos": "3/6", "trail_pos": "3/6", "use_dt": false},
+  "ETHUSDT":    {"sl": 3.0, "tp1": 0.75, "trail": 0.5, "dt_sh": 0.2084, "trail_sh": 0.2322, "dt_pos": "3/6", "trail_pos": "6/6", "use_dt": false},
+  "LINKUSDT":   {"sl": 2.5, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.1918, "trail_sh": 0.1435, "dt_pos": "4/6", "trail_pos": "4/6", "use_dt": true},
+  "BNBUSDT":    {"sl": 3.5, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.1865, "trail_sh": 0.1559, "dt_pos": "3/6", "trail_pos": "5/6", "use_dt": false},
+  "RENDERUSDT": {"sl": 3.0, "tp1": 0.50, "trail": 0.5, "dt_sh": 0.1780, "trail_sh": 0.1080, "dt_pos": "3/4", "trail_pos": "4/4", "use_dt": false},
+  "WLDUSDT":    {"sl": 1.5, "tp1": 1.00, "trail": 0.5, "dt_sh": 0.1736, "trail_sh": 0.1643, "dt_pos": "4/6", "trail_pos": "5/6", "use_dt": true},
+  "XRPUSDT":    {"sl": 3.0, "tp1": 1.00, "trail": 0.5, "dt_sh": 0.1712, "trail_sh": 0.1544, "dt_pos": "5/6", "trail_pos": "5/6", "use_dt": true}
+}

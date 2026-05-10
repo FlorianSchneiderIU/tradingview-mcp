@@ -1,0 +1,204 @@
+Adaptive Lag — Decision Tree Rules per Coin per Fold
+Generated: 2026-05-06 17:24:10.598031
+Combos: ['spd0(atr7,sma8)', 'spd1(atr9,sma10)', 'spd2(atr11,sma13)', 'spd3(atr14,sma16)', 'spd4(atr21,sma21)']
+Features: ['adx14', 'atr_pctile', 'rsi14', 'ema200_dist', 'ema200_slope', 'vol_ratio', 'mom5', 'body_ratio', 'direction']
+
+
+──────────────────────────────────────────────────────────────────────
+Coin: ETH  Fold 1  OOS 2026-01-01→2026-04-01
+
+  spd0(atr7,sma8)  (IS win-rate: 94/159 trades)
+    |--- ema200_dist <= 0.028
+    |   |--- adx14 <= 0.145
+    |   |   |--- weights: [1.223, 7.612] class: 1
+    |   |--- adx14 >  0.145
+    |   |   |--- mom5 <= 0.009
+    |   |   |   |--- weights: [57.485, 58.356] class: 1
+    |   |   |--- mom5 >  0.009
+    |   |   |   |--- weights: [20.792, 7.612] class: 0
+    |--- ema200_dist >  0.028
+    |   |--- weights: [0.000, 5.920] class: 1
+    
+
+  spd1(atr9,sma10)  (IS win-rate: 97/164 trades)
+    |--- ema200_dist <= 0.015
+    |   |--- rsi14 <= 0.628
+    |   |   |--- rsi14 <= 0.402
+    |   |   |   |--- weights: [46.507, 38.887] class: 0
+    |   |   |--- rsi14 >  0.402
+    |   |   |   |--- weights: [1.224, 12.680] class: 1
+    |   |--- rsi14 >  0.628
+    |   |   |--- vol_ratio <= 3.020
+    |   |   |   |--- weights: [22.030, 5.072] class: 0
+    |   |   |--- vol_ratio >  3.020
+    |   |   |   |--- weights: [3.672, 4.227] class: 1
+    |--- ema200_dist >  0.015
+    |   |--- ema200_dist <= 0.020
+    |   |   |--- vol_ratio <= 1.810
+    |   |   |   |--- weights: [1.224, 4.227] class: 1
+    |   |   |--- vol_ratio >  1.810
+    |   |   |   |--- weights: [0.000, 8.454] class: 1
+    |   |--- ema200_dist >  0.020
+    |   |   |--- rsi14 <= 0.691
+    |   |   |   |--- weights: [2.448, 6.763] class: 1
+    |   |   |--- rsi14 >  0.691
+    |   |   |   |--- weights: [4.896, 1.691] class: 0
+    
+
+  spd2(atr11,sma13)  (IS win-rate: 106/173 trades)
+    |--- vol_ratio <= 5.612
+    |   |--- body_ratio <= 0.552
+    |   |   |--- atr_pctile <= 0.640
+    |   |   |   |--- weights: [6.455, 23.665] class: 1
+    |   |   |--- atr_pctile >  0.640
+    |   |   |   |--- weights: [10.328, 4.080] class: 0
+    |   |--- body_ratio >  0.552
+    |   |   |--- body_ratio <= 0.852
+    |   |   |   |--- weights: [64.552, 40.802] class: 0
+    |   |   |--- body_ratio >  0.852
+    |   |   |   |--- weights: [5.164, 11.425] class: 1
+    |--- vol_ratio >  5.612
+    |   |--- weights: [0.000, 6.528] class: 1
+    
+
+  spd3(atr14,sma16)  (IS win-rate: 103/169 trades)
+    |--- rsi14 <= 0.318
+    |   |--- adx14 <= 0.221
+    |   |   |--- body_ratio <= 0.609
+    |   |   |   |--- weights: [2.561, 3.282] class: 1
+    |   |   |--- body_ratio >  0.609
+    |   |   |   |--- weights: [1.280, 4.102] class: 1
+    |   |--- adx14 >  0.221
+    |   |   |--- weights: [0.000, 5.743] class: 1
+    |--- rsi14 >  0.318
+    |   |--- atr_pctile <= 0.515
+    |   |   |--- body_ratio <= 0.588
+    |   |   |   |--- weights: [5.121, 19.689] class: 1
+    |   |   |--- body_ratio >  0.588
+    |   |   |   |--- weights: [32.008, 25.432] class: 0
+    |   |--- atr_pctile >  0.515
+    |   |   |--- adx14 <= 0.284
+    |   |   |   |--- weights: [42.250, 20.510] class: 0
+    |   |   |--- adx14 >  0.284
+    |   |   |   |--- weights: [1.280, 5.743] class: 1
+    
+
+  spd4(atr21,sma21)  (IS win-rate: 109/183 trades)
+    |--- ema200_slope <= 0.003
+    |   |--- rsi14 <= 0.629
+    |   |   |--- ema200_dist <= -0.036
+    |   |   |   |--- weights: [6.182, 0.839] class: 0
+    |   |   |--- ema200_dist >  -0.036
+    |   |   |   |--- weights: [50.696, 66.317] class: 1
+    |   |--- rsi14 >  0.629
+    |   |   |--- ema200_slope <= 0.000
+    |   |   |   |--- weights: [17.311, 2.518] class: 0
+    |   |   |--- ema200_slope >  0.000
+    |   |   |   |--- weights: [17.311, 16.789] class: 0
+    |--- ema200_slope >  0.003
+    |   |--- weights: [0.000, 5.037] class: 1
+    
+
+──────────────────────────────────────────────────────────────────────
+Coin: ETH  Fold 2  OOS 2026-04-01→2026-05-06
+
+  spd0(atr7,sma8)  (IS win-rate: 102/166 trades)
+    |--- adx14 <= 0.184
+    |   |--- atr_pctile <= 0.230
+    |   |   |--- body_ratio <= 0.662
+    |   |   |   |--- weights: [0.000, 10.578] class: 1
+    |   |   |--- body_ratio >  0.662
+    |   |   |   |--- weights: [2.594, 4.069] class: 1
+    |   |--- atr_pctile >  0.230
+    |   |   |--- atr_pctile <= 0.395
+    |   |   |   |--- weights: [10.375, 3.255] class: 0
+    |   |   |--- atr_pctile >  0.395
+    |   |   |   |--- weights: [6.484, 15.461] class: 1
+    |--- adx14 >  0.184
+    |   |--- ema200_dist <= 0.028
+    |   |   |--- adx14 <= 0.262
+    |   |   |   |--- weights: [53.172, 29.294] class: 0
+    |   |   |--- adx14 >  0.262
+    |   |   |   |--- weights: [10.375, 15.461] class: 1
+    |   |--- ema200_dist >  0.028
+    |   |   |--- weights: [0.000, 4.882] class: 1
+    
+
+  spd1(atr9,sma10)  (IS win-rate: 100/163 trades)
+    |--- adx14 <= 0.184
+    |   |--- rsi14 <= 0.621
+    |   |   |--- rsi14 <= 0.352
+    |   |   |   |--- weights: [6.468, 9.780] class: 1
+    |   |   |--- rsi14 >  0.352
+    |   |   |   |--- weights: [0.000, 14.670] class: 1
+    |   |--- rsi14 >  0.621
+    |   |   |--- rsi14 <= 0.663
+    |   |   |   |--- weights: [9.056, 4.075] class: 0
+    |   |   |--- rsi14 >  0.663
+    |   |   |   |--- weights: [3.881, 9.780] class: 1
+    |--- adx14 >  0.184
+    |   |--- ema200_slope <= 0.001
+    |   |   |--- ema200_slope <= -0.000
+    |   |   |   |--- weights: [23.286, 20.375] class: 0
+    |   |   |--- ema200_slope >  -0.000
+    |   |   |   |--- weights: [31.048, 10.595] class: 0
+    |   |--- ema200_slope >  0.001
+    |   |   |--- atr_pctile <= 0.430
+    |   |   |   |--- weights: [6.468, 2.445] class: 0
+    |   |   |--- atr_pctile >  0.430
+    |   |   |   |--- weights: [1.294, 9.780] class: 1
+    
+
+  spd2(atr11,sma13)  (IS win-rate: 105/170 trades)
+    |--- ema200_slope <= -0.001
+    |   |--- vol_ratio <= 1.936
+    |   |   |--- weights: [3.923, 2.429] class: 0
+    |   |--- vol_ratio >  1.936
+    |   |   |--- ema200_slope <= -0.001
+    |   |   |   |--- weights: [1.308, 4.048] class: 1
+    |   |   |--- ema200_slope >  -0.001
+    |   |   |   |--- weights: [0.000, 8.905] class: 1
+    |--- ema200_slope >  -0.001
+    |   |--- atr_pctile <= 0.135
+    |   |   |--- weights: [0.000, 4.857] class: 1
+    |   |--- atr_pctile >  0.135
+    |   |   |--- ema200_dist <= -0.005
+    |   |   |   |--- weights: [30.077, 12.952] class: 0
+    |   |   |--- ema200_dist >  -0.005
+    |   |   |   |--- weights: [49.692, 51.810] class: 1
+    
+
+  spd3(atr14,sma16)  (IS win-rate: 106/170 trades)
+    |--- ema200_slope <= -0.001
+    |   |--- vol_ratio <= 2.018
+    |   |   |--- weights: [3.984, 2.406] class: 0
+    |   |--- vol_ratio >  2.018
+    |   |   |--- weights: [0.000, 13.632] class: 1
+    |--- ema200_slope >  -0.001
+    |   |--- body_ratio <= 0.852
+    |   |   |--- body_ratio <= 0.672
+    |   |   |   |--- weights: [35.859, 38.491] class: 1
+    |   |   |--- body_ratio >  0.672
+    |   |   |   |--- weights: [41.172, 20.047] class: 0
+    |   |--- body_ratio >  0.852
+    |   |   |--- vol_ratio <= 3.278
+    |   |   |   |--- weights: [0.000, 8.019] class: 1
+    |   |   |--- vol_ratio >  3.278
+    |   |   |   |--- weights: [3.984, 2.406] class: 0
+    
+
+  spd4(atr21,sma21)  (IS win-rate: 114/190 trades)
+    |--- ema200_slope <= 0.003
+    |   |--- mom5 <= -0.009
+    |   |   |--- adx14 <= 0.224
+    |   |   |   |--- weights: [7.500, 25.833] class: 1
+    |   |   |--- adx14 >  0.224
+    |   |   |   |--- weights: [16.250, 12.500] class: 0
+    |   |--- mom5 >  -0.009
+    |   |   |--- ema200_slope <= 0.000
+    |   |   |   |--- weights: [45.000, 20.833] class: 0
+    |   |   |--- ema200_slope >  0.000
+    |   |   |   |--- weights: [26.250, 30.833] class: 1
+    |--- ema200_slope >  0.003
+    |   |--- weights: [0.000, 5.000] class: 1
+    

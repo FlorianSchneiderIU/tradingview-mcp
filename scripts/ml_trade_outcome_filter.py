@@ -46,6 +46,7 @@ from scripts.backtest_turtle_soup import (
     Config,
     DEFAULT_BFM_ZONE_TF_SETS,
     DEFAULT_BFM_ZONE_TIMEFRAMES,
+    INTERVAL_MS,
     add_atr,
     bfm_zone_feature_values,
     build_daily_context,
@@ -54,10 +55,13 @@ from scripts.backtest_turtle_soup import (
     build_htf_sma_bias_events,
     fetch_klines,
     normalize_binance_spot_symbol,
+    normalize_timeframe,
     parse_bfm_feature_tf_sets,
     parse_bfm_feature_timeframes,
     parse_bfm_feature_groups,
     parse_utc_datetime,
+    parse_timeframe_list,
+    resample_ohlc,
     run_backtest,
     summarize,
 )
@@ -91,6 +95,27 @@ BASE_FEATURE_COLUMNS = [
     "stop_beyond_zone_atr",
     "entry_vs_signal_close_atr",
     "signal_close_vs_zone_atr",
+    "zone_source_sfp",
+    "zone_source_ob_break",
+    "liquidity_level_width_atr",
+    "liquidity_level_age_hours",
+    "liquidity_level_age_bars",
+    "liquidity_sfp_strict",
+    "liquidity_sfp_confirm3",
+    "liquidity_sweep_open_reclaimed",
+    "liquidity_sweep_close_reclaimed",
+    "liquidity_sweep_extreme_is_lookback_extreme",
+    "liquidity_sweep_depth_atr",
+    "liquidity_level_to_signal_close_atr",
+    "liquidity_prev_day_same_gap_atr",
+    "liquidity_prev_day_opp_dist_atr",
+    "liquidity_prev_day_swept",
+    "liquidity_prev_week_same_gap_atr",
+    "liquidity_prev_week_opp_dist_atr",
+    "liquidity_prev_week_swept",
+    "liquidity_prev_month_same_gap_atr",
+    "liquidity_prev_month_opp_dist_atr",
+    "liquidity_prev_month_swept",
     "ret_1h_dir",
     "ret_4h_dir",
     "ret_24h_dir",
@@ -140,7 +165,35 @@ BASE_FEATURE_COLUMNS = [
     "zone_prob_x_sweep_reclaim_full",
     "zone_prob_x_sweep_adverse_tiny",
     "zone_prob_x_ret1h_pullback",
+    "tex_rsi22_signal",
+    "tex_rsi22_sweep",
+    "tex_pressure_signal",
+    "tex_pressure_sweep",
+    "tex_aligned_strength_recent",
+    "tex_aligned_age_bars",
+    "tex_counter_strength_recent",
+    "tex_counter_age_bars",
+    "tex_aligned_signal_bar",
+    "tex_counter_signal_bar",
+    "tex_aligned_between_sweep_signal",
+    "tex_counter_between_sweep_signal",
 ]
+
+RSI_EXHAUST_FEATURE_COLUMNS = [
+    "tex_rsi22_signal",
+    "tex_rsi22_sweep",
+    "tex_pressure_signal",
+    "tex_pressure_sweep",
+    "tex_aligned_strength_recent",
+    "tex_aligned_age_bars",
+    "tex_counter_strength_recent",
+    "tex_counter_age_bars",
+    "tex_aligned_signal_bar",
+    "tex_counter_signal_bar",
+    "tex_aligned_between_sweep_signal",
+    "tex_counter_between_sweep_signal",
+]
+
 
 def trade_bfm_feature_columns_for_groups(raw: str | None) -> list[str]:
     out: list[str] = []
@@ -183,6 +236,13 @@ def symbol_job(params: dict[str, Any]) -> tuple[str, pd.DataFrame, list[Any], st
         max_structure_bars_to_choch=32,
         min_entry_risk_pct=params["min_entry_risk_pct"],
         max_zone_scan=params["max_zone_scan"],
+        use_sfp_liquidity_zones=params["use_sfp_liquidity_zones"],
+        sfp_timeframes=params["sfp_timeframes"],
+        sfp_left=params["sfp_left"],
+        sfp_right=params["sfp_right"],
+        sfp_level_width_atr=params["sfp_level_width_atr"],
+        sfp_strict=params["sfp_strict"],
+        sfp_require_open_reclaim=params["sfp_require_open_reclaim"],
     )
     feature_frame, trades = trade_feature_rows(
         symbol,
@@ -193,6 +253,13 @@ def symbol_job(params: dict[str, Any]) -> tuple[str, pd.DataFrame, list[Any], st
         bfm_tf_sets=params["bfm_tf_sets"],
         bfm_invalidation=params["bfm_invalidation"],
         bfm_max_extension_bars=params["bfm_max_extension_bars"],
+        use_sfp_liquidity_zones=params["use_sfp_liquidity_zones"],
+        sfp_timeframes=params["sfp_timeframes"],
+        sfp_left=params["sfp_left"],
+        sfp_right=params["sfp_right"],
+        sfp_level_width_atr=params["sfp_level_width_atr"],
+        sfp_strict=params["sfp_strict"],
+        sfp_require_open_reclaim=params["sfp_require_open_reclaim"],
     )
     normalized = normalize_binance_spot_symbol(symbol)
     return normalized, feature_frame, trades, f"{normalized}: {len(feature_frame)} trade rows"
@@ -235,6 +302,98 @@ def prepare_feature_df(df: pd.DataFrame) -> pd.DataFrame:
     out["range_1h_pct"] = (out["high"].rolling(12).max() - out["low"].rolling(12).min()) / out["close"] * 100.0
     out["range_4h_pct"] = (out["high"].rolling(48).max() - out["low"].rolling(48).min()) / out["close"] * 100.0
     return out
+
+
+def rsi_wilder(close: pd.Series, length: int = 22) -> pd.Series:
+    delta = close.astype(float).diff()
+    up = delta.clip(lower=0.0)
+    down = -delta.clip(upper=0.0)
+    avg_up = up.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
+    avg_down = down.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
+    rs = avg_up / avg_down.replace(0.0, np.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.mask((avg_down == 0.0) & (avg_up > 0.0), 100.0)
+    rsi = rsi.mask((avg_up == 0.0) & (avg_down > 0.0), 0.0)
+    return rsi
+
+
+def compute_trend_exhaustion_frame(df: pd.DataFrame, *, rsi_len: int = 22, valid_bars: int = 4) -> pd.DataFrame:
+    out = df.sort_values("open_time").reset_index(drop=True).copy()
+    out["rsi22"] = rsi_wilder(out["close"], rsi_len)
+    rsi = out["rsi22"]
+    prev = rsi.shift(1)
+
+    long_strength = np.zeros(len(out), dtype=int)
+    short_strength = np.zeros(len(out), dtype=int)
+    for level, strength in [(30.0, 1), (20.0, 2), (15.0, 3)]:
+        mask = ((prev <= level) & (rsi > level)).fillna(False).to_numpy()
+        long_strength[mask] = np.maximum(long_strength[mask], strength)
+    for level, strength in [(70.0, 1), (80.0, 2), (85.0, 3)]:
+        mask = ((prev >= level) & (rsi < level)).fillna(False).to_numpy()
+        short_strength[mask] = np.maximum(short_strength[mask], strength)
+
+    out["tex_long_strength"] = long_strength
+    out["tex_short_strength"] = short_strength
+
+    for side in ["long", "short"]:
+        strengths = out[f"tex_{side}_strength"].astype(int).to_numpy()
+        recent_strength = np.zeros(len(out), dtype=float)
+        recent_age = np.full(len(out), math.nan, dtype=float)
+        last_strength = 0
+        last_index: int | None = None
+        for idx, strength in enumerate(strengths):
+            if strength > 0:
+                last_strength = int(strength)
+                last_index = idx
+            if last_index is not None:
+                age = idx - last_index
+                if age <= valid_bars:
+                    recent_strength[idx] = float(last_strength)
+                    recent_age[idx] = float(age)
+        out[f"tex_{side}_recent_strength"] = recent_strength
+        out[f"tex_{side}_recent_age"] = recent_age
+    return out
+
+
+def trend_exhaustion_trade_features(
+    tex: pd.DataFrame,
+    *,
+    direction: str,
+    signal_idx: int,
+    sweep_idx: int,
+) -> dict[str, float]:
+    if signal_idx < 0 or signal_idx >= len(tex):
+        return {column: math.nan for column in RSI_EXHAUST_FEATURE_COLUMNS}
+    if sweep_idx < 0 or sweep_idx >= len(tex):
+        sweep_idx = signal_idx
+
+    aligned_side = "long" if direction == "long" else "short"
+    counter_side = "short" if direction == "long" else "long"
+    signal_rsi = float(tex.at[signal_idx, "rsi22"])
+    sweep_rsi = float(tex.at[sweep_idx, "rsi22"])
+    if direction == "long":
+        signal_pressure = (50.0 - signal_rsi) / 50.0 if math.isfinite(signal_rsi) else math.nan
+        sweep_pressure = (50.0 - sweep_rsi) / 50.0 if math.isfinite(sweep_rsi) else math.nan
+    else:
+        signal_pressure = (signal_rsi - 50.0) / 50.0 if math.isfinite(signal_rsi) else math.nan
+        sweep_pressure = (sweep_rsi - 50.0) / 50.0 if math.isfinite(sweep_rsi) else math.nan
+
+    lo = min(sweep_idx, signal_idx)
+    hi = max(sweep_idx, signal_idx)
+    return {
+        "tex_rsi22_signal": signal_rsi / 100.0 if math.isfinite(signal_rsi) else math.nan,
+        "tex_rsi22_sweep": sweep_rsi / 100.0 if math.isfinite(sweep_rsi) else math.nan,
+        "tex_pressure_signal": signal_pressure,
+        "tex_pressure_sweep": sweep_pressure,
+        "tex_aligned_strength_recent": float(tex.at[signal_idx, f"tex_{aligned_side}_recent_strength"]),
+        "tex_aligned_age_bars": float(tex.at[signal_idx, f"tex_{aligned_side}_recent_age"]),
+        "tex_counter_strength_recent": float(tex.at[signal_idx, f"tex_{counter_side}_recent_strength"]),
+        "tex_counter_age_bars": float(tex.at[signal_idx, f"tex_{counter_side}_recent_age"]),
+        "tex_aligned_signal_bar": float(tex.at[signal_idx, f"tex_{aligned_side}_strength"]),
+        "tex_counter_signal_bar": float(tex.at[signal_idx, f"tex_{counter_side}_strength"]),
+        "tex_aligned_between_sweep_signal": float(tex.loc[lo:hi, f"tex_{aligned_side}_strength"].max()),
+        "tex_counter_between_sweep_signal": float(tex.loc[lo:hi, f"tex_{counter_side}_strength"].max()),
+    }
 
 
 def event_series(events: list[dict[str, Any]], close_times: list[pd.Timestamp]) -> list[int]:
@@ -292,6 +451,68 @@ def frame_metrics(frame: pd.DataFrame) -> dict[str, Any]:
 
 def safe_div(num: float, den: float) -> float:
     return num / den if den and math.isfinite(den) else math.nan
+
+
+def previous_completed_levels(df: pd.DataFrame, timeframe: str) -> tuple[list[float], list[float]]:
+    htf = resample_ohlc(df, timeframe)
+    if htf.empty:
+        return [math.nan] * len(df), [math.nan] * len(df)
+    htf_close = pd.to_datetime(htf["close_time"], utc=True, errors="coerce").to_list()
+    exec_close = pd.to_datetime(df["close_time"], utc=True, errors="coerce").to_list()
+    highs = htf["high"].astype(float).to_list()
+    lows = htf["low"].astype(float).to_list()
+    out_high: list[float] = []
+    out_low: list[float] = []
+    ptr = -1
+    for close_time in exec_close:
+        while ptr + 1 < len(htf_close) and htf_close[ptr + 1] <= close_time:
+            ptr += 1
+        if ptr >= 0:
+            out_high.append(float(highs[ptr]))
+            out_low.append(float(lows[ptr]))
+        else:
+            out_high.append(math.nan)
+            out_low.append(math.nan)
+    return out_high, out_low
+
+
+def previous_calendar_month_levels(df: pd.DataFrame) -> tuple[list[float], list[float]]:
+    monthly = (
+        df.set_index("open_time")
+        .resample("MS", label="left", closed="left")
+        .agg({"high": "max", "low": "min"})
+        .dropna()
+        .reset_index()
+    )
+    if monthly.empty:
+        return [math.nan] * len(df), [math.nan] * len(df)
+    monthly["next_open_time"] = monthly["open_time"].shift(-1)
+    monthly["close_time"] = monthly["next_open_time"].fillna(monthly["open_time"] + pd.offsets.MonthBegin(1)) - pd.Timedelta(milliseconds=1)
+    month_close = pd.to_datetime(monthly["close_time"], utc=True, errors="coerce").to_list()
+    exec_close = pd.to_datetime(df["close_time"], utc=True, errors="coerce").to_list()
+    highs = monthly["high"].astype(float).to_list()
+    lows = monthly["low"].astype(float).to_list()
+    out_high: list[float] = []
+    out_low: list[float] = []
+    ptr = -1
+    for close_time in exec_close:
+        while ptr + 1 < len(month_close) and month_close[ptr + 1] <= close_time:
+            ptr += 1
+        if ptr >= 0:
+            out_high.append(float(highs[ptr]))
+            out_low.append(float(lows[ptr]))
+        else:
+            out_high.append(math.nan)
+            out_low.append(math.nan)
+    return out_high, out_low
+
+
+def swept_prev_level(direction: str, high: float, low: float, close: float, level: float) -> float:
+    if not math.isfinite(level):
+        return 0.0
+    if direction == "long":
+        return 1.0 if low < level and close > level else 0.0
+    return 1.0 if high > level and close < level else 0.0
 
 
 def bool_float(mask: pd.Series) -> pd.Series:
@@ -360,8 +581,30 @@ def trade_feature_rows(
     bfm_tf_sets: str = DEFAULT_BFM_ZONE_TF_SETS,
     bfm_invalidation: str = "wick",
     bfm_max_extension_bars: int = 300,
+    use_sfp_liquidity_zones: bool = False,
+    sfp_timeframes: str = "15m,1h,4h",
+    sfp_left: int = 15,
+    sfp_right: int = 10,
+    sfp_level_width_atr: float = 0.15,
+    sfp_strict: bool = True,
+    sfp_require_open_reclaim: bool = True,
+    precomputed_trades: list[Any] | None = None,
+    extra_trades: list[Any] | None = None,
 ) -> tuple[pd.DataFrame, list[Any]]:
     prepared = prepare_feature_df(df)
+    if use_sfp_liquidity_zones and not cfg.use_sfp_liquidity_zones:
+        cfg = Config(
+            **{
+                **cfg.__dict__,
+                "use_sfp_liquidity_zones": True,
+                "sfp_timeframes": ",".join(parse_timeframe_list(sfp_timeframes)),
+                "sfp_left": int(sfp_left),
+                "sfp_right": int(sfp_right),
+                "sfp_level_width_atr": float(sfp_level_width_atr),
+                "sfp_strict": bool(sfp_strict),
+                "sfp_require_open_reclaim": bool(sfp_require_open_reclaim),
+            }
+        )
     bfm_projection = None
     if use_bfm_features:
         parsed_bfm_timeframes = parse_bfm_feature_timeframes(bfm_timeframes)
@@ -373,7 +616,9 @@ def trade_feature_rows(
             invalidation=bfm_invalidation,
             max_extension_bars=bfm_max_extension_bars,
         )
-    trades = run_backtest(df, cfg)
+    trades = list(precomputed_trades) if precomputed_trades is not None else run_backtest(df, cfg)
+    if extra_trades:
+        trades = list(trades) + list(extra_trades)
     normalized = normalize_binance_spot_symbol(symbol)
 
     opens = prepared["open"].to_list()
@@ -388,6 +633,10 @@ def trade_feature_rows(
     bias_4h = event_series(build_htf_bias_events(prepared, "4h", 20), close_times)
     bias_1d = event_series(build_htf_bias_events(prepared, "1d", 20), close_times)
     sma50_4h = event_series(build_htf_sma_bias_events(prepared, "4h", 50), close_times)
+    prev_day_high, prev_day_low = previous_completed_levels(prepared, "1d")
+    prev_week_high, prev_week_low = previous_completed_levels(prepared, "1w")
+    prev_month_high, prev_month_low = previous_calendar_month_levels(prepared)
+    trend_exhaustion = compute_trend_exhaustion_frame(prepared, valid_bars=4)
 
     rows: list[dict[str, Any]] = []
     for trade in trades:
@@ -410,6 +659,15 @@ def trade_feature_rows(
         zone_mid = (trade.zone_top + trade.zone_bottom) / 2.0
         ob_mid = (trade.ob_top + trade.ob_bottom) / 2.0
         sweep_range = highs[sweep_idx] - lows[sweep_idx]
+        liquidity_level = float(getattr(trade, "liquidity_level", math.nan))
+        if not math.isfinite(liquidity_level):
+            liquidity_level = float(trade.zone_top if trade.direction == "long" else trade.zone_bottom)
+        liquidity_width = float(trade.zone_top - trade.zone_bottom)
+        liquidity_confirm_time = getattr(trade, "liquidity_confirm_time", None)
+        liquidity_confirm = pd.Timestamp(liquidity_confirm_time) if liquidity_confirm_time is not None else pd.Timestamp(trade.sweep_time)
+        liquidity_age_hours = (pd.Timestamp(trade.signal_time) - liquidity_confirm).total_seconds() / 3600.0
+        exec_tf_minutes = INTERVAL_MS[normalize_timeframe(trade.exec_tf)] / 60_000.0
+        liquidity_age_bars = liquidity_age_hours * 60.0 / exec_tf_minutes if exec_tf_minutes > 0 else math.nan
 
         if trade.direction == "long":
             sweep_penetration = safe_div(trade.zone_top - lows[sweep_idx], zone_width)
@@ -419,6 +677,14 @@ def trade_feature_rows(
             sweep_adverse = max(0.0, (trade.zone_top - lows[sweep_idx]) / atr_sweep)
             stop_beyond_zone = (trade.zone_bottom - trade.stop_price) / atr_signal
             signal_close_vs_zone = (closes[signal_idx] - trade.zone_top) / atr_signal
+            liquidity_sweep_depth_atr = max(0.0, (liquidity_level - lows[sweep_idx]) / atr_sweep)
+            liquidity_level_to_signal_close_atr = (closes[signal_idx] - liquidity_level) / atr_signal
+            liquidity_open_reclaimed = 1.0 if opens[sweep_idx] > liquidity_level else 0.0
+            liquidity_close_reclaimed = 1.0 if closes[sweep_idx] > liquidity_level else 0.0
+            look_start = max(0, sweep_idx - int(getattr(cfg, "sfp_left", 15)) + 1)
+            liquidity_extreme = 1.0 if lows[sweep_idx] <= min(lows[look_start:sweep_idx + 1]) + 1e-12 else 0.0
+            confirm_end = min(len(closes), sweep_idx + 4)
+            sfp_confirm3 = 1.0 if confirm_end >= sweep_idx + 4 and min(closes[sweep_idx + 1:confirm_end]) > liquidity_level else 0.0
         else:
             sweep_penetration = safe_div(highs[sweep_idx] - trade.zone_bottom, zone_width)
             sweep_reclaim = safe_div(highs[sweep_idx] - closes[sweep_idx], sweep_range)
@@ -427,6 +693,30 @@ def trade_feature_rows(
             sweep_adverse = max(0.0, (highs[sweep_idx] - trade.zone_bottom) / atr_sweep)
             stop_beyond_zone = (trade.stop_price - trade.zone_top) / atr_signal
             signal_close_vs_zone = (trade.zone_bottom - closes[signal_idx]) / atr_signal
+            liquidity_sweep_depth_atr = max(0.0, (highs[sweep_idx] - liquidity_level) / atr_sweep)
+            liquidity_level_to_signal_close_atr = (liquidity_level - closes[signal_idx]) / atr_signal
+            liquidity_open_reclaimed = 1.0 if opens[sweep_idx] < liquidity_level else 0.0
+            liquidity_close_reclaimed = 1.0 if closes[sweep_idx] < liquidity_level else 0.0
+            look_start = max(0, sweep_idx - int(getattr(cfg, "sfp_left", 15)) + 1)
+            liquidity_extreme = 1.0 if highs[sweep_idx] >= max(highs[look_start:sweep_idx + 1]) - 1e-12 else 0.0
+            confirm_end = min(len(closes), sweep_idx + 4)
+            sfp_confirm3 = 1.0 if confirm_end >= sweep_idx + 4 and max(closes[sweep_idx + 1:confirm_end]) < liquidity_level else 0.0
+
+        same_day_level = prev_day_low[sweep_idx] if trade.direction == "long" else prev_day_high[sweep_idx]
+        opp_day_level = prev_day_high[sweep_idx] if trade.direction == "long" else prev_day_low[sweep_idx]
+        same_week_level = prev_week_low[sweep_idx] if trade.direction == "long" else prev_week_high[sweep_idx]
+        opp_week_level = prev_week_high[sweep_idx] if trade.direction == "long" else prev_week_low[sweep_idx]
+        same_month_level = prev_month_low[sweep_idx] if trade.direction == "long" else prev_month_high[sweep_idx]
+        opp_month_level = prev_month_high[sweep_idx] if trade.direction == "long" else prev_month_low[sweep_idx]
+
+        def same_gap(level: float) -> float:
+            return abs(liquidity_level - level) / atr_sweep if math.isfinite(level) and atr_sweep > 0 else math.nan
+
+        def opp_dist(level: float) -> float:
+            if not math.isfinite(level) or atr_sweep <= 0:
+                return math.nan
+            distance = level - liquidity_level if trade.direction == "long" else liquidity_level - level
+            return distance / atr_sweep if distance > 0 else 0.0
 
         now = pd.Timestamp(prepared.iloc[signal_idx]["open_time"])
         ctx = current_day_context(day_context, now)
@@ -482,6 +772,27 @@ def trade_feature_rows(
             "stop_beyond_zone_atr": stop_beyond_zone,
             "entry_vs_signal_close_atr": sign * (trade.entry_price - closes[signal_idx]) / atr_signal,
             "signal_close_vs_zone_atr": signal_close_vs_zone,
+            "zone_source_sfp": 1.0 if getattr(trade, "zone_source", "ob_break") == "sfp_pivot" else 0.0,
+            "zone_source_ob_break": 1.0 if getattr(trade, "zone_source", "ob_break") != "sfp_pivot" else 0.0,
+            "liquidity_level_width_atr": liquidity_width / atr_signal,
+            "liquidity_level_age_hours": liquidity_age_hours,
+            "liquidity_level_age_bars": liquidity_age_bars,
+            "liquidity_sfp_strict": 1.0 if bool(getattr(trade, "liquidity_sfp_strict", False)) else 0.0,
+            "liquidity_sfp_confirm3": sfp_confirm3,
+            "liquidity_sweep_open_reclaimed": liquidity_open_reclaimed,
+            "liquidity_sweep_close_reclaimed": liquidity_close_reclaimed,
+            "liquidity_sweep_extreme_is_lookback_extreme": liquidity_extreme,
+            "liquidity_sweep_depth_atr": liquidity_sweep_depth_atr,
+            "liquidity_level_to_signal_close_atr": liquidity_level_to_signal_close_atr,
+            "liquidity_prev_day_same_gap_atr": same_gap(same_day_level),
+            "liquidity_prev_day_opp_dist_atr": opp_dist(opp_day_level),
+            "liquidity_prev_day_swept": swept_prev_level(trade.direction, highs[sweep_idx], lows[sweep_idx], closes[sweep_idx], same_day_level),
+            "liquidity_prev_week_same_gap_atr": same_gap(same_week_level),
+            "liquidity_prev_week_opp_dist_atr": opp_dist(opp_week_level),
+            "liquidity_prev_week_swept": swept_prev_level(trade.direction, highs[sweep_idx], lows[sweep_idx], closes[sweep_idx], same_week_level),
+            "liquidity_prev_month_same_gap_atr": same_gap(same_month_level),
+            "liquidity_prev_month_opp_dist_atr": opp_dist(opp_month_level),
+            "liquidity_prev_month_swept": swept_prev_level(trade.direction, highs[sweep_idx], lows[sweep_idx], closes[sweep_idx], same_month_level),
             "ret_1h_dir": signed_col("ret_1h"),
             "ret_4h_dir": signed_col("ret_4h"),
             "ret_24h_dir": signed_col("ret_24h"),
@@ -499,6 +810,14 @@ def trade_feature_rows(
             "dow_cos": math.cos(2.0 * math.pi * dow / 7.0),
             "zone_hold_prob": 0.5,
         }
+        row.update(
+            trend_exhaustion_trade_features(
+                trend_exhaustion,
+                direction=trade.direction,
+                signal_idx=signal_idx,
+                sweep_idx=sweep_idx,
+            )
+        )
         if bfm_projection is not None:
             zone = {
                 "top": trade.zone_top,
@@ -603,7 +922,14 @@ def feature_rank(model: Any, frame: pd.DataFrame, model_name: str, feature_colum
         return pd.DataFrame(columns=["feature", "importance"])
     if model_name == "rf":
         forest = model.named_steps["randomforestclassifier"]
-        return pd.DataFrame({"feature": feature_columns, "importance": forest.feature_importances_}).sort_values("importance", ascending=False)
+        importances = forest.feature_importances_
+        names = list(feature_columns)
+        if len(importances) != len(names):
+            try:
+                names = list(model.named_steps["simpleimputer"].get_feature_names_out(feature_columns))
+            except Exception:
+                names = names[: len(importances)]
+        return pd.DataFrame({"feature": names, "importance": importances}).sort_values("importance", ascending=False)
     result = permutation_importance(
         model,
         frame[feature_columns].astype(float),
@@ -642,6 +968,13 @@ def main() -> None:
     parser.add_argument("--bfm-tf-sets", default=DEFAULT_BFM_ZONE_TF_SETS)
     parser.add_argument("--bfm-invalidation", choices=["wick", "close", "none"], default="wick")
     parser.add_argument("--bfm-max-extension-bars", type=int, default=300)
+    parser.add_argument("--use-sfp-liquidity-triggers", action="store_true", help="Add strict confirmed-pivot SFP liquidity levels to the Turtle Soup candidate universe.")
+    parser.add_argument("--sfp-timeframes", default="15m,1h,4h")
+    parser.add_argument("--sfp-left", type=int, default=15)
+    parser.add_argument("--sfp-right", type=int, default=10)
+    parser.add_argument("--sfp-level-width-atr", type=float, default=0.15)
+    parser.add_argument("--no-sfp-strict", action="store_true", help="Use pivot liquidity zones with the normal Turtle sweep test instead of the stricter SFP test.")
+    parser.add_argument("--no-sfp-open-reclaim", action="store_true", help="Do not require the sweep candle open to remain beyond the swept pivot level.")
     parser.add_argument("--no-symbol-dummies", action="store_true", help="Disable per-symbol dummy features.")
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
@@ -674,6 +1007,13 @@ def main() -> None:
             "bfm_tf_sets": args.bfm_tf_sets,
             "bfm_invalidation": args.bfm_invalidation,
             "bfm_max_extension_bars": args.bfm_max_extension_bars,
+            "use_sfp_liquidity_zones": args.use_sfp_liquidity_triggers,
+            "sfp_timeframes": args.sfp_timeframes,
+            "sfp_left": args.sfp_left,
+            "sfp_right": args.sfp_right,
+            "sfp_level_width_atr": args.sfp_level_width_atr,
+            "sfp_strict": not args.no_sfp_strict,
+            "sfp_require_open_reclaim": not args.no_sfp_open_reclaim,
         }
         for symbol in args.symbols
     ]
