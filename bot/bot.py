@@ -3338,12 +3338,17 @@ class Bot:
                     tpTriggerBy="LastPrice",
                     positionIdx=0,
                 )
-                if resp.get("retCode", -1) == 0:
+                ret_code = int(resp.get("retCode", -1) or -1)
+                ret_msg = str(resp.get("retMsg", "?"))
+                if ret_code == 0:
                     log.info(f"[{sym}] Fixed TP/SL synchronized  sl={sl_price} tp={tp_price}")
+                    return True
+                if ret_code == 34040 or "not modified" in ret_msg.lower():
+                    log.debug(f"[{sym}] Fixed TP/SL already set  sl={sl_price} tp={tp_price}")
                     return True
                 log.warning(
                     f"[{sym}] set fixed TP/SL attempt {attempt}/3 failed: "
-                    f"{resp.get('retMsg', '?')} (retCode={resp.get('retCode')})"
+                    f"{ret_msg} (retCode={ret_code})"
                 )
             except Exception as exc:
                 log.warning(f"[{sym}] set fixed TP/SL attempt {attempt}/3 failed: {exc}")
