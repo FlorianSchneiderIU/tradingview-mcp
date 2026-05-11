@@ -336,13 +336,37 @@ def fetch_warmup_bars(http_client: HTTP, symbol: str, n: int = WARMUP_BARS) -> l
     return unique[-n:]
 
 
+def get_balance_metrics(http_client: HTTP) -> dict[str, float]:
+    """Return account equity and available USDT balance for sizing decisions."""
+    resp = http_client.get_wallet_balance(accountType="UNIFIED")
+    row = resp.get("result", {}).get("list", [{}])[0]
+    total_equity = float(row.get("totalEquity", 0) or 0)
+    total_available = float(row.get("totalAvailableBalance", 0) or 0)
+
+    usdt_equity = 0.0
+    usdt_available = 0.0
+    for coin in row.get("coin", []):
+        if coin.get("coin") != "USDT":
+            continue
+        usdt_equity = float(coin.get("equity", 0) or 0)
+        # Prefer explicit withdrawable USDT if present; otherwise account-level available balance.
+        usdt_available = float(
+            coin.get("availableToWithdraw")
+            or coin.get("availableToBorrow")
+            or 0
+        )
+        break
+
+    return {
+        "equity": usdt_equity if usdt_equity > 0 else total_equity,
+        "available": min(usdt_available, total_available)
+        if (usdt_available > 0 and total_available > 0)
+        else (usdt_available if usdt_available > 0 else total_available),
+    }
+
+
 def get_equity(http_client: HTTP) -> float:
-    resp  = http_client.get_wallet_balance(accountType="UNIFIED")
-    coins = resp.get("result", {}).get("list", [{}])[0].get("coin", [])
-    for coin in coins:
-        if coin.get("coin") == "USDT":
-            return float(coin.get("equity", 0))
-    return float(resp.get("result", {}).get("list", [{}])[0].get("totalEquity", 0))
+    return get_balance_metrics(http_client).get("equity", 0.0)
 
 
 def get_instrument_info(http_client: HTTP, symbol: str) -> dict:
@@ -3252,14 +3276,23 @@ class Bot:
             )
             self._telegram.send_signal("rejected", symbol=state.symbol, sig=sig, reason=f"Trade failed: {exc}")
 
-    def _set_order_leverage(self, state: SymbolState, notional: float, equity: float) -> float:
+    def _set_order_leverage(
+        self,
+        state: SymbolState,
+        entry: float,
+        stop: float,
+    ) -> float:
+        """Set leverage to the minimum required so that a stop-out loses exactly the
+        margin allocated to this position (i.e. leverage = 1 / stop_distance_pct).
+        Clamped to [min_leverage, max_leverage] and rounded up to the exchange step.
+        """
         max_leverage = max(float(state.info.get("max_leverage", 1.0)), 1.0)
         min_leverage = max(float(state.info.get("min_leverage", 1.0)), 1.0)
         leverage_step = float(state.info.get("leverage_step", 0.01))
-        required_leverage = notional / equity if equity > 0 else max_leverage
-        buffer = max(ORDER_LEVERAGE_BUFFER, 1.0)
-        target_leverage = min(max_leverage, max(min_leverage, required_leverage * buffer))
-        target_leverage = min(max_leverage, max(min_leverage, ceil_to_step(target_leverage, leverage_step)))
+
+        stop_distance_pct = abs(entry - stop) / entry if entry > 0 else 0.0
+        risk_leverage = (1.0 / stop_distance_pct) if stop_distance_pct > 0 else max_leverage
+        target_leverage = min(max_leverage, max(min_leverage, ceil_to_step(risk_leverage, leverage_step)))
         target_text = qty_to_str(target_leverage)
 
         try:
@@ -3287,7 +3320,7 @@ class Bot:
 
         log.info(
             f"[{state.symbol}] Order leverage set to {target_text}x "
-            f"(required~{required_leverage:.2f}x, cap={max_leverage:g}x)"
+            f"(sl_dist={stop_distance_pct:.4%}, risk_based={risk_leverage:.2f}x, cap={max_leverage:g}x)"
         )
         return target_leverage
 
@@ -3335,7 +3368,9 @@ class Bot:
         min_q  = state.info["min_qty"]
         max_leverage = max(float(state.info.get("max_leverage", 1.0)), 1.0)
 
-        equity   = get_equity(self._http)
+        balances = get_balance_metrics(self._http)
+        equity = float(balances.get("equity", 0.0))
+        available_balance = float(balances.get("available", 0.0))
         if equity <= 0:
             raise ValueError(f"Invalid equity returned: {equity}")
         entry = float(sig["entry"])
@@ -3348,12 +3383,14 @@ class Bot:
         fee_risk_per_unit = max(TAKER_FEE_RATE, 0.0) * (entry + stop)
         unit_risk_with_fees = unit_risk + fee_risk_per_unit
         raw_qty = risk_budget / unit_risk_with_fees
-        max_qty_by_margin = (equity * max_leverage) / entry
+        margin_safety_buffer = 0.95
+        margin_basis = available_balance if available_balance > 0 else equity
+        max_qty_by_margin = (margin_basis * max_leverage * margin_safety_buffer) / entry
         if raw_qty > max_qty_by_margin:
             log.warning(
-                f"[{sym}] Risk-sized qty capped by max leverage: "
+                f"[{sym}] Risk-sized qty capped by available margin: "
                 f"raw_qty={raw_qty:.8g} max_qty={max_qty_by_margin:.8g} "
-                f"max_leverage={max_leverage:g}x"
+                f"max_leverage={max_leverage:g}x available={available_balance:.2f}"
             )
             raw_qty = max_qty_by_margin
 
@@ -3364,7 +3401,11 @@ class Bot:
         expected_price_sl_loss = qty * unit_risk
         expected_fee_loss = qty * fee_risk_per_unit
         expected_sl_loss = expected_price_sl_loss + expected_fee_loss
-        order_leverage = self._set_order_leverage(state, notional=notional, equity=equity)
+        order_leverage = self._set_order_leverage(
+            state,
+            entry=entry,
+            stop=stop,
+        )
         margin_est = notional / order_leverage
         if expected_sl_loss > risk_budget * 1.02:
             log.warning(
@@ -3394,7 +3435,7 @@ class Bot:
             f"lev={order_leverage:g}x  "
             f"price_risk~{expected_price_sl_loss:.2f}  fees~{expected_fee_loss:.2f}  "
             f"risk_at_sl~{expected_sl_loss:.2f} ({expected_sl_loss / equity:.2%})  "
-            f"equity={equity:.2f}"
+            f"equity={equity:.2f}  available={available_balance:.2f}"
         )
 
         order_kwargs = dict(
@@ -3444,6 +3485,7 @@ class Bot:
                 "exit_style": exit_style,
                 "entry_order_id": str(order_id),
                 "opened_at": int(time.time() * 1000),
+                "available_balance": f"{available_balance:.2f}",
             }
             state.pending_entry_until_ms = self._now_ms() + int(PRIVATE_POSITION_ENTRY_DEBOUNCE_SECONDS * 1000)
             self._save_active_trade_state_locked()
@@ -3481,6 +3523,7 @@ class Bot:
                 "order_link_id": order_link_id,
                 "risk_at_sl": f"{expected_sl_loss:.2f}",
                 "exit_style": exit_style,
+                "available_balance": f"{available_balance:.2f}",
                 "order_request": dict(order_kwargs),
             },
         )
