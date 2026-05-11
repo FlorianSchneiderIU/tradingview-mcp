@@ -1467,6 +1467,7 @@ class Bot:
             signal_time=sig.get("entry_time"),
             feature_columns=sig.get("feature_columns"),
             feature_snapshot=sig.get("feature_snapshot"),
+            market_snapshot=sig.get("market_snapshot"),
             extra=extra or {},
         )
 
@@ -2746,7 +2747,21 @@ class Bot:
             return f"Session ORB {session} session blocked on UTC weekend ({entry_time.date()})"
         return None
 
+    def _fetch_market_snapshot(self, symbol: str) -> dict:
+        """Fetch full ticker info for a symbol from Bybit. Returns empty dict on failure."""
+        try:
+            resp = self._http.get_tickers(category="linear", symbol=symbol)
+            items = resp.get("result", {}).get("list", [])
+            if items:
+                return dict(items[0])
+        except Exception as exc:
+            log.debug(f"[{symbol}] market snapshot fetch failed: {exc}")
+        return {}
+
     def _submit_signal(self, state: SymbolState, sig: dict) -> None:
+        market_snapshot = self._fetch_market_snapshot(state.symbol)
+        if market_snapshot:
+            sig["market_snapshot"] = market_snapshot
         reject_reason: str | None = None
         stop_distance_reason = self._stop_distance_reject_reason(sig)
         if stop_distance_reason:
