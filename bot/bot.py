@@ -370,8 +370,14 @@ def get_instrument_info(http_client: HTTP, symbol: str) -> dict:
     }
 
 
-def qty_to_str(value: float) -> str:
-    text = f"{value:.12f}".rstrip("0").rstrip(".")
+def qty_to_str(value: float, step: float = 0.0) -> str:
+    if step > 0:
+        precision = max(0, round(-math.log10(step)))
+        text = f"{value:.{precision}f}"
+    else:
+        # Fall back: format with enough digits then strip trailing zeros,
+        # but round first to 8 significant decimals to avoid fp noise.
+        text = f"{round(value, 8):.8f}".rstrip("0").rstrip(".")
     return text if text else "0"
 
 
@@ -2988,7 +2994,7 @@ class Bot:
             symbol      = sym,
             side        = side,
             orderType   = "Market",
-            qty         = qty_to_str(qty),
+            qty         = qty_to_str(qty, q_step),
             stopLoss    = str(sl_price),
             slTriggerBy = "LastPrice",
             positionIdx = 0,
