@@ -396,6 +396,7 @@ class SymbolState:
         self.pending_entry_until_ms: int = 0
         self.use_dt          = bool(cfg.get("use_dt", False))
         self.dt_model        = None
+        self.dt_meta: dict[str, object] = {}
         self.dt_threshold: float = 0.55
         self._lock           = threading.Lock()
 
@@ -715,6 +716,8 @@ class Bot:
         self._last_daily_heartbeat_key = ""
         self._last_protection_audit_ts = 0.0
         self._last_open_order_audit_ts = 0.0
+        self._oi_history: dict[str, deque[dict]] = {}
+        self._funding_history: dict[str, deque[dict]] = {}
         self._load_risk_state()
         self._load_heartbeat_state()
 
@@ -1158,6 +1161,24 @@ class Bot:
 
                 price = self._fill_price(order)
                 qty = self._fill_qty(order)
+                fill_price_f = self._to_float(price)
+                fill_qty_f = self._to_float(qty)
+                expected_entry = self._to_float(active_trade.get("entry"))
+                slippage_abs = None
+                slippage_bps = None
+                if fill_price_f is not None and expected_entry not in (None, 0.0):
+                    slippage_abs = fill_price_f - expected_entry
+                    slippage_bps = (slippage_abs / expected_entry) * 1e4
+                fill_notional = (
+                    fill_price_f * fill_qty_f
+                    if (fill_price_f is not None and fill_qty_f is not None)
+                    else None
+                )
+                est_fill_fee = (fill_notional * TAKER_FEE_RATE) if fill_notional is not None else None
+                fill_time_ms = int(self._to_float(order.get("updatedTime")) or 0)
+                opened_at_ms = int(self._to_float(active_trade.get("opened_at")) or 0)
+                time_to_fill_ms = (fill_time_ms - opened_at_ms) if (fill_time_ms > 0 and opened_at_ms > 0) else None
+                time_in_trade_ms = time_to_fill_ms if is_exit else None
                 log.info(
                     f"[{symbol}] {event}: side={side or '-'} price={TelegramNotifier._fmt(price)} "
                     f"qty={TelegramNotifier._fmt(qty)} stop_type={stop_type or '-'} "
@@ -1200,6 +1221,14 @@ class Bot:
                     order_type=order.get("orderType"),
                     closed_pnl=order.get("closedPnl"),
                     fill_time_ms=order.get("updatedTime"),
+                    expected_entry=active_trade.get("entry"),
+                    slippage_abs=slippage_abs,
+                    slippage_bps=slippage_bps,
+                    fill_notional=fill_notional,
+                    estimated_fill_fee=est_fill_fee,
+                    time_to_fill_ms=time_to_fill_ms,
+                    time_in_trade_ms=time_in_trade_ms,
+                    order_raw=order,
                     exit_reason=exit_reason,
                     create_type=order.get("createType"),
                     trigger_by=order.get("triggerBy"),
@@ -1468,8 +1497,364 @@ class Bot:
             feature_columns=sig.get("feature_columns"),
             feature_snapshot=sig.get("feature_snapshot"),
             market_snapshot=sig.get("market_snapshot"),
+            market_context=sig.get("market_context"),
+            order_request=sig.get("order_request"),
+            order_error=sig.get("order_error"),
             extra=extra or {},
         )
+
+    @staticmethod
+    def _to_float(value: object) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(out):
+            return None
+        return out
+
+    @staticmethod
+    def _zscore(value: float | None, history_values: list[float]) -> float | None:
+        if value is None or len(history_values) < 5:
+            return None
+        arr = np.asarray(history_values, dtype=np.float64)
+        if arr.size < 5:
+            return None
+        std = float(np.std(arr))
+        if std <= 0 or not math.isfinite(std):
+            return None
+        mean = float(np.mean(arr))
+        z = (value - mean) / std
+        return float(z) if math.isfinite(z) else None
+
+    def _extract_response_list(self, resp: dict) -> list[dict]:
+        items = resp.get("result", {}).get("list", []) if isinstance(resp, dict) else []
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        return []
+
+    def _build_regime_context(self, state: SymbolState, sig: dict) -> dict:
+        bars = state.snapshot()
+        if len(bars) < max(ATR_LEN + 5, VOL_WIN + 5, ATR_PCTILE_WIN + 5):
+            return {}
+        try:
+            c = np.array([b["close"] for b in bars], dtype=np.float64)
+            h = np.array([b["high"] for b in bars], dtype=np.float64)
+            l = np.array([b["low"] for b in bars], dtype=np.float64)
+            v = np.array([b["volume"] for b in bars], dtype=np.float64)
+            atr = ind_atr(h, l, c, ATR_LEN)
+            atr_last = float(atr[-1]) if len(atr) else float("nan")
+            atr_pctile = atr_pctile_last(atr, ATR_PCTILE_WIN)
+            vol_ratio = vol_ratio_last(v, VOL_WIN)
+
+            rets = np.diff(np.log(np.maximum(c, 1e-12)))
+            rv_20 = float(np.std(rets[-20:])) if len(rets) >= 20 else float("nan")
+            rv_96 = float(np.std(rets[-96:])) if len(rets) >= 96 else float("nan")
+            vol_window = v[-200:] if len(v) >= 200 else v
+            vol_pct = float(np.mean(vol_window <= v[-1])) if len(vol_window) else float("nan")
+
+            session = str(sig.get("session", "")).strip().lower()
+            entry_time = datetime.now(timezone.utc)
+            raw_time = sig.get("entry_time")
+            if raw_time:
+                try:
+                    text = str(raw_time).replace("Z", "+00:00")
+                    parsed = datetime.fromisoformat(text)
+                    entry_time = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                    entry_time = entry_time.astimezone(timezone.utc)
+                except (TypeError, ValueError):
+                    pass
+
+            session_ranges = {
+                "asia": (0, 8),
+                "london": (7, 15),
+                "newyork": (13, 21),
+                "ny": (13, 21),
+            }
+            minutes_to_session_open = None
+            minutes_to_session_close = None
+            if session in session_ranges:
+                start_h, end_h = session_ranges[session]
+                now_min = entry_time.hour * 60 + entry_time.minute
+                start_min = start_h * 60
+                end_min = end_h * 60
+                if now_min < start_min:
+                    minutes_to_session_open = start_min - now_min
+                    minutes_to_session_close = end_min - now_min
+                elif now_min <= end_min:
+                    minutes_to_session_open = 0
+                    minutes_to_session_close = end_min - now_min
+                else:
+                    minutes_to_session_open = (24 * 60 - now_min) + start_min
+                    minutes_to_session_close = (24 * 60 - now_min) + end_min
+
+            out = {
+                "session_tag": session or "unspecified",
+                "minutes_to_session_open": minutes_to_session_open,
+                "minutes_to_session_close": minutes_to_session_close,
+                "atr": atr_last if math.isfinite(atr_last) else None,
+                "atr_pctile": atr_pctile if math.isfinite(atr_pctile) else None,
+                "volume_ratio": vol_ratio if math.isfinite(vol_ratio) else None,
+                "realized_vol_20": rv_20 if math.isfinite(rv_20) else None,
+                "realized_vol_96": rv_96 if math.isfinite(rv_96) else None,
+                "volume_percentile_200": vol_pct if math.isfinite(vol_pct) else None,
+            }
+            return out
+        except Exception as exc:
+            log.debug(f"[{state.symbol}] regime context build failed: {exc}")
+            return {}
+
+    def _build_provenance_context(self, state: SymbolState, sig: dict) -> dict:
+        return {
+            "bot_version": "4.3",
+            "strategy": sig.get("strategy"),
+            "strategy_variant": sig.get("variant"),
+            "symbol": state.symbol,
+            "timeframe": TIMEFRAME,
+            "dt_enabled": state.use_dt,
+            "dt_threshold": state.dt_threshold,
+            "dt_meta": dict(state.dt_meta),
+            "feature_schema": list(FEATURE_NAMES),
+            "model_dirs": {
+                "dt": MODELS_DIR,
+                "turtle": TURTLE_MODELS_DIR,
+                "session_orb": SESSION_ORB_MODELS_DIR,
+            },
+            "runtime": {
+                "bybit_demo": DEMO,
+                "public_ws_demo": PUBLIC_WS_DEMO,
+                "private_ws_demo": PRIVATE_WS_DEMO,
+            },
+            "build": {
+                "git_commit": os.environ.get("GIT_COMMIT") or os.environ.get("COMMIT_SHA"),
+                "image_tag": os.environ.get("IMAGE_TAG") or os.environ.get("DOCKER_IMAGE_TAG"),
+            },
+        }
+
+    def _fetch_market_context(self, state: SymbolState, sig: dict) -> dict:
+        symbol = state.symbol
+        local_dt = datetime.now(timezone.utc)
+        context: dict[str, object] = {
+            "captured_at_utc": local_dt.isoformat(),
+            "captured_at_ms": int(local_dt.timestamp() * 1000),
+            "symbol": symbol,
+            "strategy": sig.get("strategy"),
+            "direction": sig.get("signal"),
+        }
+
+        try:
+            server_resp = self._http.get_server_time()
+            context["server_time"] = server_resp.get("result") if isinstance(server_resp, dict) else None
+        except Exception as exc:
+            log.debug(f"[{symbol}] server time fetch failed: {exc}")
+
+        ticker = self._fetch_market_snapshot(symbol)
+        context["ticker"] = ticker
+
+        mark = self._to_float(ticker.get("markPrice")) if ticker else None
+        index = self._to_float(ticker.get("indexPrice")) if ticker else None
+        basis_pct = ((mark - index) / index) if (mark is not None and index and index != 0) else None
+        context["basis"] = {
+            "mark_price": mark,
+            "index_price": index,
+            "basis_pct": basis_pct if basis_pct is None or math.isfinite(basis_pct) else None,
+        }
+
+        try:
+            ob_resp = self._http.get_orderbook(category="linear", symbol=symbol, limit=50)
+            ob = ob_resp.get("result", {}) if isinstance(ob_resp, dict) else {}
+            bids_raw = ob.get("b", []) if isinstance(ob, dict) else []
+            asks_raw = ob.get("a", []) if isinstance(ob, dict) else []
+            bids = [entry for entry in bids_raw if isinstance(entry, (list, tuple)) and len(entry) >= 2]
+            asks = [entry for entry in asks_raw if isinstance(entry, (list, tuple)) and len(entry) >= 2]
+            best_bid = self._to_float(bids[0][0]) if bids else None
+            best_ask = self._to_float(asks[0][0]) if asks else None
+            spread = (best_ask - best_bid) if (best_ask is not None and best_bid is not None) else None
+            mid = ((best_ask + best_bid) / 2.0) if (best_ask is not None and best_bid is not None) else None
+            spread_bps = (spread / mid * 1e4) if (spread is not None and mid not in (None, 0)) else None
+            bid_notional_top10 = 0.0
+            ask_notional_top10 = 0.0
+            for entry in bids[:10]:
+                p = self._to_float(entry[0])
+                q = self._to_float(entry[1])
+                if p is not None and q is not None:
+                    bid_notional_top10 += p * q
+            for entry in asks[:10]:
+                p = self._to_float(entry[0])
+                q = self._to_float(entry[1])
+                if p is not None and q is not None:
+                    ask_notional_top10 += p * q
+            denom = bid_notional_top10 + ask_notional_top10
+            imbalance = ((bid_notional_top10 - ask_notional_top10) / denom) if denom > 0 else None
+            context["orderbook"] = {
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "spread": spread,
+                "spread_bps": spread_bps,
+                "bid_notional_top10": bid_notional_top10,
+                "ask_notional_top10": ask_notional_top10,
+                "imbalance_top10": imbalance,
+                "raw": ob,
+            }
+        except Exception as exc:
+            log.debug(f"[{symbol}] orderbook fetch failed: {exc}")
+
+        try:
+            trades_resp = self._http.get_public_trade_history(category="linear", symbol=symbol, limit=200)
+            trades = self._extract_response_list(trades_resp)
+            now_ms = int(local_dt.timestamp() * 1000)
+            buy_notional = 0.0
+            sell_notional = 0.0
+            buy_qty = 0.0
+            sell_qty = 0.0
+            count = 0
+            for trade in trades:
+                ts = int(self._to_float(trade.get("time")) or self._to_float(trade.get("T")) or 0)
+                if ts <= 0 or now_ms - ts > 60_000:
+                    continue
+                side = str(trade.get("side", "")).lower()
+                price = self._to_float(trade.get("price") or trade.get("p"))
+                qty = self._to_float(trade.get("size") or trade.get("v"))
+                if price is None or qty is None:
+                    continue
+                count += 1
+                if side == "buy":
+                    buy_notional += price * qty
+                    buy_qty += qty
+                elif side == "sell":
+                    sell_notional += price * qty
+                    sell_qty += qty
+            denom = buy_notional + sell_notional
+            imbalance = ((buy_notional - sell_notional) / denom) if denom > 0 else None
+            context["trade_flow_60s"] = {
+                "trade_count": count,
+                "buy_notional": buy_notional,
+                "sell_notional": sell_notional,
+                "buy_qty": buy_qty,
+                "sell_qty": sell_qty,
+                "notional_imbalance": imbalance,
+                "raw": trades[:100],
+            }
+        except Exception as exc:
+            log.debug(f"[{symbol}] public trade history fetch failed: {exc}")
+
+        oi_current = self._to_float(ticker.get("openInterest")) if ticker else None
+        oi_history: list[dict] = []
+        try:
+            oi_resp = self._http.get_open_interest(
+                category="linear",
+                symbol=symbol,
+                intervalTime="5min",
+                limit=24,
+            )
+            oi_rows = self._extract_response_list(oi_resp)
+            for row in oi_rows:
+                ts = int(self._to_float(row.get("timestamp")) or 0)
+                oi = self._to_float(row.get("openInterest"))
+                if ts > 0 and oi is not None:
+                    oi_history.append({"ts": ts, "open_interest": oi})
+            oi_history.sort(key=lambda item: item["ts"])
+        except Exception as exc:
+            log.debug(f"[{symbol}] open interest history fetch failed: {exc}")
+
+        if oi_current is None and oi_history:
+            oi_current = oi_history[-1]["open_interest"]
+
+        if symbol not in self._oi_history:
+            self._oi_history[symbol] = deque(maxlen=512)
+        for row in oi_history:
+            if not self._oi_history[symbol] or self._oi_history[symbol][-1].get("ts") != row.get("ts"):
+                self._oi_history[symbol].append(row)
+
+        oi_series = [self._to_float(item.get("open_interest")) for item in self._oi_history[symbol]]
+        oi_values = [x for x in oi_series if x is not None]
+        oi_delta_5m = None
+        oi_delta_15m = None
+        oi_delta_1h = None
+        if oi_current is not None and len(oi_values) >= 2:
+            oi_delta_5m = oi_current - oi_values[-2]
+        if oi_current is not None and len(oi_values) >= 4:
+            oi_delta_15m = oi_current - oi_values[-4]
+        if oi_current is not None and len(oi_values) >= 13:
+            oi_delta_1h = oi_current - oi_values[-13]
+
+        context["open_interest"] = {
+            "current": oi_current,
+            "delta_5m": oi_delta_5m,
+            "delta_15m": oi_delta_15m,
+            "delta_1h": oi_delta_1h,
+            "zscore": self._zscore(oi_current, oi_values[-100:]),
+            "history": list(self._oi_history[symbol])[-120:],
+        }
+
+        funding_current = self._to_float(ticker.get("fundingRate")) if ticker else None
+        funding_history: list[dict] = []
+        try:
+            funding_resp = self._http.get_funding_rate_history(category="linear", symbol=symbol, limit=50)
+            funding_rows = self._extract_response_list(funding_resp)
+            for row in funding_rows:
+                ts = int(self._to_float(row.get("fundingRateTimestamp")) or self._to_float(row.get("fundingRateTs")) or 0)
+                rate = self._to_float(row.get("fundingRate"))
+                if ts > 0 and rate is not None:
+                    funding_history.append({"ts": ts, "funding_rate": rate})
+            funding_history.sort(key=lambda item: item["ts"])
+        except Exception as exc:
+            log.debug(f"[{symbol}] funding history fetch failed: {exc}")
+
+        if symbol not in self._funding_history:
+            self._funding_history[symbol] = deque(maxlen=512)
+        for row in funding_history:
+            if not self._funding_history[symbol] or self._funding_history[symbol][-1].get("ts") != row.get("ts"):
+                self._funding_history[symbol].append(row)
+
+        funding_series = [self._to_float(item.get("funding_rate")) for item in self._funding_history[symbol]]
+        funding_values = [x for x in funding_series if x is not None]
+        if funding_current is None and funding_values:
+            funding_current = funding_values[-1]
+
+        next_funding_ms = int(self._to_float(ticker.get("nextFundingTime")) or 0) if ticker else 0
+        now_ms = int(local_dt.timestamp() * 1000)
+        mins_to_next_funding = ((next_funding_ms - now_ms) / 60000.0) if next_funding_ms > 0 else None
+        context["funding"] = {
+            "current": funding_current,
+            "next_funding_time_ms": next_funding_ms if next_funding_ms > 0 else None,
+            "minutes_to_next_funding": mins_to_next_funding,
+            "zscore": self._zscore(funding_current, funding_values[-100:]),
+            "history": list(self._funding_history[symbol])[-120:],
+        }
+
+        context["regime"] = self._build_regime_context(state, sig)
+        entry_f = self._to_float(sig.get("entry"))
+        sl_f = self._to_float(sig.get("sl"))
+        tp_f = self._to_float(sig.get("tp1", sig.get("target")))
+        tick = self._to_float(state.info.get("tick_size"))
+        stop_ticks = None
+        target_ticks = None
+        if entry_f is not None and sl_f is not None and tick and tick > 0:
+            stop_ticks = abs(entry_f - sl_f) / tick
+        if entry_f is not None and tp_f is not None and tick and tick > 0:
+            target_ticks = abs(tp_f - entry_f) / tick
+        context["execution_plan"] = {
+            "expected_entry": sig.get("entry"),
+            "expected_stop": sig.get("sl"),
+            "expected_target": sig.get("tp1", sig.get("target")),
+            "trail_dist": sig.get("trail_dist"),
+            "tick_size": state.info.get("tick_size"),
+            "stop_distance_ticks": stop_ticks,
+            "target_distance_ticks": target_ticks,
+            "qty_step": state.info.get("qty_step"),
+            "min_qty": state.info.get("min_qty"),
+        }
+        context["instrument_constraints"] = {
+            "qty_step": state.info.get("qty_step"),
+            "min_qty": state.info.get("min_qty"),
+            "tick_size": state.info.get("tick_size"),
+            "min_leverage": state.info.get("min_leverage_raw", state.info.get("min_leverage")),
+            "max_leverage": state.info.get("max_leverage_raw", state.info.get("max_leverage")),
+            "leverage_step": state.info.get("leverage_step_raw", state.info.get("leverage_step")),
+        }
+        context["provenance"] = self._build_provenance_context(state, sig)
+        return context
 
     def _load_heartbeat_state(self) -> None:
         if not os.path.exists(HEARTBEAT_STATE_PATH):
@@ -1670,6 +2055,12 @@ class Bot:
                     saved = pickle.load(fh)
                 state.dt_model     = saved["model"]
                 state.dt_threshold = float(saved["threshold"])
+                state.dt_meta = {
+                    "path": model_path,
+                    "trained_on": saved.get("trained_on"),
+                    "oos_dt_sh": saved.get("oos_dt_sh"),
+                    "threshold": saved.get("threshold"),
+                }
                 log.info(
                     f"  {sym}: DT model loaded  "
                     f"threshold={state.dt_threshold:.2f}  "
@@ -2751,7 +3142,7 @@ class Bot:
         """Fetch full ticker info for a symbol from Bybit. Returns empty dict on failure."""
         try:
             resp = self._http.get_tickers(category="linear", symbol=symbol)
-            items = resp.get("result", {}).get("list", [])
+            items = self._extract_response_list(resp)
             if items:
                 return dict(items[0])
         except Exception as exc:
@@ -2759,8 +3150,10 @@ class Bot:
         return {}
 
     def _submit_signal(self, state: SymbolState, sig: dict) -> None:
-        market_snapshot = self._fetch_market_snapshot(state.symbol)
-        if market_snapshot:
+        market_context = self._fetch_market_context(state, sig)
+        sig["market_context"] = market_context
+        market_snapshot = market_context.get("ticker") if isinstance(market_context, dict) else None
+        if isinstance(market_snapshot, dict) and market_snapshot:
             sig["market_snapshot"] = market_snapshot
         reject_reason: str | None = None
         stop_distance_reason = self._stop_distance_reject_reason(sig)
@@ -3018,10 +3411,17 @@ class Bot:
         if exit_style == "fixed_tp":
             order_kwargs["takeProfit"] = str(tp1_price)
             order_kwargs["tpTriggerBy"] = "LastPrice"
+        sig["order_request"] = dict(order_kwargs)
 
         order_resp = self._http.place_order(**order_kwargs)
         ret_code = order_resp.get("retCode", -1)
         if ret_code != 0:
+            sig["order_error"] = {
+                "retCode": ret_code,
+                "retMsg": order_resp.get("retMsg", "?"),
+                "retExtInfo": order_resp.get("retExtInfo"),
+                "response": order_resp,
+            }
             raise RuntimeError(
                 f"Order rejected (retCode={ret_code}): {order_resp.get('retMsg', '?')}"
             )
@@ -3081,6 +3481,7 @@ class Bot:
                 "order_link_id": order_link_id,
                 "risk_at_sl": f"{expected_sl_loss:.2f}",
                 "exit_style": exit_style,
+                "order_request": dict(order_kwargs),
             },
         )
 
