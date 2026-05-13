@@ -3351,6 +3351,11 @@ class Bot:
                     f"{ret_msg} (retCode={ret_code})"
                 )
             except Exception as exc:
+                exc_msg = str(exc)
+                exc_lower = exc_msg.lower()
+                if "not modified" in exc_lower or "34040" in exc_lower:
+                    log.debug(f"[{sym}] Fixed TP/SL already set  sl={sl_price} tp={tp_price}")
+                    return True
                 log.warning(f"[{sym}] set fixed TP/SL attempt {attempt}/3 failed: {exc}")
             time.sleep(0.8)
 
