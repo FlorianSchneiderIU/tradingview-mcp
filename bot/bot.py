@@ -438,6 +438,13 @@ class SymbolState:
 
 class TelegramNotifier:
     @staticmethod
+    def _redact(value: object, token: str = "") -> str:
+        text = str(value)
+        if token:
+            text = text.replace(token, "<redacted>")
+        return text
+
+    @staticmethod
     def _parse_chat_target(raw: str) -> tuple[str, Optional[int]]:
         text = str(raw or "").strip()
         if not text:
@@ -504,9 +511,13 @@ class TelegramNotifier:
                 timeout=10,
             )
             if resp.status_code >= 400:
-                log.warning(f"[telegram] sendMessage failed status={resp.status_code}: {resp.text[:200]}")
+                log.warning(
+                    "[telegram] sendMessage failed status=%s: %s",
+                    resp.status_code,
+                    self._redact(resp.text[:200], self.token),
+                )
         except Exception as exc:
-            log.warning(f"[telegram] sendMessage failed: {exc}")
+            log.warning("[telegram] sendMessage failed: %s", self._redact(exc, self.token))
 
     def _send_lines(self, *, accepted: bool, lines: list[str]) -> None:
         chat_id = self.accepted_chat_id if accepted else self.rejected_chat_id
