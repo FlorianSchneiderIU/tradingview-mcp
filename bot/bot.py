@@ -72,6 +72,10 @@ Env variables
   SESSION_ORB_SYMBOLS  -- comma-separated symbols for Session ORB models
   SESSION_ORB_MODELS_DIR -- directory containing <symbol>_session_orb.joblib files
   SESSION_ORB_THRESHOLD -- fixed ML threshold override (default 0.50)
+  ENABLE_WOLFE_WAVE   -- enable Wolfe Wave strategy (default false)
+  WOLFE_WAVE_SYMBOLS  -- comma-separated Wolfe symbols (default validated Wolfe set)
+  WOLFE_WAVE_CONFIG_PATH -- JSON config produced by scripts/backtest_wolfe_wave.py
+  WOLFE_WAVE_WARMUP_BARS -- 5m candles retained for Wolfe detection (default 20000)
   LOG_DIR              -- directory for bot.log
   ACTIVE_TRADES_STATE_PATH -- optional JSON path for persisted open-trade metadata
   TRADE_LEDGER_PATH    -- optional JSONL path for signal/fill/risk events
@@ -124,6 +128,13 @@ from session_orb import (
     SessionOrbEngine,
     SessionOrbState,
     load_session_orb_models,
+)
+from wolfe_wave import (
+    DEFAULT_WOLFE_WAVE_SYMBOLS,
+    WOLFE_WAVE_INTERVAL,
+    WolfeWaveEngine,
+    WolfeWaveState,
+    load_wolfe_wave_configs,
 )
 
 # --- Configuration ------------------------------------------------------------
@@ -196,6 +207,11 @@ SESSION_ORB_BLOCK_WEEKEND_SESSIONS = {
     for chunk in os.environ.get("SESSION_ORB_BLOCK_WEEKEND_SESSIONS", "asia,london").split(",")
     if chunk.strip()
 }
+
+ENABLE_WOLFE_WAVE = os.environ.get("ENABLE_WOLFE_WAVE", "false").lower() in ("1", "true", "yes")
+WOLFE_WAVE_SYMBOLS = parse_symbol_list(os.environ.get("WOLFE_WAVE_SYMBOLS") or DEFAULT_WOLFE_WAVE_SYMBOLS)
+WOLFE_WAVE_CONFIG_PATH = os.environ.get("WOLFE_WAVE_CONFIG_PATH", "/app/configs/wolfe_wave_configs.json")
+WOLFE_WAVE_WARMUP_BARS = int(os.environ.get("WOLFE_WAVE_WARMUP_BARS", "20000"))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ACCEPTED_SIGNALS_CHAT_ID = os.environ.get("TELEGRAM_ACCEPTED_SIGNALS_CHAT_ID", "").strip()
@@ -744,9 +760,15 @@ class Bot:
         self._session_orb_engine: Optional[SessionOrbEngine] = None
         self._session_orb_states: dict[str, SessionOrbState] = {}
         self._session_orb_models = {}
+        self._wolfe_wave_engine: Optional[WolfeWaveEngine] = None
+        self._wolfe_wave_states: dict[str, WolfeWaveState] = {}
+        self._wolfe_wave_configs = {}
         self._private_ws = None
         self._notified_order_fill_ids: set[str] = set()
         self._manual_exit_orders: dict[str, dict] = {}
+        self._last_position_sync_snapshot: dict[str, tuple[str, float]] = {}
+        self._position_sync_initialized = False
+        self._rest_exit_fallback_notified_at: dict[str, int] = {}
         self._admin_warning_keys: set[str] = set()
         self._last_daily_heartbeat_key = ""
         self._last_protection_audit_ts = 0.0
@@ -784,9 +806,24 @@ class Bot:
         else:
             log.info("Session ORB disabled")
 
+        if ENABLE_WOLFE_WAVE:
+            self._wolfe_wave_configs = load_wolfe_wave_configs(
+                symbols=WOLFE_WAVE_SYMBOLS,
+                config_path=WOLFE_WAVE_CONFIG_PATH,
+            )
+            self._wolfe_wave_engine = WolfeWaveEngine()
+            log.info(
+                f"Wolfe Wave enabled  symbols={len(self._wolfe_wave_configs)}  "
+                f"warmup_5m={WOLFE_WAVE_WARMUP_BARS} config={WOLFE_WAVE_CONFIG_PATH}"
+            )
+        else:
+            log.info("Wolfe Wave disabled")
+
         for sym in self._turtle_models:
             raw_configs.setdefault(sym, {"enable_mm": False, "sl": 2.0, "tp1": 1.0, "trail": 0.5, "use_dt": False})
         for sym in self._session_orb_models:
+            raw_configs.setdefault(sym, {"enable_mm": False, "sl": 2.0, "tp1": 1.0, "trail": 0.5, "use_dt": False})
+        for sym in self._wolfe_wave_configs:
             raw_configs.setdefault(sym, {"enable_mm": False, "sl": 2.0, "tp1": 1.0, "trail": 0.5, "use_dt": False})
 
         for sym, cfg in raw_configs.items():
@@ -837,6 +874,14 @@ class Bot:
                 self._session_orb_states[sym] = orb_state
                 log.info(f"  {sym}: {len(orb_state.bars)} 5m bars loaded for Session ORB")
 
+            if sym in self._wolfe_wave_configs:
+                wolfe_state = WolfeWaveState(sym, self._wolfe_wave_configs[sym], WOLFE_WAVE_WARMUP_BARS)
+                log.info(f"  {sym}: fetching {WOLFE_WAVE_WARMUP_BARS} warmup 5m bars for Wolfe Wave ...")
+                for bar in fetch_warmup_bars_interval(self._http, sym, interval=WOLFE_WAVE_INTERVAL, n=WOLFE_WAVE_WARMUP_BARS):
+                    wolfe_state.bars.append(bar)
+                self._wolfe_wave_states[sym] = wolfe_state
+                log.info(f"  {sym}: {len(wolfe_state.bars)} 5m bars loaded for Wolfe Wave")
+
         self._load_dt_models()
         self._run_startup_config_linter(raw_configs)
         self._load_active_trade_state()
@@ -860,10 +905,11 @@ class Bot:
                                   callback=self._on_kline)
         turtle_symbols = set(self._turtle_states.keys())
         orb_symbols = set(self._session_orb_states.keys())
-        strategy5_symbols = sorted(turtle_symbols | orb_symbols)
+        wolfe_symbols = set(self._wolfe_wave_states.keys())
+        strategy5_symbols = sorted(turtle_symbols | orb_symbols | wolfe_symbols)
         log.info(
             f"Subscribing to {len(strategy5_symbols)} kline.5 strategy streams "
-            f"(turtle={len(turtle_symbols)}, session_orb={len(orb_symbols)}) ..."
+            f"(turtle={len(turtle_symbols)}, session_orb={len(orb_symbols)}, wolfe={len(wolfe_symbols)}) ..."
         )
         for sym in strategy5_symbols:
             self._ws.kline_stream(interval=5, symbol=sym, callback=self._on_strategy5_kline)
@@ -994,6 +1040,8 @@ class Bot:
             ])
         if ENABLE_SESSION_ORB:
             path_checks.append(("SESSION_ORB_MODELS_DIR", SESSION_ORB_MODELS_DIR, False))
+        if ENABLE_WOLFE_WAVE:
+            path_checks.append(("WOLFE_WAVE_CONFIG_PATH", WOLFE_WAVE_CONFIG_PATH, True))
         for label, path, must_be_file in path_checks:
             exists = os.path.isfile(path) if must_be_file else os.path.isdir(path)
             if not exists:
@@ -1014,10 +1062,13 @@ class Bot:
             warn("Turtle Soup is enabled but no Turtle Soup models were loaded")
         if ENABLE_SESSION_ORB and not self._session_orb_models:
             warn("Session ORB is enabled but no Session ORB models were loaded")
+        if ENABLE_WOLFE_WAVE and not self._wolfe_wave_configs:
+            warn("Wolfe Wave is enabled but no Wolfe configs were loaded")
         if (
             not any(state.mm_enabled for state in self._states.values())
             and not self._turtle_states
             and not self._session_orb_states
+            and not self._wolfe_wave_states
         ):
             error("no active strategy streams are configured")
 
@@ -1030,6 +1081,7 @@ class Bot:
             "MM streams": sum(1 for state in self._states.values() if state.mm_enabled),
             "Turtle models": len(self._turtle_models),
             "Session ORB models": len(self._session_orb_models),
+            "Wolfe configs": len(self._wolfe_wave_configs),
             "Fatal": self._summarize_items(errors),
             "Warnings detail": self._summarize_items(warnings),
         }
@@ -1145,6 +1197,10 @@ class Bot:
                 state.active_trade = None
                 self._save_active_trade_state_locked()
 
+    def _sync_positions_after_delay(self, delay_seconds: float) -> None:
+        time.sleep(max(0.0, delay_seconds))
+        self._sync_positions()
+
     def _on_private_order(self, msg: dict) -> None:
         try:
             for order in self._private_items(msg):
@@ -1163,9 +1219,6 @@ class Bot:
                 )
                 if dedupe_key in self._notified_order_fill_ids:
                     continue
-                self._notified_order_fill_ids.add(dedupe_key)
-                if len(self._notified_order_fill_ids) > 1000:
-                    self._notified_order_fill_ids = set(list(self._notified_order_fill_ids)[-500:])
 
                 manual_exit = self._manual_exit_orders.get(order_id) if order_id else None
                 stop_type = self._clean_stop_order_type(order.get("stopOrderType"))
@@ -1187,6 +1240,18 @@ class Bot:
 
                 state = self._states.get(symbol)
                 active_trade = dict(state.active_trade or {}) if state is not None else {}
+                if is_exit and not active_trade:
+                    fallback_at = self._rest_exit_fallback_notified_at.get(symbol, 0)
+                    if fallback_at and self._now_ms() - fallback_at < 5 * 60 * 1000:
+                        self._notified_order_fill_ids.add(dedupe_key)
+                        log.info(
+                            f"[{symbol}] Late private exit fill suppressed after REST fallback "
+                            f"orderId={order_id or '-'}"
+                        )
+                        continue
+                self._notified_order_fill_ids.add(dedupe_key)
+                if len(self._notified_order_fill_ids) > 1000:
+                    self._notified_order_fill_ids = set(list(self._notified_order_fill_ids)[-500:])
                 side = str(order.get("side", ""))
                 direction = active_trade.get("direction")
                 if not direction and is_exit:
@@ -1317,11 +1382,13 @@ class Bot:
                         state.in_position = False
                         state.position_side = None
                         state.pending_entry_until_ms = 0
-                        if state.active_trade is not None:
-                            state.active_trade = None
-                            self._save_active_trade_state_locked()
                 if was_open and size <= 0:
                     log.info(f"[{symbol}] Private position stream: position is flat")
+                    threading.Thread(
+                        target=self._sync_positions_after_delay,
+                        args=(3.0,),
+                        daemon=True,
+                    ).start()
         except Exception:
             log.exception("Error in private position callback")
 
@@ -1448,6 +1515,8 @@ class Bot:
             return "TS"
         if text.startswith("session_orb"):
             return "ORB"
+        if text.startswith("wolfe"):
+            return "WW"
         if text.startswith("risk"):
             return "RISK"
         return Bot._compact_token(text, max_len=4)
@@ -1654,6 +1723,7 @@ class Bot:
                 "dt": MODELS_DIR,
                 "turtle": TURTLE_MODELS_DIR,
                 "session_orb": SESSION_ORB_MODELS_DIR,
+                "wolfe_config": WOLFE_WAVE_CONFIG_PATH,
             },
             "runtime": {
                 "bybit_demo": DEMO,
@@ -2110,6 +2180,298 @@ class Bot:
 
     # -- Position sync ---------------------------------------------------------
 
+    @staticmethod
+    def _position_snapshot_text(snapshot: dict[str, tuple[str, float]]) -> str:
+        if not snapshot:
+            return "none"
+        return ", ".join(
+            f"{sym} {side or '-'} size={size:g}"
+            for sym, (side, size) in sorted(snapshot.items())
+        )
+
+    def _log_position_sync_changes(
+        self,
+        previous: dict[str, tuple[str, float]],
+        current: dict[str, tuple[str, float]],
+    ) -> None:
+        if not self._position_sync_initialized:
+            for sym, (side, size) in sorted(current.items()):
+                log.info(f"  Synced open position: {sym} {side} size={size:g}")
+            return
+        if previous == current:
+            log.debug(f"Position sync unchanged: {self._position_snapshot_text(current)}")
+            return
+        for sym, (side, size) in sorted(current.items()):
+            old = previous.get(sym)
+            if old is None:
+                log.info(f"  Synced open position: {sym} {side} size={size:g}")
+            elif old != (side, size):
+                old_side, old_size = old
+                log.info(
+                    f"  Synced position changed: {sym} "
+                    f"{old_side} size={old_size:g} -> {side} size={size:g}"
+                )
+        for sym, (side, size) in sorted(previous.items()):
+            if sym not in current:
+                log.info(f"  Synced position closed: {sym} {side} size={size:g}")
+
+    def _order_is_exit_fill(self, order: dict) -> bool:
+        stop_type = self._clean_stop_order_type(order.get("stopOrderType"))
+        descriptor = " ".join(
+            str(order.get(key) or "")
+            for key in ("stopOrderType", "createType", "orderLinkId", "parentOrderLinkId")
+        ).lower()
+        return (
+            bool(stop_type)
+            or self._truthy_field(order.get("reduceOnly"))
+            or self._truthy_field(order.get("closeOnTrigger"))
+            or any(token in descriptor for token in ("takeprofit", "stoploss", "trailing"))
+        )
+
+    @staticmethod
+    def _expected_exit_side(active_trade: dict) -> str:
+        direction = str(active_trade.get("direction") or "").lower()
+        if direction == "long":
+            return "Sell"
+        if direction == "short":
+            return "Buy"
+        return ""
+
+    def _fetch_rest_exit_order(self, symbol: str, active_trade: dict) -> dict:
+        now_ms = self._now_ms()
+        opened_at = int(self._to_float(active_trade.get("opened_at")) or 0)
+        start_ms = max(0, (opened_at or now_ms) - 60_000)
+        end_ms = now_ms + 60_000
+        expected_side = self._expected_exit_side(active_trade)
+        entry_order_id = str(active_trade.get("entry_order_id") or "")
+
+        def row_time(row: dict) -> int:
+            return int(self._to_float(row.get("updatedTime") or row.get("createdTime")) or 0)
+
+        order: dict = {}
+        try:
+            resp = self._http.get_order_history(
+                category="linear",
+                symbol=symbol,
+                startTime=start_ms,
+                endTime=end_ms,
+                limit=20,
+            )
+            candidates: list[dict] = []
+            for row in self._extract_response_list(resp):
+                if str(row.get("orderStatus") or "").lower() != "filled":
+                    continue
+                if entry_order_id and str(row.get("orderId") or "") == entry_order_id:
+                    continue
+                if expected_side and str(row.get("side") or "") != expected_side:
+                    continue
+                if opened_at and row_time(row) and row_time(row) < opened_at - 60_000:
+                    continue
+                if not self._order_is_exit_fill(row):
+                    continue
+                candidates.append(row)
+            if candidates:
+                order = dict(max(candidates, key=row_time))
+        except Exception as exc:
+            log.warning(f"[{symbol}] REST exit order lookup failed: {exc}")
+
+        pnl_row: dict = {}
+        try:
+            resp = self._http.get_closed_pnl(
+                category="linear",
+                symbol=symbol,
+                startTime=start_ms,
+                endTime=end_ms,
+                limit=20,
+            )
+            pnl_candidates = [
+                row for row in self._extract_response_list(resp)
+                if not opened_at or row_time(row) >= opened_at - 60_000
+            ]
+            order_id = str(order.get("orderId") or "")
+            if order_id:
+                for row in pnl_candidates:
+                    if str(row.get("orderId") or "") == order_id:
+                        pnl_row = row
+                        break
+            if not pnl_row and pnl_candidates:
+                pnl_row = max(pnl_candidates, key=row_time)
+        except Exception as exc:
+            log.warning(f"[{symbol}] REST closed-PnL lookup failed: {exc}")
+
+        if pnl_row:
+            order = dict(order)
+            for target, sources in {
+                "orderId": ("orderId",),
+                "closedPnl": ("closedPnl",),
+                "avgPrice": ("avgExitPrice", "avgPrice"),
+                "cumExecQty": ("closedSize", "qty"),
+                "qty": ("closedSize", "qty"),
+                "side": ("side",),
+                "updatedTime": ("updatedTime", "createdTime"),
+                "orderType": ("orderType",),
+            }.items():
+                if order.get(target) not in (None, "", "0", 0):
+                    continue
+                for source in sources:
+                    value = pnl_row.get(source)
+                    if value not in (None, "", "0", 0):
+                        order[target] = value
+                        break
+            order.setdefault("orderStatus", "Filled")
+
+        if not order:
+            order = {
+                "symbol": symbol,
+                "side": expected_side,
+                "orderStatus": "Filled",
+                "orderType": "Market",
+                "qty": active_trade.get("qty"),
+                "updatedTime": str(now_ms),
+            }
+        order.setdefault("category", "linear")
+        order.setdefault("symbol", symbol)
+        if expected_side:
+            order["side"] = expected_side
+        else:
+            order.setdefault("side", expected_side)
+        order.setdefault("orderStatus", "Filled")
+        if not order.get("createType"):
+            order["createType"] = "RESTPositionSync"
+        return order
+
+    def _classify_rest_exit_event(
+        self,
+        order: dict,
+        active_trade: dict,
+        state: SymbolState | None,
+    ) -> str:
+        event = self._classify_fill_event(order, is_exit=True) or "POSITION EXIT FILLED"
+        if event != "POSITION EXIT FILLED":
+            return event
+
+        price = self._to_float(self._fill_price(order))
+        if price is None:
+            return event
+        direction = str(active_trade.get("direction") or "").lower()
+        exit_style = str(active_trade.get("exit_style") or "")
+        sl = self._to_float(active_trade.get("sl"))
+        tp = self._to_float(active_trade.get("tp1"))
+        entry = self._to_float(active_trade.get("entry"))
+        tick = self._to_float((state.info if state is not None else {}).get("tick_size"))
+        tolerance = max((tick or 0.0) * 2.0, 1e-12)
+
+        if direction == "long":
+            if sl is not None and price <= sl + tolerance:
+                return "STOP LOSS FILLED"
+            if tp is not None and price >= tp - tolerance:
+                return "TAKE PROFIT FILLED" if exit_style == "fixed_tp" else "TRAILING STOP FILLED"
+            if entry is not None and price >= entry:
+                return "POSITION EXIT FILLED" if exit_style == "fixed_tp" else "TRAILING STOP FILLED"
+        elif direction == "short":
+            if sl is not None and price >= sl - tolerance:
+                return "STOP LOSS FILLED"
+            if tp is not None and price <= tp + tolerance:
+                return "TAKE PROFIT FILLED" if exit_style == "fixed_tp" else "TRAILING STOP FILLED"
+            if entry is not None and price <= entry:
+                return "POSITION EXIT FILLED" if exit_style == "fixed_tp" else "TRAILING STOP FILLED"
+        return event
+
+    def _notify_rest_synced_exit(
+        self,
+        symbol: str,
+        active_trade: dict,
+        previous_position: tuple[str, float] | None,
+    ) -> None:
+        order = self._fetch_rest_exit_order(symbol, active_trade)
+        state = self._states.get(symbol)
+        event = self._classify_rest_exit_event(order, active_trade, state)
+        order_id = str(order.get("orderId") or "")
+        dedupe_key = order_id or f"rest-flat:{symbol}:{active_trade.get('opened_at')}"
+        if dedupe_key in self._notified_order_fill_ids:
+            return
+        self._notified_order_fill_ids.add(dedupe_key)
+        if len(self._notified_order_fill_ids) > 1000:
+            self._notified_order_fill_ids = set(list(self._notified_order_fill_ids)[-500:])
+        self._rest_exit_fallback_notified_at[symbol] = self._now_ms()
+
+        side = str(order.get("side") or self._expected_exit_side(active_trade))
+        price = self._fill_price(order)
+        qty = self._fill_qty(order)
+        if qty == "-" and previous_position is not None:
+            qty = previous_position[1]
+        stop_type = self._clean_stop_order_type(order.get("stopOrderType"))
+        direction = active_trade.get("direction")
+        strategy = active_trade.get("strategy")
+        price_f = self._to_float(price)
+        qty_f = self._to_float(qty)
+        expected_entry = self._to_float(active_trade.get("entry"))
+        slippage_abs = None
+        slippage_bps = None
+        if price_f is not None and expected_entry not in (None, 0.0):
+            slippage_abs = price_f - expected_entry
+            slippage_bps = (slippage_abs / expected_entry) * 1e4
+        fill_notional = price_f * qty_f if price_f is not None and qty_f is not None else None
+        fill_time_ms = int(self._to_float(order.get("updatedTime")) or self._now_ms())
+        opened_at_ms = int(self._to_float(active_trade.get("opened_at")) or 0)
+        time_in_trade_ms = (
+            fill_time_ms - opened_at_ms
+            if fill_time_ms > 0 and opened_at_ms > 0
+            else None
+        )
+        extra = {
+            "Source": "REST position sync fallback",
+            "Order link id": order.get("orderLinkId") or order.get("parentOrderLinkId") or "-",
+            "Trigger": order.get("triggerBy", "-"),
+            "Create type": order.get("createType", "-"),
+        }
+        log.warning(
+            f"[{symbol}] {event} inferred from REST position sync: "
+            f"side={side or '-'} price={TelegramNotifier._fmt(price)} qty={TelegramNotifier._fmt(qty)}"
+        )
+        self._telegram.send_fill(
+            symbol=symbol,
+            event=event,
+            side=side,
+            price=price,
+            qty=qty,
+            strategy=strategy,
+            direction=direction,
+            order_id=order_id or None,
+            stop_order_type=stop_type or None,
+            order_type=str(order.get("orderType") or "") or None,
+            closed_pnl=order.get("closedPnl"),
+            updated_time=order.get("updatedTime"),
+            extra=extra,
+        )
+        self._append_ledger_event(
+            "fill",
+            symbol=symbol,
+            event=event,
+            side=side,
+            direction=direction,
+            strategy=strategy,
+            price=price,
+            qty=qty,
+            order_id=order_id or None,
+            order_link_id=order.get("orderLinkId") or order.get("parentOrderLinkId"),
+            stop_order_type=stop_type or None,
+            order_type=order.get("orderType"),
+            closed_pnl=order.get("closedPnl"),
+            fill_time_ms=order.get("updatedTime"),
+            expected_entry=active_trade.get("entry"),
+            slippage_abs=slippage_abs,
+            slippage_bps=slippage_bps,
+            fill_notional=fill_notional,
+            estimated_fill_fee=(fill_notional * TAKER_FEE_RATE) if fill_notional is not None else None,
+            time_to_fill_ms=time_in_trade_ms,
+            time_in_trade_ms=time_in_trade_ms,
+            order_raw=order,
+            exit_reason="rest_position_sync_fallback",
+            create_type=order.get("createType"),
+            trigger_by=order.get("triggerBy"),
+        )
+
     def _sync_positions(self) -> None:
         try:
             resp      = self._http.get_positions(category="linear", settleCoin="USDT")
@@ -2117,30 +2479,49 @@ class Bot:
         except Exception as exc:
             log.error(f"Failed to sync positions: {exc}"); return
 
+        closed_trades: list[tuple[str, dict, tuple[str, float] | None]] = []
         with self._pos_lock:
             self._open_count = 0
             self._cluster_a_count = 0
             open_symbols: set[str] = set()
+            current_snapshot: dict[str, tuple[str, float]] = {}
+            previous_snapshot = dict(self._last_position_sync_snapshot)
             active_state_changed = False
             for st in self._states.values():
                 st.in_position = False; st.position_side = None
             for pos in positions:
-                sym  = pos.get("symbol", ""); size = float(pos.get("size", 0))
+                sym  = pos.get("symbol", "")
+                try:
+                    size = float(pos.get("size", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
                 side = pos.get("side", "")
                 if sym in self._states and size > 0:
                     open_symbols.add(sym)
                     self._states[sym].in_position   = True
                     self._states[sym].position_side = side
+                    current_snapshot[sym] = (side, size)
                     self._open_count += 1
                     if sym in CLUSTER_A:
                         self._cluster_a_count += 1
-                    log.info(f"  Synced open position: {sym} {side} size={size}")
+            self._log_position_sync_changes(previous_snapshot, current_snapshot)
+            self._last_position_sync_snapshot = current_snapshot
             for sym, st in self._states.items():
                 if sym not in open_symbols and st.active_trade is not None:
+                    if self._position_sync_initialized:
+                        closed_trades.append((sym, dict(st.active_trade), previous_snapshot.get(sym)))
                     st.active_trade = None
                     active_state_changed = True
+                    st.pending_entry_until_ms = 0
             if active_state_changed:
                 self._save_active_trade_state_locked()
+            self._position_sync_initialized = True
+
+        for sym, active_trade, previous_position in closed_trades:
+            try:
+                self._notify_rest_synced_exit(sym, active_trade, previous_position)
+            except Exception:
+                log.exception(f"[{sym}] REST exit fallback notification failed")
 
     def _flatten_all_positions(self, reason: str) -> bool:
         """Cancel open orders and market-close all tracked Bybit linear positions."""
@@ -2993,8 +3374,9 @@ class Bot:
             sym = parts[2]
             turtle_state = self._turtle_states.get(sym)
             orb_state = self._session_orb_states.get(sym)
+            wolfe_state = self._wolfe_wave_states.get(sym)
             trade_state = self._states.get(sym)
-            if (turtle_state is None and orb_state is None) or trade_state is None:
+            if (turtle_state is None and orb_state is None and wolfe_state is None) or trade_state is None:
                 return
 
             bar = {
@@ -3009,6 +3391,8 @@ class Bot:
                 turtle_state.push_bar(bar)
             if orb_state is not None:
                 orb_state.push_bar(bar)
+            if wolfe_state is not None:
+                wolfe_state.push_bar(bar)
 
             if turtle_state is not None and self._turtle_engine is not None and not trade_state.in_position:
                 threading.Thread(
@@ -3020,6 +3404,12 @@ class Bot:
                 threading.Thread(
                     target=self._check_session_orb_and_trade,
                     args=(trade_state, orb_state),
+                    daemon=True,
+                ).start()
+            if wolfe_state is not None and self._wolfe_wave_engine is not None and not trade_state.in_position:
+                threading.Thread(
+                    target=self._check_wolfe_wave_and_trade,
+                    args=(trade_state, wolfe_state),
                     daemon=True,
                 ).start()
         except Exception:
@@ -3101,6 +3491,20 @@ class Bot:
             f"[{trade_state.symbol}] SESSION_ORB candidate {sig['signal'].upper()} "
             f"prob={sig.get('prob', float('nan')):.3f} threshold={sig.get('threshold', float('nan')):.2f} "
             f"session={sig.get('session', '-')} or={sig.get('or_minutes', '-')}"
+        )
+        self._submit_signal(trade_state, sig)
+
+    def _check_wolfe_wave_and_trade(self, trade_state: SymbolState, wolfe_state: WolfeWaveState) -> None:
+        if self._wolfe_wave_engine is None:
+            return
+        sig = self._wolfe_wave_engine.detect_signal(wolfe_state)
+        if sig is None:
+            return
+        log.info(
+            f"[{trade_state.symbol}] WOLFE candidate {sig['signal'].upper()} "
+            f"score={sig.get('score', float('nan')):.1f} "
+            f"rr={sig.get('target_rr_planned', float('nan')):.2f} "
+            f"tf={sig.get('pattern_tf', '-')}"
         )
         self._submit_signal(trade_state, sig)
 

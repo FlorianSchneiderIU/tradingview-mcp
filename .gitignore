@@ -29,4 +29,5 @@ scripts/*.err
 scripts/**/*.joblib
 scripts/**/*.csv
 backup-local-5-20260510-154648.bundle
-bot/__pycache__
+bot/__pycache__/
+bot/__pycache__/bot.cpython-314.pyc
