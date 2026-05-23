@@ -99,9 +99,12 @@ def fetch_ohlcv(symbol, timeframe, since_date, exchange):
         if not chunk:
             break
         bars.extend(chunk)
-        if len(chunk) < 1000:
-            break
-        since_ms = chunk[-1][0] + 1
+        next_since = chunk[-1][0] + 1
+        if next_since <= since_ms:
+            break  # no forward progress
+        since_ms = next_since
+        if len(chunk) < 10:
+            break  # genuine end of data (tiny trailing page)
     df = pd.DataFrame(bars, columns=["ts", "open", "high", "low", "close", "volume"])
     df["datetime"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     df = df.set_index("datetime").sort_index()
@@ -445,72 +448,27 @@ def _trade_rows(symbol, variant, fold_id, fold_start_i, ts, trades, sl, tp1, tr)
     return rows
 
 
-def analyze_coin(symbol, df, verbose=False, collect_trades=False):
-    """Sweep + DT for one coin. Returns result dict."""
-    if len(df) < MIN_BARS:
-        return {"symbol": symbol, "error": f"only {len(df)} bars"}
-
-    close  = df["close"].values.astype(np.float64)
-    open_  = df["open"].values.astype(np.float64)
-    high   = df["high"].values.astype(np.float64)
-    low    = df["low"].values.astype(np.float64)
-    volume = df["volume"].values.astype(np.float64)
-    ts     = df.index
-
-    # Indicators
-    atr_st  = compute_atr(high, low, close, ST_ATR_LEN)
-    atr14   = compute_atr(high, low, close, ATR_LEN)
-    ema200  = compute_ema(close, EMA_LEN)
-    sma13   = compute_sma(close, SMA_LEN)
-    atr_pct = compute_rolling_atr_pctile(atr14, ATR_PCTILE_WIN)
-    vol_rat = compute_vol_ratio(volume, VOL_WIN)
-    rsi14   = compute_rsi(close, 14)
-    rsi4h   = compute_rsi_htf(ts, close, "4h", 14)
-
-    sbull, sbear = build_raw_signals(close, open_, sma13, ema200, atr_st)
-    n_bull = int(sbull.sum()); n_bear = int(sbear.sum())
-
-    if n_bull + n_bear < 20:
-        return {"symbol": symbol, "error": "too few signals"}
-
-    folds = generate_wf_folds(ts)
-    if len(folds) < 2:
-        return {"symbol": symbol, "error": "not enough folds"}
-
-    # ------------------------------------------------------------------
-    # STEP 1 — Trail parameter sweep
-    # ------------------------------------------------------------------
-    combos = [(sl, tp1, tr)
-              for sl in SL_MULTS
-              for tp1 in TP1_RS
-              for tr in TRAIL_MULTS]
-
-    combo_results = {}
-    for (sl, tp1, tr) in combos:
-        oos_r_all = []
-        for fold in folds:
-            i0o, i1o = fold["i0o"], fold["i1o"]
-            r_oos, _ = _sim_trail(
-                close[i0o:i1o], high[i0o:i1o], low[i0o:i1o],
-                sbull[i0o:i1o], sbear[i0o:i1o],
-                atr14[i0o:i1o], atr_pct[i0o:i1o], vol_rat[i0o:i1o],
-                sl_mult=sl, tp1_r=tp1, trail_mult=tr,
-            )
-            oos_r_all.extend(r_oos.tolist())
-        r_arr = np.array(oos_r_all)
-        m = metrics(r_arr, min_n=5)
-        combo_results[(sl, tp1, tr)] = m
-
-    # Pick winner by OOS Sharpe
-    best_combo = max(combo_results, key=lambda k: combo_results[k]["sharpe"])
-    best_sl, best_tp1, best_tr = best_combo
-    best_trail_m = combo_results[best_combo]
-
-    # Count positive folds for best trail config
+# ---------------------------------------------------------------------------
+# Fold evaluation helper (trail + DT) — used for both sel and test folds
+# ---------------------------------------------------------------------------
+def _run_folds_dt(
+    folds_list,
+    close, high, low, open_, volume, ts,
+    atr14, atr_pct, vol_rat,
+    ema200, sma13,
+    sbull, sbear,
+    rsi14, rsi4h,
+    best_sl, best_tp1, best_tr,
+    symbol="", collect_trades=False,
+):
+    """Evaluate trail + DT filter on *folds_list* using a fixed best combo.
+    Returns (trail_m, trail_pos_str, dt_m, dt_pos_str, trade_rows).
+    """
+    # ── Trail pos count ──────────────────────────────────────────────────────
     trail_pos_folds = 0
     trail_oos_r = []
     trade_rows = []
-    for fold in folds:
+    for fold in folds_list:
         i0o, i1o = fold["i0o"], fold["i1o"]
         r_oos, td_oos = _sim_trail(
             close[i0o:i1o], high[i0o:i1o], low[i0o:i1o],
@@ -523,30 +481,12 @@ def analyze_coin(symbol, df, verbose=False, collect_trades=False):
             trade_rows.extend(_trade_rows(symbol, "trail", fold["fold_id"], i0o, ts, td_oos, best_sl, best_tp1, best_tr))
         if len(r_oos) > 0 and metrics(r_oos)["sharpe"] > 0:
             trail_pos_folds += 1
-
     trail_total_m = metrics(np.array(trail_oos_r), min_n=5)
 
-    if not ML_OK:
-        return {
-            "symbol": symbol,
-            "n_bull": n_bull, "n_bear": n_bear,
-            "best_sl": best_sl, "best_tp1": best_tp1, "best_tr": best_tr,
-            "trail_sh": trail_total_m["sharpe"],
-            "trail_r":  trail_total_m["total_r"],
-            "trail_win": trail_total_m["win_rate"],
-            "trail_pf":  trail_total_m["pf"],
-            "trail_n":   trail_total_m["n"],
-            "trail_pos": f"{trail_pos_folds}/{len(folds)}",
-            "dt_sh": None, "dt_r": None, "dt_win": None, "dt_pf": None,
-            "dt_n": None, "dt_pos": None,
-        }
-
-    # ------------------------------------------------------------------
-    # STEP 2 — Per-fold DT filter with best trail params
-    # ------------------------------------------------------------------
-    dt_oos_r = []; dt_pos_folds = 0
-
-    for fold in folds:
+    # ── DT per-fold ──────────────────────────────────────────────────────────
+    dt_oos_r = []
+    dt_pos_folds = 0
+    for fold in folds_list:
         i0t, i1t = fold["i0t"], fold["i1t"]
         i0o, i1o = fold["i0o"], fold["i1o"]
 
@@ -671,6 +611,151 @@ def analyze_coin(symbol, df, verbose=False, collect_trades=False):
             dt_pos_folds += 1
 
     dt_total_m = metrics(np.array(dt_oos_r), min_n=3)
+    n_f = len(folds_list)
+    return (
+        trail_total_m, f"{trail_pos_folds}/{n_f}",
+        dt_total_m, f"{dt_pos_folds}/{n_f}",
+        trade_rows,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-coin analysis
+# ---------------------------------------------------------------------------
+def analyze_coin(symbol, df, verbose=False, collect_trades=False, lockout=0):
+    """Sweep + DT for one coin. Returns result dict."""
+    if len(df) < MIN_BARS:
+        return {"symbol": symbol, "error": f"only {len(df)} bars"}
+
+    close  = df["close"].values.astype(np.float64)
+    open_  = df["open"].values.astype(np.float64)
+    high   = df["high"].values.astype(np.float64)
+    low    = df["low"].values.astype(np.float64)
+    volume = df["volume"].values.astype(np.float64)
+    ts     = df.index
+
+    # Indicators
+    atr_st  = compute_atr(high, low, close, ST_ATR_LEN)
+    atr14   = compute_atr(high, low, close, ATR_LEN)
+    ema200  = compute_ema(close, EMA_LEN)
+    sma13   = compute_sma(close, SMA_LEN)
+    atr_pct = compute_rolling_atr_pctile(atr14, ATR_PCTILE_WIN)
+    vol_rat = compute_vol_ratio(volume, VOL_WIN)
+    rsi14   = compute_rsi(close, 14)
+    rsi4h   = compute_rsi_htf(ts, close, "4h", 14)
+
+    sbull, sbear = build_raw_signals(close, open_, sma13, ema200, atr_st)
+    n_bull = int(sbull.sum()); n_bear = int(sbear.sum())
+
+    if n_bull + n_bear < 20:
+        return {"symbol": symbol, "error": "too few signals"}
+
+    folds = generate_wf_folds(ts)
+    if len(folds) < 2:
+        return {"symbol": symbol, "error": "not enough folds"}
+
+    n_lockout = min(lockout, max(0, len(folds) - 1))
+    sel_folds = folds[:-n_lockout] if n_lockout > 0 else folds
+    test_folds = folds[-n_lockout:] if n_lockout > 0 else []
+    if not sel_folds:
+        return {"symbol": symbol, "error": "no selection folds after lockout"}
+
+    # ------------------------------------------------------------------
+    # STEP 1 — Trail parameter sweep (on selection folds only)
+    # ------------------------------------------------------------------
+    combos = [(sl, tp1, tr)
+              for sl in SL_MULTS
+              for tp1 in TP1_RS
+              for tr in TRAIL_MULTS]
+
+    combo_results = {}
+    for (sl, tp1, tr) in combos:
+        oos_r_all = []
+        for fold in sel_folds:
+            i0o, i1o = fold["i0o"], fold["i1o"]
+            r_oos, _ = _sim_trail(
+                close[i0o:i1o], high[i0o:i1o], low[i0o:i1o],
+                sbull[i0o:i1o], sbear[i0o:i1o],
+                atr14[i0o:i1o], atr_pct[i0o:i1o], vol_rat[i0o:i1o],
+                sl_mult=sl, tp1_r=tp1, trail_mult=tr,
+            )
+            oos_r_all.extend(r_oos.tolist())
+        r_arr = np.array(oos_r_all)
+        m = metrics(r_arr, min_n=5)
+        combo_results[(sl, tp1, tr)] = m
+
+    # Pick winner by OOS Sharpe
+    best_combo = max(combo_results, key=lambda k: combo_results[k]["sharpe"])
+    best_sl, best_tp1, best_tr = best_combo
+    best_trail_m = combo_results[best_combo]
+
+    # Count positive folds for best trail config (metrics only — used for ML_OK=False early return)
+    trail_pos_folds = 0
+    trail_oos_r = []
+    for fold in sel_folds:
+        i0o, i1o = fold["i0o"], fold["i1o"]
+        r_oos, _ = _sim_trail(
+            close[i0o:i1o], high[i0o:i1o], low[i0o:i1o],
+            sbull[i0o:i1o], sbear[i0o:i1o],
+            atr14[i0o:i1o], atr_pct[i0o:i1o], vol_rat[i0o:i1o],
+            sl_mult=best_sl, tp1_r=best_tp1, trail_mult=best_tr,
+        )
+        trail_oos_r.extend(r_oos.tolist())
+        if len(r_oos) > 0 and metrics(r_oos)["sharpe"] > 0:
+            trail_pos_folds += 1
+
+    trail_total_m = metrics(np.array(trail_oos_r), min_n=5)
+
+    if not ML_OK:
+        return {
+            "symbol": symbol,
+            "n_bull": n_bull, "n_bear": n_bear,
+            "best_sl": best_sl, "best_tp1": best_tp1, "best_tr": best_tr,
+            "trail_sh": trail_total_m["sharpe"],
+            "trail_r":  trail_total_m["total_r"],
+            "trail_win": trail_total_m["win_rate"],
+            "trail_pf":  trail_total_m["pf"],
+            "trail_n":   trail_total_m["n"],
+            "trail_pos": f"{trail_pos_folds}/{len(sel_folds)}",
+            "dt_sh": None, "dt_r": None, "dt_win": None, "dt_pf": None,
+            "dt_n": None, "dt_pos": None,
+            "sel_folds": len(sel_folds), "test_folds": len(test_folds),
+        }
+
+    # ------------------------------------------------------------------
+    # STEP 2 — Evaluate selection folds with DT filter
+    # ------------------------------------------------------------------
+    (trail_total_m, trail_pos_str,
+     dt_total_m, dt_pos_str,
+     trade_rows) = _run_folds_dt(
+        sel_folds,
+        close, high, low, open_, volume, ts,
+        atr14, atr_pct, vol_rat,
+        ema200, sma13,
+        sbull, sbear,
+        rsi14, rsi4h,
+        best_sl, best_tp1, best_tr,
+        symbol=symbol, collect_trades=collect_trades,
+    )
+
+    # ------------------------------------------------------------------
+    # STEP 3 — Evaluate locked-out test folds (blind test)
+    # ------------------------------------------------------------------
+    if test_folds:
+        (test_trail_m, test_trail_pos_str,
+         test_dt_m, test_dt_pos_str, _) = _run_folds_dt(
+            test_folds,
+            close, high, low, open_, volume, ts,
+            atr14, atr_pct, vol_rat,
+            ema200, sma13,
+            sbull, sbear,
+            rsi14, rsi4h,
+            best_sl, best_tp1, best_tr,
+        )
+    else:
+        _no = {"sharpe": None, "total_r": None, "win_rate": None, "pf": None, "n": None}
+        test_trail_m = test_dt_m = _no
+        test_trail_pos_str = test_dt_pos_str = "-"
 
     result = {
         "symbol":   symbol,
@@ -679,18 +764,32 @@ def analyze_coin(symbol, df, verbose=False, collect_trades=False):
         "best_sl":  best_sl,
         "best_tp1": best_tp1,
         "best_tr":  best_tr,
+        "sel_folds":  len(sel_folds),
+        "test_folds": len(test_folds),
         "trail_sh": trail_total_m["sharpe"],
         "trail_r":  trail_total_m["total_r"],
         "trail_win": trail_total_m["win_rate"],
         "trail_pf":  trail_total_m["pf"],
         "trail_n":   trail_total_m["n"],
-        "trail_pos": f"{trail_pos_folds}/{len(folds)}",
+        "trail_pos": trail_pos_str,
         "dt_sh":    dt_total_m["sharpe"],
         "dt_r":     dt_total_m["total_r"],
         "dt_win":   dt_total_m["win_rate"],
         "dt_pf":    dt_total_m["pf"],
         "dt_n":     dt_total_m["n"],
-        "dt_pos":   f"{dt_pos_folds}/{len(folds)}",
+        "dt_pos":   dt_pos_str,
+        "test_trail_sh":  test_trail_m["sharpe"],
+        "test_trail_r":   test_trail_m["total_r"],
+        "test_trail_win": test_trail_m["win_rate"],
+        "test_trail_pf":  test_trail_m["pf"],
+        "test_trail_n":   test_trail_m["n"],
+        "test_trail_pos": test_trail_pos_str,
+        "test_dt_sh":  test_dt_m["sharpe"],
+        "test_dt_r":   test_dt_m["total_r"],
+        "test_dt_win": test_dt_m["win_rate"],
+        "test_dt_pf":  test_dt_m["pf"],
+        "test_dt_n":   test_dt_m["n"],
+        "test_dt_pos": test_dt_pos_str,
     }
     if collect_trades:
         result["_trade_rows"] = trade_rows
@@ -708,6 +807,8 @@ def main():
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--write-trades", action="store_true",
                         help="Write per-trade OOS rows for best trail and DT variants.")
+    parser.add_argument("--lockout", type=int, default=2,
+                        help="Hold out last N folds as blind test (default 2).")
     parser.add_argument("--output-prefix", default=os.path.join(OUT_DIR, "million_moves_v43_multi"),
                         help="Output prefix for result CSVs.")
     args = parser.parse_args()
@@ -715,7 +816,7 @@ def main():
     symbols = [s.strip() for s in args.symbols.split(",")] if args.symbols else DEFAULT_SYMBOLS
 
     print(f"Multi-Coin Leaderboard  |  {len(symbols)} symbols  |  since {args.since}")
-    print(f"Sweep: {len(SL_MULTS)}x{len(TP1_RS)}x{len(TRAIL_MULTS)}={len(SL_MULTS)*len(TP1_RS)*len(TRAIL_MULTS)} combos  |  DT depth={DT_DEPTH} min_leaf={DT_MIN_LEAF}\n")
+    print(f"Sweep: {len(SL_MULTS)}x{len(TP1_RS)}x{len(TRAIL_MULTS)}={len(SL_MULTS)*len(TP1_RS)*len(TRAIL_MULTS)} combos  |  DT depth={DT_DEPTH} min_leaf={DT_MIN_LEAF}  |  lockout={args.lockout} folds\n")
 
     exchange = ccxt.bybit({
         "enableRateLimit": True,
@@ -731,7 +832,7 @@ def main():
         print(f"  {sym:20s} ...", end="", flush=True)
         try:
             df = fetch_ohlcv(to_bybit_symbol(sym), TIMEFRAME, args.since, exchange)
-            res = analyze_coin(sym, df, verbose=args.verbose, collect_trades=args.write_trades)
+            res = analyze_coin(sym, df, verbose=args.verbose, collect_trades=args.write_trades, lockout=args.lockout)
         except Exception as e:
             res = {"symbol": sym, "error": str(e)[:60]}
 
@@ -739,8 +840,11 @@ def main():
         if "error" in res:
             print(f" SKIP ({res['error']})  [{elapsed:.0f}s]")
         else:
+            tst_info = ""
+            if res.get("test_dt_sh") is not None:
+                tst_info = f"  TEST_DT {res['test_dt_sh']:+.3f} ({res['test_dt_pos']})"
             print(f" Trail {res['trail_sh']:+.3f} ({res['trail_pos']})  "
-                  f"DT {res['dt_sh']:+.3f} ({res['dt_pos']})  "
+                  f"DT {res['dt_sh']:+.3f} ({res['dt_pos']}){tst_info}  "
                   f"params sl={res['best_sl']} tp1={res['best_tp1']} tr={res['best_tr']}  "
                   f"[{elapsed:.0f}s]")
         if args.write_trades and "_trade_rows" in res:
@@ -757,16 +861,30 @@ def main():
     print(f"\n{'='*100}")
     print(f"  LEADERBOARD  |  sorted by Trail+DT Sharpe  |  {len(ok)}/{len(results)} coins ok  |  {total_elapsed/60:.1f}min total")
     print(f"{'='*100}")
-    hdr = f"  {'Symbol':<16}  {'Trail_Sh':>8}  {'TPos':>5}  {'Trail_R':>8}  {'TR_Win':>6}  {'TR_PF':>5}  ||  {'DT_Sh':>8}  {'DPos':>5}  {'DT_R':>8}  {'DT_Win':>6}  {'DT_PF':>5}  {'DT_n':>5}  {'Params'}"
+    show_test = args.lockout > 0
+    hdr = (f"  {'Symbol':<16}  {'SEL_Trail':>9}  {'STPos':>5}  "
+           f"{'SEL_DT':>9}  {'SDPos':>5}  {'SDT_R':>7}  {'SDT_PF':>6}")
+    if show_test:
+        hdr += f"  ||  {'TST_DT':>9}  {'TDPos':>5}  {'TDT_R':>7}  {'TDT_PF':>6}"
+    hdr += f"  {'DT_n':>5}  {'Params'}"
     print(hdr)
     print(f"  {'-'*len(hdr.strip())}")
     for r in ok:
         params = f"sl={r['best_sl']} tp1={r['best_tp1']} tr={r['best_tr']}"
-        print(f"  {r['symbol']:<16}  {r['trail_sh']:>+8.3f}  {r['trail_pos']:>5}  "
-              f"{r['trail_r']:>+8.1f}  {r['trail_win']:>6.1%}  {r['trail_pf']:>5.2f}  ||  "
-              f"{r['dt_sh']:>+8.3f}  {r['dt_pos']:>5}  "
-              f"{r['dt_r']:>+8.1f}  {r['dt_win']:>6.1%}  {r['dt_pf']:>5.2f}  "
-              f"{r['dt_n']:>5}  {params}")
+        tst_sh = r.get("test_dt_sh")
+        tst_pos = r.get("test_dt_pos", "-")
+        tst_r = r.get("test_dt_r")
+        tst_pf = r.get("test_dt_pf")
+        row = (f"  {r['symbol']:<16}  {r['trail_sh']:>+9.3f}  {r['trail_pos']:>5}  "
+               f"{r['dt_sh']:>+9.3f}  {r['dt_pos']:>5}  "
+               f"{r['dt_r']:>+7.1f}  {r['dt_pf']:>6.2f}")
+        if show_test:
+            if tst_sh is not None:
+                row += f"  ||  {tst_sh:>+9.3f}  {tst_pos:>5}  {tst_r:>+7.1f}  {tst_pf:>6.2f}"
+            else:
+                row += f"  ||  {'N/A':>9}  {'N/A':>5}  {'N/A':>7}  {'N/A':>6}"
+        row += f"  {r['dt_n']:>5}  {params}"
+        print(row)
     print(f"{'='*100}")
 
     # Save CSV
@@ -782,13 +900,17 @@ def main():
     configs = {}
     for r in ok:
         configs[r["symbol"]] = {
-            "sl":        r["best_sl"],
-            "tp1":       r["best_tp1"],
-            "trail":     r["best_tr"],
-            "trail_sh":  r["trail_sh"],
-            "trail_pos": r["trail_pos"],
-            "dt_sh":     r["dt_sh"],
-            "dt_pos":    r["dt_pos"],
+            "sl":           r["best_sl"],
+            "tp1":          r["best_tp1"],
+            "trail":        r["best_tr"],
+            "trail_sh":     r["trail_sh"],
+            "trail_pos":    r["trail_pos"],
+            "dt_sh":        r["dt_sh"],
+            "dt_pos":       r["dt_pos"],
+            "test_dt_sh":   r.get("test_dt_sh"),
+            "test_dt_pos":  r.get("test_dt_pos"),
+            "sel_folds":    r.get("sel_folds"),
+            "test_folds":   r.get("test_folds"),
         }
     cfg_path = f"{args.output_prefix}_best_configs.json"
     with open(cfg_path, "w") as fh:

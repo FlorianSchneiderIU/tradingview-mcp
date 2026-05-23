@@ -50,6 +50,10 @@ Env variables
                           densely correlated cluster (return corr >= 0.60 across 149/171
                           pairs). TRXUSDT is the only independent coin and is excluded from
                           this limit. Set to MAX_OPEN to disable the cluster guard.
+  TP1_PARTIAL_PCT      -- fraction of position to close at TP1 price (partial take-profit)
+                          before the trailing stop takes over the remainder (default 0.5);
+                          set to 0 to disable partial TP and keep the original full-position
+                          trailing behaviour.
   Leverage caps are fetched per symbol from Bybit. Before each order the bot sets
   leverage dynamically from the intended notional instead of forcing max leverage.
   CONFIGS_PATH         -- path to top20_configs.json
@@ -152,6 +156,7 @@ WS_STALE_SECONDS = int(os.environ.get("WS_STALE_SECONDS", "900"))
 MAX_OPEN     = int(os.environ.get("MAX_OPEN_POSITIONS", "5"))
 MAX_DAILY_DD = float(os.environ.get("MAX_DAILY_DD", "0.05"))
 MAX_WEEKLY_DD = float(os.environ.get("MAX_WEEKLY_DD", "0.0"))
+TP1_PARTIAL_PCT = float(os.environ.get("TP1_PARTIAL_PCT", "0.5"))
 
 # Correlation cluster (from research/correlation_research.py, 16 months of 15m data):
 # 18 of 19 coins form a single densely correlated cluster (149/171 pairs at corr >= 0.60).
@@ -199,8 +204,8 @@ TURTLE_WARMUP_BARS = int(os.environ.get("TURTLE_WARMUP_BARS", "20000"))
 ENABLE_SESSION_ORB = os.environ.get("ENABLE_SESSION_ORB", "false").lower() in ("1", "true", "yes")
 SESSION_ORB_SYMBOLS = parse_symbol_list(os.environ.get("SESSION_ORB_SYMBOLS") or DEFAULT_SESSION_ORB_SYMBOLS)
 SESSION_ORB_MODELS_DIR = os.environ.get("SESSION_ORB_MODELS_DIR", "/app/session_orb_models")
-SESSION_ORB_THRESHOLD_RAW = os.environ.get("SESSION_ORB_THRESHOLD", "0.50").strip()
-SESSION_ORB_THRESHOLD = float(SESSION_ORB_THRESHOLD_RAW) if SESSION_ORB_THRESHOLD_RAW else 0.50
+SESSION_ORB_THRESHOLD_RAW = os.environ.get("SESSION_ORB_THRESHOLD", "").strip()
+SESSION_ORB_THRESHOLD: float | None = float(SESSION_ORB_THRESHOLD_RAW) if SESSION_ORB_THRESHOLD_RAW else None
 SESSION_ORB_WARMUP_BARS = int(os.environ.get("SESSION_ORB_WARMUP_BARS", "20000"))
 SESSION_ORB_BLOCK_WEEKEND_SESSIONS = {
     chunk.strip().lower()
@@ -220,6 +225,9 @@ TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "").strip()
 ENABLE_PRIVATE_ORDER_WS = os.environ.get("ENABLE_PRIVATE_ORDER_WS", "true").lower() in ("1", "true", "yes")
 PRIVATE_WS_DEMO = os.environ.get("BYBIT_PRIVATE_WS_DEMO", str(DEMO).lower()).lower() in ("1", "true", "yes")
 TELEGRAM_NOTIFY_ENTRY_FILLS = os.environ.get("TELEGRAM_NOTIFY_ENTRY_FILLS", "false").lower() in ("1", "true", "yes")
+# When true the standalone fill_notifier container handles all fill TG messages;
+# the main bot keeps the private WS for position management but skips send_fill().
+FILL_NOTIFY_EXTERNAL = os.environ.get("FILL_NOTIFY_EXTERNAL", "false").lower() in ("1", "true", "yes")
 PRIVATE_POSITION_ENTRY_DEBOUNCE_SECONDS = float(os.environ.get("PRIVATE_POSITION_ENTRY_DEBOUNCE_SECONDS", "10"))
 
 TIMEFRAME   = "15"
@@ -509,9 +517,9 @@ class TelegramNotifier:
 
     def _send_to_target(self, *, chat_id: str, thread_id: Optional[int], lines: list[str]) -> None:
         if not self.enabled:
-            return
+            return None
         if not chat_id:
-            return
+            return None
         try:
             payload = {
                 "chat_id": chat_id,
@@ -532,13 +540,16 @@ class TelegramNotifier:
                     resp.status_code,
                     self._redact(resp.text[:200], self.token),
                 )
+                return None
+            return int(resp.json()["result"]["message_id"])
         except Exception as exc:
             log.warning("[telegram] sendMessage failed: %s", self._redact(exc, self.token))
+            return None
 
-    def _send_lines(self, *, accepted: bool, lines: list[str]) -> None:
+    def _send_lines(self, *, accepted: bool, lines: list[str]) -> Optional[int]:
         chat_id = self.accepted_chat_id if accepted else self.rejected_chat_id
         thread_id = self.accepted_thread_id if accepted else self.rejected_thread_id
-        self._send_to_target(chat_id=chat_id, thread_id=thread_id, lines=lines)
+        return self._send_to_target(chat_id=chat_id, thread_id=thread_id, lines=lines)
 
     def _send_admin_lines(self, lines: list[str]) -> None:
         self._send_to_target(
@@ -617,7 +628,7 @@ class TelegramNotifier:
             for key, value in extra.items():
                 lines.append(f"{escape(str(key))}: <code>{escape(str(value))}</code>")
 
-        self._send_lines(accepted=(status == "accepted"), lines=lines)
+        return self._send_lines(accepted=(status == "accepted"), lines=lines)
 
     def send_fill(
         self,
@@ -801,7 +812,7 @@ class Bot:
             self._session_orb_engine = SessionOrbEngine()
             log.info(
                 f"Session ORB enabled  symbols={len(self._session_orb_models)}  "
-                f"warmup_5m={SESSION_ORB_WARMUP_BARS} threshold={SESSION_ORB_THRESHOLD:.2f}"
+                f"warmup_5m={SESSION_ORB_WARMUP_BARS} threshold={SESSION_ORB_THRESHOLD if SESSION_ORB_THRESHOLD is not None else 'per-model'}"
             )
         else:
             log.info("Session ORB disabled")
@@ -1291,21 +1302,22 @@ class Bot:
                 }
                 if exit_reason:
                     extra["Exit reason"] = exit_reason
-                self._telegram.send_fill(
-                    symbol=symbol,
-                    event=event,
-                    side=side,
-                    price=price,
-                    qty=qty,
-                    strategy=strategy,
-                    direction=direction,
-                    order_id=order_id or None,
-                    stop_order_type=stop_type or None,
-                    order_type=str(order.get("orderType") or "") or None,
-                    closed_pnl=order.get("closedPnl"),
-                    updated_time=order.get("updatedTime"),
-                    extra=extra,
-                )
+                if not FILL_NOTIFY_EXTERNAL:
+                    self._telegram.send_fill(
+                        symbol=symbol,
+                        event=event,
+                        side=side,
+                        price=price,
+                        qty=qty,
+                        strategy=strategy,
+                        direction=direction,
+                        order_id=order_id or None,
+                        stop_order_type=stop_type or None,
+                        order_type=str(order.get("orderType") or "") or None,
+                        closed_pnl=order.get("closedPnl"),
+                        updated_time=order.get("updatedTime"),
+                        extra=extra,
+                    )
                 self._append_ledger_event(
                     "fill",
                     symbol=symbol,
@@ -3011,6 +3023,8 @@ class Bot:
                     )
                     trail_dist = self._optional_float(active_trade.get("trail_dist"))
                     active_price = self._optional_float(active_trade.get("tp1"))
+                    tp1_pq_str = active_trade.get("tp1_partial_qty")
+                    q_step_info = float(state.info.get("qty_step", 0.0) or 0.0)
                     if expected_sl is not None:
                         try:
                             kwargs = {
@@ -3024,6 +3038,17 @@ class Bot:
                             if trail_dist is not None and active_price is not None:
                                 kwargs["trailingStop"] = str(trail_dist)
                                 kwargs["activePrice"] = str(active_price)
+                            # Re-apply partial TP if it hasn't fired yet
+                            if (
+                                tp1_pq_str is not None
+                                and active_price is not None
+                                and pos_tp is not None
+                                and abs(pos_tp - active_price) <= tolerance
+                            ):
+                                kwargs["takeProfit"]  = str(active_price)
+                                kwargs["tpTriggerBy"] = "LastPrice"
+                                kwargs["tpSize"]      = qty_to_str(float(tp1_pq_str), q_step_info)
+                                kwargs["tpslMode"]    = "Partial"
                             resp = self._http.set_trading_stop(**kwargs)
                             if resp.get("retCode", -1) != 0:
                                 self._telegram.send_admin_event(
@@ -3822,6 +3847,10 @@ class Bot:
         qty = floor_to_step(raw_qty, q_step)
         if qty < min_q:
             qty = min_q
+        tp1_partial_qty = (
+            floor_to_step(qty * TP1_PARTIAL_PCT, q_step)
+            if TP1_PARTIAL_PCT > 0 else 0.0
+        )
         notional = qty * entry
         expected_price_sl_loss = qty * unit_risk
         expected_fee_loss = qty * fee_risk_per_unit
@@ -3908,6 +3937,7 @@ class Bot:
                 "price_risk_at_sl": f"{expected_price_sl_loss:.2f}",
                 "estimated_fees": f"{expected_fee_loss:.2f}",
                 "exit_style": exit_style,
+                "tp1_partial_qty": qty_to_str(tp1_partial_qty) if tp1_partial_qty >= min_q else None,
                 "entry_order_id": str(order_id),
                 "opened_at": int(time.time() * 1000),
                 "available_balance": f"{available_balance:.2f}",
@@ -3920,7 +3950,7 @@ class Bot:
             "sl": sl_price,
             "tp1": tp1_price,
         }
-        self._telegram.send_signal(
+        tg_message_id = self._telegram.send_signal(
             "accepted",
             symbol=sym,
             sig=notify_sig,
@@ -3936,6 +3966,11 @@ class Bot:
                 "Exit style": exit_style,
             },
         )
+        if tg_message_id is not None:
+            with self._pos_lock:
+                if state.active_trade is not None:
+                    state.active_trade["tg_message_id"] = tg_message_id
+                    self._save_active_trade_state_locked()
         self._record_signal_event(
             "accepted",
             symbol=sym,
@@ -3960,24 +3995,38 @@ class Bot:
 
         time.sleep(0.8)
 
+        use_partial_tp = (tp1_partial_qty >= min_q)
         try:
-            ts_resp = self._http.set_trading_stop(
-                category     = "linear",
-                symbol       = sym,
-                stopLoss     = str(sl_price),
-                slTriggerBy  = "LastPrice",
-                trailingStop = str(trail_dist),
-                activePrice  = str(tp1_price),
-                tpslMode     = "Full",
-                positionIdx  = 0,
-            )
+            ts_kwargs: dict = {
+                "category":    "linear",
+                "symbol":      sym,
+                "stopLoss":    str(sl_price),
+                "slTriggerBy": "LastPrice",
+                "trailingStop": str(trail_dist),
+                "activePrice": str(tp1_price),
+                "tpslMode":    "Full",
+                "positionIdx": 0,
+            }
+            if use_partial_tp:
+                ts_kwargs["takeProfit"]  = str(tp1_price)
+                ts_kwargs["tpTriggerBy"] = "LastPrice"
+                ts_kwargs["tpSize"]      = qty_to_str(tp1_partial_qty, q_step)
+                ts_kwargs["tpslMode"]    = "Partial"
+            ts_resp = self._http.set_trading_stop(**ts_kwargs)
             if ts_resp.get("retCode", -1) != 0:
                 log.warning(f"[{sym}] set_trading_stop: {ts_resp.get('retMsg', '?')}")
             else:
-                log.info(
-                    f"[{sym}] Hard SL/trailing stop set  sl={sl_price}  "
-                    f"trail_dist={trail_dist}  activates_at={tp1_price}"
-                )
+                if use_partial_tp:
+                    log.info(
+                        f"[{sym}] Hard SL/partial-TP/trailing stop set  sl={sl_price}  "
+                        f"tp1_partial={tp1_partial_qty} @ {tp1_price}  "
+                        f"trail_dist={trail_dist}  activates_at={tp1_price}"
+                    )
+                else:
+                    log.info(
+                        f"[{sym}] Hard SL/trailing stop set  sl={sl_price}  "
+                        f"trail_dist={trail_dist}  activates_at={tp1_price}"
+                    )
         except Exception as exc:
             log.warning(f"[{sym}] Failed to set trailing stop: {exc}")
 

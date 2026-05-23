@@ -47,6 +47,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-start", default="2021-09-01")
     parser.add_argument("--train-start", default="2022-04-20")
     parser.add_argument("--split", default="2025-04-20")
+    parser.add_argument(
+        "--val-split",
+        default=None,
+        help=(
+            "Validation period start date (ISO format, e.g. 2024-04-20). "
+            "When set: ML is trained on data before val-split; threshold is selected by "
+            "val-period (val-split → split) performance; split → end is the blind test. "
+            "Omit to use original train-based threshold selection."
+        ),
+    )
     parser.add_argument("--end", default="2026-04-20")
     parser.add_argument("--sessions", default="asia,london,ny")
     parser.add_argument("--or-minutes", default="30,60,90")
@@ -126,6 +136,53 @@ def threshold_choice(table: pd.DataFrame, *, min_train_trades: int) -> pd.Series
     choices["rank_pf"] = choices["train_profit_factor"].replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
     choices["rank_net"] = choices["train_net_r"].astype(float)
     choices["rank_trades"] = choices["train_trades"].astype(int)
+    return choices.sort_values(["rank_pf", "rank_net", "rank_trades"], ascending=[False, False, False]).iloc[0]
+
+
+def _period_metrics_by_threshold(
+    scored: pd.DataFrame,
+    t_start: pd.Timestamp,
+    t_end: pd.Timestamp,
+    thresholds: list[float],
+) -> pd.DataFrame:
+    """Return per-threshold metrics for trades in [t_start, t_end), with session_id dedup."""
+    scored = scored.copy()
+    scored["entry_time"] = pd.to_datetime(scored["entry_time"], utc=True, errors="coerce")
+    if t_start.tzinfo is None:
+        t_start = t_start.tz_localize("UTC")
+    if t_end.tzinfo is None:
+        t_end = t_end.tz_localize("UTC")
+    rows: list[dict] = []
+    for threshold in thresholds:
+        above = scored[scored["ml_prob"] >= threshold]
+        parts = []
+        for _, group in above.groupby("session_id", sort=True):
+            parts.append(group.sort_values("ml_prob", ascending=False).head(1))
+        selected = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=scored.columns)
+        period = selected[(selected["entry_time"] >= t_start) & (selected["entry_time"] < t_end)]
+        m = metrics(period)
+        rows.append(
+            {
+                "threshold": threshold,
+                "val_trades": m["trades"],
+                "val_profit_factor": m["profit_factor"],
+                "val_net_r": m["net_r"],
+                "val_win_rate": m["win_rate"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def threshold_choice_val(table: pd.DataFrame, *, min_val_trades: int) -> pd.Series | None:
+    """Select threshold by validation-period profit factor (used when --val-split is set)."""
+    if table.empty:
+        return None
+    choices = table[table["val_trades"].astype(int) >= int(min_val_trades)].copy()
+    if choices.empty:
+        choices = table.copy()
+    choices["rank_pf"] = choices["val_profit_factor"].replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
+    choices["rank_net"] = choices["val_net_r"].astype(float)
+    choices["rank_trades"] = choices["val_trades"].astype(int)
     return choices.sort_values(["rank_pf", "rank_net", "rank_trades"], ascending=[False, False, False]).iloc[0]
 
 
@@ -334,7 +391,11 @@ def run_symbol_job(params: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame
         candidates["entry_time"] = pd.to_datetime(candidates["entry_time"], utc=True, errors="coerce")
         train_candidates = candidates[candidates["entry_time"] < split]
         oos_candidates = candidates[candidates["entry_time"] >= split]
-        ml_table, scored, ml_cols = train_ml_ranker(candidates, split=split, thresholds=params["thresholds"])
+        # When val_split is set, train ML only on data before val_split so that the
+        # val period (val_split → split) is truly out-of-sample for threshold selection.
+        val_split_ts = pd.Timestamp(parse_utc_datetime(params["val_split"])) if params.get("val_split") else None
+        ml_split = val_split_ts if val_split_ts is not None else split
+        ml_table, scored, ml_cols = train_ml_ranker(candidates, split=ml_split, thresholds=params["thresholds"])
         if ml_table.empty or scored.empty or "ml_prob" not in scored.columns:
             base_row.update(
                 {
@@ -354,8 +415,19 @@ def run_symbol_job(params: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame
             )
             return base_row, ml_table, candidates, pd.DataFrame()
 
+        # Threshold selection: val-based (3-way split) or train-based (original)
         fixed_row = closest_threshold_row(ml_table, params["fixed_threshold"])
-        chosen_row = threshold_choice(ml_table, min_train_trades=params["min_train_trades_for_threshold"])
+        if val_split_ts is not None:
+            val_table = _period_metrics_by_threshold(scored, val_split_ts, split, params["thresholds"])
+            chosen_row = threshold_choice_val(
+                val_table,
+                min_val_trades=max(10, params["min_train_trades_for_threshold"] // 4),
+            )
+            if chosen_row is None:
+                chosen_row = threshold_choice(ml_table, min_train_trades=params["min_train_trades_for_threshold"])
+        else:
+            val_table = None
+            chosen_row = threshold_choice(ml_table, min_train_trades=params["min_train_trades_for_threshold"])
         fixed_threshold = float(fixed_row["threshold"]) if fixed_row is not None else float(params["fixed_threshold"])
         chosen_threshold = float(chosen_row["threshold"]) if chosen_row is not None else fixed_threshold
         fixed_selected = selected_with_tag(scored, threshold=fixed_threshold, split=split, selection="fixed")
@@ -407,6 +479,15 @@ def run_symbol_job(params: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame
             and finite_float(row.get("chosen_oos_net_r")) > float(params["min_oos_net_r"])
             and finite_float(row.get("chosen_train_net_r")) > 0.0
         )
+        # Val-period metrics for the chosen threshold (only present when --val-split is set)
+        if val_table is not None and chosen_row is not None:
+            ct_rows = val_table[val_table["threshold"] == chosen_threshold]
+            if not ct_rows.empty:
+                vr = ct_rows.iloc[0]
+                row["chosen_val_trades"] = int(vr["val_trades"])
+                row["chosen_val_profit_factor"] = float(vr["val_profit_factor"])
+                row["chosen_val_net_r"] = float(vr["val_net_r"])
+                row["chosen_val_win_rate"] = float(vr["val_win_rate"])
         ml_table = ml_table.copy()
         ml_table.insert(0, "symbol", symbol)
         return row, ml_table, candidates, selected
@@ -433,6 +514,7 @@ def params_for_row(row: pd.Series, args: argparse.Namespace, *, train_start: pd.
         "warmup_start": warmup_start,
         "train_start": train_start,
         "split": split,
+        "val_split": str(args.val_split) if getattr(args, "val_split", None) else None,
         "end": end,
         "end_dt": end.to_pydatetime(),
         "sessions": args.sessions,

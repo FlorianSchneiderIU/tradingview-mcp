@@ -473,6 +473,8 @@ def main():
     parser.add_argument("--mode",       default="all",
                         choices=["all", "fixed", "trail", "single", "3tier"])
     parser.add_argument("--top",        type=int, default=30)
+    parser.add_argument("--lockout",    type=int, default=2,
+                        help="Hold out last N folds as blind test (0 = no holdout, default 2)")
     args = parser.parse_args()
 
     t0 = time.time()
@@ -510,22 +512,33 @@ def main():
 
     # ── Folds ─────────────────────────────────────────────────────────────────
     folds = generate_wf_folds(df.index)
-    print(f"  Walk-forward: {len(folds)} folds\n", flush=True)
+    n_lockout = min(args.lockout, max(0, len(folds) - 1))
+    sel_folds  = folds[:-n_lockout] if n_lockout > 0 else folds
+    test_folds = folds[-n_lockout:] if n_lockout > 0 else []
+    print(
+        f"  Walk-forward: {len(folds)} total folds  |  "
+        f"selection: {len(sel_folds)}  |  lockout test: {len(test_folds)}\n",
+        flush=True,
+    )
 
-    # Pre-slice arrays for each OOS fold (avoids repeated indexing)
-    oos_slices = [
-        dict(
-            close=close[f["oos_i0"]:f["oos_i1"]],
-            high=high[f["oos_i0"]:f["oos_i1"]],
-            low=low[f["oos_i0"]:f["oos_i1"]],
-            sbull_raw=sbull_raw[f["oos_i0"]:f["oos_i1"]],
-            sbear_raw=sbear_raw[f["oos_i0"]:f["oos_i1"]],
-            entry_sbull=entry_sbull[f["oos_i0"]:f["oos_i1"]],
-            entry_sbear=entry_sbear[f["oos_i0"]:f["oos_i1"]],
-            atr14=atr14[f["oos_i0"]:f["oos_i1"]],
-        )
-        for f in folds
-    ]
+    # Pre-slice arrays for each fold (avoids repeated indexing)
+    def _make_slices(fold_list):
+        return [
+            dict(
+                close=close[f["oos_i0"]:f["oos_i1"]],
+                high=high[f["oos_i0"]:f["oos_i1"]],
+                low=low[f["oos_i0"]:f["oos_i1"]],
+                sbull_raw=sbull_raw[f["oos_i0"]:f["oos_i1"]],
+                sbear_raw=sbear_raw[f["oos_i0"]:f["oos_i1"]],
+                entry_sbull=entry_sbull[f["oos_i0"]:f["oos_i1"]],
+                entry_sbear=entry_sbear[f["oos_i0"]:f["oos_i1"]],
+                atr14=atr14[f["oos_i0"]:f["oos_i1"]],
+            )
+            for f in fold_list
+        ]
+
+    oos_slices  = _make_slices(sel_folds)
+    test_slices = _make_slices(test_folds)
 
     # ── Build combos ──────────────────────────────────────────────────────────
     combos = []
@@ -555,7 +568,7 @@ def main():
             for tm in TIER3_TMULTS:
                 combos.append(("3tier", sl, tm, None))
 
-    print(f"Running {len(combos)} combos × {len(folds)} folds …", flush=True)
+    print(f"Running {len(combos)} combos × {len(sel_folds)} selection folds …", flush=True)
 
     # ── Run sweep ─────────────────────────────────────────────────────────────
     rows = []
@@ -614,7 +627,7 @@ def main():
 
     SEP = "─" * 100
     print(f"\n{SEP}")
-    print(f"  EXIT PARAMETER SWEEP  |  OOS R-multiples  |  {len(combos)} combos × {len(folds)} folds")
+    print(f"  EXIT PARAMETER SWEEP  |  OOS R-multiples  |  {len(combos)} combos × {len(sel_folds)} selection folds")
     print(SEP)
     hdr = (f"  {'Rank':4s}  {'Label':38s}  {'n':5s}  {'Sharpe':7s}  "
            f"{'TotalR':7s}  {'AvgR':6s}  {'Win%':5s}  {'PF':5s}  {'PosF'}  ")
@@ -628,7 +641,7 @@ def main():
         print(f"  {rank+1:4d}  {m_['label']:38s}  {m_['n']:5d}  "
               f"{m_['sharpe']:+7.4f}  {m_['total_r']:+7.2f}  "
               f"{m_['avg_r']:+6.4f}  {100*m_['win_rate']:5.1f}%  "
-              f"{m_['pf']:5.3f}  {m_['pos_folds']}/{len(folds)}")
+              f"{m_['pf']:5.3f}  {m_['pos_folds']}/{len(sel_folds)}")
 
     # Print baseline reference (3tier, no filter = what we know from prior run)
     ref_idx = df_res[
@@ -640,7 +653,7 @@ def main():
         print(f"\n  REF   {r_['label']:38s}  {r_['n']:5d}  "
               f"{r_['sharpe']:+7.4f}  {r_['total_r']:+7.2f}  "
               f"{r_['avg_r']:+6.4f}  {100*r_['win_rate']:5.1f}%  "
-              f"{r_['pf']:5.3f}  {r_['pos_folds']}/{len(folds)}"
+              f"{r_['pf']:5.3f}  {r_['pos_folds']}/{len(sel_folds)}"
               f"  (rank #{ridx+1})")
 
     print(f"\n  Sim time: {sim_elapsed:.1f}s  |  Total: {time.time()-t0:.1f}s")
@@ -653,7 +666,7 @@ def main():
         if sub.empty: continue
         best = sub.iloc[0]
         print(f"    {mode:6s}  {best['label']:38s}  Sharpe={best['sharpe']:+.4f}  "
-              f"TotalR={best['total_r']:+.2f}  n={best['n']}  {best['pos_folds']}/{len(folds)} folds")
+              f"TotalR={best['total_r']:+.2f}  n={best['n']}  {best['pos_folds']}/{len(sel_folds)} folds")
 
     # ── Heatmap: fixed mode (sl_mult vs tp2_r, best tp1_r per cell) ──────────
     if "fixed" in run_modes:
@@ -677,6 +690,70 @@ def main():
             vals = "  ".join(f"{heat.loc[sl_m, c]:+.3f}" if not pd.isna(heat.loc[sl_m, c])
                              else "  N/A" for c in heat.columns)
             print(f"  {sl_m:4.2f}    {vals}")
+
+    # ── Lockout test (blind evaluation on held-out folds) ───────────────────
+    if test_slices:
+        def _run_on_slices(mode, p1, p2, p3, slices):
+            results = []
+            for sl_ in slices:
+                if mode == "fixed":
+                    r = _sim_fixed(sl_["close"], sl_["high"], sl_["low"],
+                                   sl_["sbull_raw"], sl_["sbear_raw"],
+                                   sl_["entry_sbull"], sl_["entry_sbear"],
+                                   sl_["atr14"], p1, p2, p3)
+                elif mode == "trail":
+                    r = _sim_trail(sl_["close"], sl_["high"], sl_["low"],
+                                   sl_["sbull_raw"], sl_["sbear_raw"],
+                                   sl_["entry_sbull"], sl_["entry_sbear"],
+                                   sl_["atr14"], p1, p2, p3)
+                elif mode == "single":
+                    r = _sim_single(sl_["close"], sl_["high"], sl_["low"],
+                                    sl_["sbull_raw"], sl_["sbear_raw"],
+                                    sl_["entry_sbull"], sl_["entry_sbear"],
+                                    sl_["atr14"], p1, p2)
+                else:  # 3tier
+                    r = _sim_3tier(sl_["close"], sl_["high"], sl_["low"],
+                                   sl_["sbull_raw"], sl_["sbear_raw"],
+                                   sl_["entry_sbull"], sl_["entry_sbear"],
+                                   sl_["atr14"], p1, p2)
+                results.append(r)
+            return results
+
+        print(f"\n{SEP}")
+        print(
+            f"  LOCKOUT TEST — {n_lockout} blind fold(s) — winner selected WITHOUT seeing these"
+        )
+        print(SEP)
+        print(
+            f"  {'Mode':6s}  {'Label':38s}  {'SEL Sharpe':>10s}  │  "
+            f"{'n':>5s}  {'TEST Sharpe':>11s}  {'TotalR':>8s}  {'AvgR':>8s}  PosF"
+        )
+        print(
+            f"  {'------':6s}  {'-'*38}  {'-'*10}  ─  "
+            f"{'-'*5}  {'-'*11}  {'-'*8}  {'-'*8}  {'-'*4}"
+        )
+        for mode in [m for m in ["fixed", "trail", "single", "3tier"] if m in run_modes]:
+            sub = df_res[df_res["mode"] == mode]
+            if sub.empty:
+                continue
+            best = sub.iloc[0]
+            p1_, p2_, p3_ = best["sl_mult"], best["p2"], best["p3"]
+            test_rs = _run_on_slices(mode, p1_, p2_, p3_, test_slices)
+            have_data = [r for r in test_rs if len(r) > 0]
+            all_test_r = np.concatenate(have_data) if have_data else np.array([])
+            if len(all_test_r) > 0:
+                test_m = metrics(all_test_r)
+                pos_f_test = sum(1 for r in test_rs if len(r) > 0 and r.sum() > 0)
+            else:
+                test_m = {"n": 0, "sharpe": float("nan"), "total_r": 0.0, "avg_r": 0.0}
+                pos_f_test = 0
+            print(
+                f"  {mode:6s}  {best['label']:38s}  {best['sharpe']:>+10.4f}  │  "
+                f"{test_m['n']:>5d}  {test_m['sharpe']:>+11.4f}  "
+                f"{test_m['total_r']:>+8.2f}  {test_m['avg_r']:>+8.4f}  "
+                f"{pos_f_test}/{len(test_folds)}"
+            )
+        print()
 
     # ── Save ──────────────────────────────────────────────────────────────────
     out_path = os.path.join(OUT_DIR, "million_moves_v43_sweep_results.csv")

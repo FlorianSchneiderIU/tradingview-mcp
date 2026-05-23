@@ -61,6 +61,34 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # ── Standalone fill notification service ─────────────────────────────────────
+  # Dedicated container that connects to the private Bybit WS and sends
+  # Telegram TP/SL fill messages.  Reads active_trades.json (written by
+  # mm-bot) from the shared logs volume to enrich messages with strategy/
+  # direction context.  Set FILL_NOTIFY_EXTERNAL=true in .env so the main
+  # bot keeps its private WS for position management but skips duplicate
+  # Telegram sends.
+  fill-notifier:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python fill_notifier.py
+    container_name: fill-notifier
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env
+    environment:
+      ACTIVE_TRADES_STATE_PATH: /app/logs/active_trades.json
+      LOG_DIR: /app/logs
+    volumes:
+      # Read-only access to the shared logs dir for active_trades.json
+      - ./bot/logs:/app/logs:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # ── One-off DT training service ─────────────────────────────────────────────
   # Run with: docker compose run --rm mm-train
   # Trains per-coin DT models and writes them to ./bot/models/
