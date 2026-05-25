@@ -5,7 +5,7 @@ Reinforcement-learning execution sidecar for the trading bot.
 The normal bot remains the primary execution path.  This service receives every
 accepted and rejected signal over REST, chooses one continuous action a in
 [0, 1], and optionally opens the same setup on a separate Bybit demo account
-with risk a * RL_DEFAULT_RISK_PCT.
+with risk a * RL_DEFAULT_RISK_USDT.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import queue
 import random
 import signal
 import threading
@@ -67,6 +68,7 @@ TRAINING_EXAMPLES_PATH = os.environ.get(
 )
 PRETRAIN_PATH = os.environ.get("RL_PRETRAIN_PATH", "").strip()
 PRETRAIN_ON_START = env_bool("RL_PRETRAIN_ON_START", False)
+EXECUTION_QUEUE_SIZE = env_int("RL_EXECUTION_QUEUE_SIZE", 2000)
 
 BYBIT_DEMO = env_bool("RL_BYBIT_DEMO", True)
 TRADING_ENABLED = env_bool("RL_TRADING_ENABLED", False)
@@ -75,7 +77,7 @@ API_SECRET = os.environ.get("RL_BYBIT_API_SECRET", "").strip()
 ENABLE_PRIVATE_ORDER_WS = env_bool("RL_ENABLE_PRIVATE_ORDER_WS", True)
 REWARD_POLL_SECONDS = env_float("RL_REWARD_POLL_SECONDS", 30.0)
 
-DEFAULT_RISK_PCT = env_float("RL_DEFAULT_RISK_PCT", 0.001)
+DEFAULT_RISK_USDT = env_float("RL_DEFAULT_RISK_USDT", 100.0)
 MIN_ACTION_TO_TRADE = env_float("RL_MIN_ACTION_TO_TRADE", 0.05)
 INITIAL_ACTION = env_float("RL_INITIAL_ACTION", 0.10)
 EXPLORATION_RATE = env_float("RL_EXPLORATION_RATE", 0.02)
@@ -553,8 +555,11 @@ class RLExecutionService:
         self.claimed_closed_pnl_ids: set[str] = set()
         self.instrument_cache: dict[str, dict[str, Any]] = {}
         self.notified_exit_ids: set[str] = set()
+        self.execution_queue: queue.Queue[str] = queue.Queue(maxsize=max(1, EXECUTION_QUEUE_SIZE))
         self.started_at = now_iso()
         self._load_runtime_state()
+        threading.Thread(target=self._execution_worker, daemon=True, name="rl-execution-worker").start()
+        self._requeue_pending_executions()
 
         if API_KEY and API_SECRET:
             self.http = HTTP(testnet=False, demo=BYBIT_DEMO, api_key=API_KEY, api_secret=API_SECRET)
@@ -571,6 +576,24 @@ class RLExecutionService:
             if updates:
                 self.agent.save(MODEL_PATH)
             log.info("Optional RL pretrain complete  path=%s updates=%d", PRETRAIN_PATH, updates)
+
+    def _requeue_pending_executions(self) -> None:
+        pending: list[str] = []
+        with self.lock:
+            for decision_id, decision in self.decisions.items():
+                if decision.get("executed") or decision.get("completed") or decision.get("skip_reason"):
+                    continue
+                if decision.get("execution_status") in {"queued", "running"}:
+                    decision["execution_status"] = "queued"
+                    pending.append(decision_id)
+        for decision_id in pending:
+            try:
+                self.execution_queue.put_nowait(decision_id)
+            except queue.Full:
+                log.warning("Execution queue full while requeueing pending decision %s", decision_id)
+                break
+        if pending:
+            log.info("Requeued %d pending RL execution decisions", len(pending))
 
     def _load_runtime_state(self) -> None:
         if not os.path.exists(STATE_PATH):
@@ -661,6 +684,7 @@ class RLExecutionService:
                 "has_credentials": bool(API_KEY and API_SECRET),
                 "active_trades": len(self.active_trades),
                 "decisions": len(self.decisions),
+                "execution_queue_depth": self.execution_queue.qsize(),
                 "agent_updates": self.agent.reward_updates,
                 "agent_reward_baseline": self.agent.reward_baseline,
             }
@@ -685,27 +709,25 @@ class RLExecutionService:
             "strategy": payload.get("strategy"),
             "direction": payload.get("direction"),
             "action": action,
-            "default_risk_pct": DEFAULT_RISK_PCT,
+            "risk_mode": "fixed_usdt",
+            "default_risk_usdt": DEFAULT_RISK_USDT,
             "setup": setup,
             "payload": payload,
             "agent": agent_info,
             "executed": False,
             "completed": False,
+            "execution_status": "queued",
         }
 
         with self.lock:
             self.decisions[decision_id] = decision
             self.event_to_decision[event_id] = decision_id
-
         try:
-            self._maybe_execute(decision)
-        except Exception as exc:
-            decision["execution_error"] = str(exc)
-            log.exception(
-                "[%s] RL execution failed decision=%s",
-                decision.get("symbol"),
-                decision_id,
-            )
+            self.execution_queue.put_nowait(decision_id)
+            decision["queued_at"] = now_iso()
+        except queue.Full:
+            decision["execution_status"] = "queue_full"
+            decision["skip_reason"] = f"execution queue full ({EXECUTION_QUEUE_SIZE})"
 
         with self.lock:
             self._save_runtime_state_locked()
@@ -720,11 +742,45 @@ class RLExecutionService:
             "strategy": decision.get("strategy"),
             "action": decision.get("action"),
             "executed": decision.get("executed", False),
+            "execution_status": decision.get("execution_status"),
             "skip_reason": decision.get("skip_reason"),
             "order_id": decision.get("entry_order_id"),
             "order_link_id": decision.get("entry_order_link_id"),
             "reward": decision.get("reward"),
         }
+
+    def _execution_worker(self) -> None:
+        while True:
+            decision_id = self.execution_queue.get()
+            try:
+                with self.lock:
+                    decision = self.decisions.get(decision_id)
+                    if decision is not None and not decision.get("completed") and not decision.get("executed"):
+                        decision["execution_status"] = "running"
+                        decision["execution_started_at"] = now_iso()
+                if decision is None:
+                    continue
+                if decision.get("completed") or decision.get("executed"):
+                    continue
+
+                try:
+                    self._maybe_execute(decision)
+                    decision["execution_status"] = "executed" if decision.get("executed") else "skipped"
+                except Exception as exc:
+                    decision["execution_status"] = "failed"
+                    decision["execution_error"] = str(exc)
+                    log.exception(
+                        "[%s] RL execution failed decision=%s",
+                        decision.get("symbol"),
+                        decision_id,
+                    )
+                finally:
+                    decision["execution_finished_at"] = now_iso()
+                    with self.lock:
+                        self._save_runtime_state_locked()
+                    append_jsonl(DECISIONS_PATH, decision)
+            finally:
+                self.execution_queue.task_done()
 
     def _instrument_info(self, symbol: str) -> dict[str, Any]:
         if self.http is None:
@@ -851,8 +907,14 @@ class RLExecutionService:
             decision["skip_reason"] = f"invalid equity {equity}"
             return
 
-        default_risk_usdt = equity * DEFAULT_RISK_PCT
+        default_risk_usdt = DEFAULT_RISK_USDT
+        if default_risk_usdt <= 0:
+            decision["skip_reason"] = f"invalid RL_DEFAULT_RISK_USDT={default_risk_usdt}"
+            return
         risk_budget = default_risk_usdt * action
+        if risk_budget <= 0:
+            decision["skip_reason"] = f"risk budget is zero for action={action:.4f}"
+            return
         q_step = float(info["qty_step"])
         min_qty = float(info["min_qty"])
         tick = float(info["tick_size"])
@@ -937,6 +999,7 @@ class RLExecutionService:
             "qty": qty_to_str(qty, q_step),
             "qty_float": qty,
             "notional": notional,
+            "risk_mode": "fixed_usdt",
             "default_risk_usdt": default_risk_usdt,
             "risk_budget_usdt": risk_budget,
             "expected_sl_loss_usdt": expected_sl_loss,
@@ -1216,7 +1279,7 @@ class RLExecutionService:
                 "policy_action": agent.get("policy_action"),
                 "policy_score": agent.get("score"),
                 "explored": agent.get("explored"),
-                "default_risk_pct": decision.get("default_risk_pct"),
+                "risk_mode": decision.get("risk_mode"),
                 "default_risk_usdt": decision.get("default_risk_usdt"),
                 "risk_budget_usdt": decision.get("risk_budget_usdt"),
                 "expected_sl_loss_usdt": decision.get("expected_sl_loss_usdt"),
@@ -1287,11 +1350,14 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(jsonable(payload), sort_keys=True).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            log.debug("HTTP client disconnected before response could be written: %s", exc)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -1311,7 +1377,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if self.path.rstrip("/") == "/v1/signals":
                 response = self.service.handle_signal(payload)
-                self._send_json(HTTPStatus.OK, response)
+                self._send_json(HTTPStatus.ACCEPTED, response)
                 return
             if self.path.rstrip("/") == "/v1/rewards":
                 response = self.service.handle_manual_reward(payload)
@@ -1340,12 +1406,12 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     log.info(
         "RL execution sidecar listening on %s:%d  trading_enabled=%s demo=%s "
-        "default_risk=%.2f%% min_action=%.3f",
+        "default_risk=%.2f USDT min_action=%.3f",
         HOST,
         PORT,
         TRADING_ENABLED,
         BYBIT_DEMO,
-        DEFAULT_RISK_PCT * 100.0,
+        DEFAULT_RISK_USDT,
         MIN_ACTION_TO_TRADE,
     )
     server.serve_forever()
