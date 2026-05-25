@@ -89,6 +89,29 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Matrix signal follower ───────────────────────────────────────────────────
+  # Joins a Matrix room, parses signal messages, and places Bybit orders.
+  # Configure MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN, MATRIX_ROOM_ID in .env.
+  matrix-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python matrix_signal_bot.py
+    container_name: matrix-bot
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env.matrix
+    environment:
+      ACTIVE_TRADES_STATE_PATH: /app/logs/active_trades.json
+      LOG_DIR: /app/logs
+    volumes:
+      - ./bot/logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # ── One-off DT training service ─────────────────────────────────────────────
   # Run with: docker compose run --rm mm-train
   # Trains per-coin DT models and writes them to ./bot/models/
