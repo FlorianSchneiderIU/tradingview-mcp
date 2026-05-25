@@ -39,10 +39,14 @@ services:
       ACTIVE_TRADES_STATE_PATH: /app/logs/active_trades.json
       TRADE_LEDGER_PATH: /app/logs/trade_ledger.jsonl
       HEARTBEAT_STATE_PATH: /app/logs/heartbeat_state.json
+      RL_EXECUTION_URL: http://rl-exec-bot:8090/v1/signals
+      RL_EXECUTION_TIMEOUT_SECONDS: "1.0"
       TURTLE_MODELS_DIR: /app/turtle_models
       TURTLE_LEADERBOARD_PATH: /app/turtle_leaderboard.csv
       SESSION_ORB_MODELS_DIR: /app/session_orb_models
       LOG_DIR: /app/logs
+    depends_on:
+      - rl-exec-bot
 
     volumes:
       # Coin configs (read-only) — edit top20_configs.json to adjust the coin list
@@ -89,7 +93,36 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # ── Matrix signal follower ───────────────────────────────────────────────────
+  # RL execution sidecar. Receives every accepted/rejected main-bot signal over
+  # REST and can trade the setup on a separate Bybit demo account using
+  # RL_BYBIT_API_KEY / RL_BYBIT_API_SECRET from bot/.env.
+  rl-exec-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python rl_execution_bot.py
+    container_name: rl-exec-bot
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env
+    environment:
+      RL_HOST: 0.0.0.0
+      RL_PORT: "8090"
+      RL_LOG_DIR: /app/rl
+      RL_STATE_PATH: /app/rl/runtime_state.json
+      RL_MODEL_PATH: /app/rl/agent_state.json
+      RL_DECISIONS_PATH: /app/rl/decisions.jsonl
+      RL_REWARDS_PATH: /app/rl/rewards.jsonl
+      RL_TRAINING_EXAMPLES_PATH: /app/rl/training_examples.jsonl
+    volumes:
+      - ./bot/logs/rl:/app/rl
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Matrix signal follower.
   # Joins a Matrix room, parses signal messages, and places Bybit orders.
   # Configure MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN, MATRIX_ROOM_ID in .env.
   matrix-bot:

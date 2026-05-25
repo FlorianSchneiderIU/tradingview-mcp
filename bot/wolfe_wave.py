@@ -6,6 +6,7 @@ import math
 import os
 import threading
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -139,50 +140,19 @@ class WolfeWaveEngine:
     def __init__(self):
         self.min_bars = int(os.environ.get("WOLFE_WAVE_MIN_BARS", "3000"))
 
-    def detect_signal(self, state: WolfeWaveState) -> Optional[dict]:
-        bars = state.snapshot()
-        if len(bars) < self.min_bars:
-            return None
-        try:
-            frame = bars_to_frame(bars, WOLFE_WAVE_INTERVAL)
-            signals = find_wolfe_signals(frame, state.config, symbol=state.symbol)
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"[wolfe] {state.symbol}: signal evaluation failed: {exc}")
-            return None
-        if not signals:
-            return None
-
-        recent_idx = max(0, len(frame) - 3)
-        recent_cutoff = pd.Timestamp(frame["close_time"].iloc[recent_idx]).tz_convert("UTC")
-        candidates = [
-            signal
-            for signal in signals
-            if signal.entry_time >= recent_cutoff
-            and (state.last_entry_time is None or signal.entry_time > state.last_entry_time)
-        ]
-        if not candidates:
-            return None
-        signal = sorted(candidates, key=lambda item: (item.entry_time, item.score), reverse=True)[0]
-        if state.last_signal_key == signal.event_key:
-            return None
-        state.last_signal_key = signal.event_key
-
-        direction = signal.direction
-        entry = float(frame["close"].iloc[-1])
-        stop = float(signal.stop_price)
-        target = float(signal.target_price)
-        risk = abs(entry - stop)
-        if risk <= 0 or not math.isfinite(risk):
-            return None
-        if direction == "long" and (entry <= stop or entry >= target):
-            return None
-        if direction == "short" and (entry >= stop or entry <= target):
-            return None
-
-        state.last_entry_time = signal.entry_time
+    @staticmethod
+    def _signal_payload(
+        signal,
+        *,
+        entry: float,
+        stop: float,
+        target: float,
+        risk: float,
+        threshold: float,
+    ) -> dict:
         return {
             "strategy": "wolfe_wave",
-            "signal": direction,
+            "signal": signal.direction,
             "entry": entry,
             "model_entry": float(signal.entry_price),
             "sl": stop,
@@ -191,7 +161,7 @@ class WolfeWaveEngine:
             "trail_dist": risk,
             "exit_style": "fixed_tp",
             "prob": signal.score / 100.0,
-            "threshold": state.config.min_score / 100.0,
+            "threshold": threshold / 100.0,
             "entry_time": signal.entry_time.isoformat(),
             "pattern_tf": signal.pattern_tf,
             "pivot_method": signal.pivot_method,
@@ -221,6 +191,69 @@ class WolfeWaveEngine:
                 "rsi": float(signal.rsi) if math.isfinite(float(signal.rsi)) else None,
             },
         }
+
+    def detect_signal(self, state: WolfeWaveState) -> Optional[dict]:
+        bars = state.snapshot()
+        if len(bars) < self.min_bars:
+            return None
+        try:
+            frame = bars_to_frame(bars, WOLFE_WAVE_INTERVAL)
+            scan_config = replace(state.config, min_score=0.0)
+            signals = find_wolfe_signals(frame, scan_config, symbol=state.symbol)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[wolfe] {state.symbol}: signal evaluation failed: {exc}")
+            return None
+        if not signals:
+            return None
+
+        recent_idx = max(0, len(frame) - 3)
+        recent_cutoff = pd.Timestamp(frame["close_time"].iloc[recent_idx]).tz_convert("UTC")
+        candidates = [
+            signal
+            for signal in signals
+            if signal.entry_time >= recent_cutoff
+            and (state.last_entry_time is None or signal.entry_time > state.last_entry_time)
+        ]
+        if not candidates:
+            return None
+        signal = sorted(candidates, key=lambda item: (item.entry_time, item.score), reverse=True)[0]
+        signal_key = signal.event_key
+        if signal.score < state.config.min_score:
+            signal_key = f"{signal.event_key}|rejected"
+        if state.last_signal_key == signal_key:
+            return None
+        state.last_signal_key = signal_key
+
+        direction = signal.direction
+        entry = float(frame["close"].iloc[-1])
+        stop = float(signal.stop_price)
+        target = float(signal.target_price)
+        risk = abs(entry - stop)
+        if risk <= 0 or not math.isfinite(risk):
+            return None
+        if direction == "long" and (entry <= stop or entry >= target):
+            return None
+        if direction == "short" and (entry >= stop or entry <= target):
+            return None
+
+        payload = self._signal_payload(
+            signal,
+            entry=entry,
+            stop=stop,
+            target=target,
+            risk=risk,
+            threshold=state.config.min_score,
+        )
+        if signal.score < state.config.min_score:
+            payload["rejected"] = True
+            payload["reject_reason"] = (
+                f"Wolfe score {signal.score:.1f} below threshold "
+                f"{state.config.min_score:.1f}"
+            )
+            return payload
+
+        state.last_entry_time = signal.entry_time
+        return payload
 
 
 __all__ = [

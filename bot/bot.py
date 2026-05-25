@@ -97,6 +97,7 @@ import logging
 import math
 import os
 import pickle
+import queue
 import signal
 import threading
 import time
@@ -182,6 +183,9 @@ ACTIVE_TRADES_STATE_PATH = os.environ.get(
 )
 TRADE_LEDGER_PATH = os.environ.get("TRADE_LEDGER_PATH", os.path.join(LOG_DIR, "trade_ledger.jsonl"))
 HEARTBEAT_STATE_PATH = os.environ.get("HEARTBEAT_STATE_PATH", os.path.join(LOG_DIR, "heartbeat_state.json"))
+RL_EXECUTION_URL = os.environ.get("RL_EXECUTION_URL", "").strip()
+RL_EXECUTION_TIMEOUT_SECONDS = float(os.environ.get("RL_EXECUTION_TIMEOUT_SECONDS", "1.0"))
+RL_EXECUTION_QUEUE_SIZE = int(os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"))
 PROTECTION_AUDIT_SECONDS = int(os.environ.get("PROTECTION_AUDIT_SECONDS", "300"))
 OPEN_ORDER_AUDIT_SECONDS = int(os.environ.get("OPEN_ORDER_AUDIT_SECONDS", "300"))
 DAILY_HEARTBEAT_UTC_HOUR = int(os.environ.get("DAILY_HEARTBEAT_UTC_HOUR", "0"))
@@ -786,6 +790,19 @@ class Bot:
         self._last_open_order_audit_ts = 0.0
         self._oi_history: dict[str, deque[dict]] = {}
         self._funding_history: dict[str, deque[dict]] = {}
+        self._rl_execution_url = RL_EXECUTION_URL
+        self._rl_execution_timeout = max(0.1, RL_EXECUTION_TIMEOUT_SECONDS)
+        self._rl_queue: queue.Queue[dict] | None = None
+        if self._rl_execution_url:
+            self._rl_queue = queue.Queue(maxsize=max(1, RL_EXECUTION_QUEUE_SIZE))
+            threading.Thread(
+                target=self._rl_execution_worker,
+                name="rl-execution-dispatch",
+                daemon=True,
+            ).start()
+            log.info(f"RL execution sidecar enabled  url={self._rl_execution_url}")
+        else:
+            log.info("RL execution sidecar disabled; RL_EXECUTION_URL is empty")
         self._load_risk_state()
         self._load_heartbeat_state()
 
@@ -1514,6 +1531,124 @@ class Bot:
         return str(value)
 
     @staticmethod
+    def _signal_probability(sig: dict) -> object:
+        return sig.get("prob", sig.get("dt_prob"))
+
+    def _build_rl_signal_payload(
+        self,
+        status: str,
+        *,
+        symbol: str,
+        sig: dict,
+        reason: str | None = None,
+        order_id: str | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> dict:
+        feature_snapshot = sig.get("feature_snapshot")
+        features = dict(feature_snapshot) if isinstance(feature_snapshot, dict) else {}
+        probability = self._signal_probability(sig)
+        threshold = sig.get("threshold", sig.get("dt_threshold"))
+        features.update({
+            "ml_probability": probability,
+            "ml_threshold": threshold,
+            "normal_bot_status_accepted": 1.0 if status == "accepted" else 0.0,
+            "normal_bot_status_rejected": 1.0 if status == "rejected" else 0.0,
+        })
+        return self._jsonable({
+            "schema_version": "rl_signal_v1",
+            "event_id": uuid.uuid4().hex,
+            "source": "mm-bot",
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "reason": reason,
+            "symbol": symbol,
+            "strategy": sig.get("strategy"),
+            "direction": sig.get("signal", sig.get("direction")),
+            "setup": {
+                "entry": sig.get("entry", sig.get("entry_price")),
+                "model_entry": sig.get("model_entry"),
+                "stop_loss": sig.get("sl", sig.get("stop_price")),
+                "take_profit": sig.get("tp1", sig.get("target", sig.get("target_price"))),
+                "trail_dist": sig.get("trail_dist"),
+                "exit_style": sig.get("exit_style"),
+                "entry_time": sig.get("entry_time"),
+                "atr": sig.get("atr"),
+                "stop_distance_pct": sig.get("stop_distance_pct"),
+                "fee_to_price_risk": sig.get("fee_to_price_risk"),
+                "upstream_order_id": order_id,
+                "upstream_order_link_id": sig.get("order_link_id"),
+            },
+            "features": features,
+            "feature_columns": list(sig.get("feature_columns") or features.keys()),
+            "ml_probability": probability,
+            "ml_threshold": threshold,
+            "default_risk_pct": NOTIONAL_PCT,
+            "risk_config": {
+                "notional_pct": NOTIONAL_PCT,
+                "min_stop_distance_pct": MIN_STOP_DISTANCE_PCT,
+                "taker_fee_rate": TAKER_FEE_RATE,
+                "max_fee_to_price_risk": MAX_FEE_TO_PRICE_RISK,
+            },
+            "market_context": sig.get("market_context"),
+            "market_snapshot": sig.get("market_snapshot"),
+            "raw_signal": sig,
+            "extra": extra or {},
+        })
+
+    def _enqueue_rl_signal_event(
+        self,
+        status: str,
+        *,
+        symbol: str,
+        sig: dict,
+        reason: str | None = None,
+        order_id: str | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        if not self._rl_execution_url or self._rl_queue is None:
+            return
+        payload = self._build_rl_signal_payload(
+            status,
+            symbol=symbol,
+            sig=sig,
+            reason=reason,
+            order_id=order_id,
+            extra=extra,
+        )
+        try:
+            self._rl_queue.put_nowait(payload)
+        except queue.Full:
+            log.warning(
+                f"[rl] Dispatch queue full; dropping {status} signal "
+                f"{symbol} {sig.get('strategy', '-')}"
+            )
+
+    def _rl_execution_worker(self) -> None:
+        assert self._rl_queue is not None
+        while True:
+            payload = self._rl_queue.get()
+            try:
+                resp = requests.post(
+                    self._rl_execution_url,
+                    json=payload,
+                    timeout=self._rl_execution_timeout,
+                )
+                if resp.status_code >= 300:
+                    log.warning(
+                        f"[rl] Sidecar returned HTTP {resp.status_code}: "
+                        f"{resp.text[:300]}"
+                    )
+                else:
+                    log.debug(
+                        f"[rl] Dispatched {payload.get('status')} signal "
+                        f"{payload.get('symbol')} {payload.get('strategy')}"
+                    )
+            except Exception as exc:
+                log.warning(f"[rl] Signal dispatch failed: {exc}")
+            finally:
+                self._rl_queue.task_done()
+
+    @staticmethod
     def _compact_token(value: object, *, max_len: int) -> str:
         text = "".join(ch for ch in str(value or "").upper() if ch.isalnum())
         return (text or "X")[:max_len]
@@ -1617,6 +1752,14 @@ class Bot:
             order_request=sig.get("order_request"),
             order_error=sig.get("order_error"),
             extra=extra or {},
+        )
+        self._enqueue_rl_signal_event(
+            status,
+            symbol=symbol,
+            sig=sig,
+            reason=reason,
+            order_id=order_id,
+            extra=extra,
         )
 
     @staticmethod
@@ -1972,6 +2115,15 @@ class Bot:
         }
         context["provenance"] = self._build_provenance_context(state, sig)
         return context
+
+    def _attach_market_context(self, state: SymbolState, sig: dict) -> None:
+        if isinstance(sig.get("market_context"), dict) and sig.get("market_context"):
+            return
+        market_context = self._fetch_market_context(state, sig)
+        sig["market_context"] = market_context
+        market_snapshot = market_context.get("ticker") if isinstance(market_context, dict) else None
+        if isinstance(market_snapshot, dict) and market_snapshot:
+            sig["market_snapshot"] = market_snapshot
 
     def _load_heartbeat_state(self) -> None:
         if not os.path.exists(HEARTBEAT_STATE_PATH):
@@ -3461,15 +3613,16 @@ class Bot:
                 sig["feature_columns"] = list(FEATURE_NAMES)
                 sig["feature_snapshot"] = self._feature_snapshot(FEATURE_NAMES, fvec)
                 prob = float(state.dt_model.predict_proba(fvec.reshape(1, -1))[0, 1])
+                sig["dt_prob"] = prob
+                sig["dt_threshold"] = state.dt_threshold
                 log.debug(f"[{state.symbol}] DT prob={prob:.3f} threshold={state.dt_threshold:.2f}")
                 if prob < state.dt_threshold:
-                    sig["dt_prob"] = prob
-                    sig["dt_threshold"] = state.dt_threshold
                     reason = f"DT probability {prob:.3f} below threshold {state.dt_threshold:.2f}"
                     log.info(
                         f"[{state.symbol}] {sig['signal'].upper()} filtered by DT "
                         f"(prob={prob:.3f} < {state.dt_threshold:.2f})"
                     )
+                    self._attach_market_context(state, sig)
                     self._record_signal_event("rejected", symbol=state.symbol, sig=sig, reason=reason)
                     self._telegram.send_signal("rejected", symbol=state.symbol, sig=sig, reason=reason)
                     return
@@ -3488,6 +3641,7 @@ class Bot:
                 f"[{trade_state.symbol}] TURTLE candidate {sig['signal'].upper()} rejected "
                 f"-- {reason}"
             )
+            self._attach_market_context(trade_state, sig)
             self._record_signal_event("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
             self._telegram.send_signal("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
             return
@@ -3509,6 +3663,7 @@ class Bot:
                 f"[{trade_state.symbol}] SESSION_ORB candidate {sig['signal'].upper()} rejected "
                 f"-- {reason}"
             )
+            self._attach_market_context(trade_state, sig)
             self._record_signal_event("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
             self._telegram.send_signal("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
             return
@@ -3524,6 +3679,16 @@ class Bot:
             return
         sig = self._wolfe_wave_engine.detect_signal(wolfe_state)
         if sig is None:
+            return
+        if sig.get("rejected"):
+            reason = str(sig.get("reject_reason", "Rejected by Wolfe Wave filter"))
+            log.info(
+                f"[{trade_state.symbol}] WOLFE candidate {sig['signal'].upper()} rejected "
+                f"-- {reason}"
+            )
+            self._attach_market_context(trade_state, sig)
+            self._record_signal_event("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
+            self._telegram.send_signal("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
             return
         log.info(
             f"[{trade_state.symbol}] WOLFE candidate {sig['signal'].upper()} "
@@ -3614,11 +3779,7 @@ class Bot:
         return {}
 
     def _submit_signal(self, state: SymbolState, sig: dict) -> None:
-        market_context = self._fetch_market_context(state, sig)
-        sig["market_context"] = market_context
-        market_snapshot = market_context.get("ticker") if isinstance(market_context, dict) else None
-        if isinstance(market_snapshot, dict) and market_snapshot:
-            sig["market_snapshot"] = market_snapshot
+        self._attach_market_context(state, sig)
         reject_reason: str | None = None
         stop_distance_reason = self._stop_distance_reject_reason(sig)
         if stop_distance_reason:
