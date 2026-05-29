@@ -117,6 +117,7 @@ MATRIX_RL_EXECUTION_QUEUE_SIZE = int(
         os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"),
     )
 )
+MATRIX_MARKET_FEATURE_CACHE_SECONDS = float(os.environ.get("MATRIX_MARKET_FEATURE_CACHE_SECONDS", "30"))
 
 # --- Logging ------------------------------------------------------------------
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -845,6 +846,8 @@ class MatrixRlSidecarClient:
         self._timeout = max(0.1, MATRIX_RL_EXECUTION_TIMEOUT_SECONDS)
         self._queue: queue.Queue[dict] | None = None
         self._dispatch_thread: threading.Thread | None = None
+        self._market_http = HTTP(testnet=False, demo=DEMO)
+        self._market_feature_cache: dict[str, tuple[float, dict]] = {}
 
         if self._url:
             self._queue = queue.Queue(maxsize=max(1, MATRIX_RL_EXECUTION_QUEUE_SIZE))
@@ -858,6 +861,70 @@ class MatrixRlSidecarClient:
         else:
             log.info("Matrix RL sidecar disabled; MATRIX_RL_EXECUTION_URL is empty")
 
+    def _market_features_for_signal(self, sig: dict) -> dict:
+        symbol = str(sig.get("symbol") or "").upper()
+        direction = str(sig.get("signal") or "").lower()
+        if not symbol or direction not in {"long", "short"}:
+            return {"features": {}, "market_context": {}}
+
+        now = time.time()
+        cached = self._market_feature_cache.get(symbol)
+        if cached and (now - cached[0]) <= max(0.0, MATRIX_MARKET_FEATURE_CACHE_SECONDS):
+            base = dict(cached[1])
+        else:
+            base = {}
+            try:
+                resp = self._market_http.get_kline(
+                    category="linear",
+                    symbol=symbol,
+                    interval="5",
+                    limit=300,
+                )
+                items = resp.get("result", {}).get("list", [])
+                if items:
+                    bars = list(reversed(items))
+                    closes = [float(it[4]) for it in bars]
+                    vols = [float(it[5]) for it in bars]
+
+                    ret_1h = None
+                    ret_4h = None
+                    symbol_vol_mult = None
+
+                    if len(closes) >= 13 and closes[-13] > 0:
+                        ret_1h = ((closes[-1] / closes[-13]) - 1.0) * 100.0
+                    if len(closes) >= 49 and closes[-49] > 0:
+                        ret_4h = ((closes[-1] / closes[-49]) - 1.0) * 100.0
+                    if len(vols) >= 20:
+                        vol_sma20 = float(np.mean(vols[-20:]))
+                        if vol_sma20 > 0:
+                            symbol_vol_mult = vols[-1] / vol_sma20
+
+                    base = {
+                        "ret_1h": ret_1h,
+                        "ret_4h": ret_4h,
+                        "symbol_vol_mult": symbol_vol_mult,
+                    }
+            except Exception as exc:
+                log.debug("[matrix-rl] market feature fetch failed for %s: %s", symbol, exc)
+            self._market_feature_cache[symbol] = (now, dict(base))
+
+        sign = 1.0 if direction == "long" else -1.0
+        features: dict[str, float] = {}
+        if isinstance(base.get("ret_1h"), (int, float)):
+            features["ret_1h_dir"] = sign * float(base["ret_1h"])
+        if isinstance(base.get("ret_4h"), (int, float)):
+            features["ret_4h_dir"] = sign * float(base["ret_4h"])
+        if isinstance(base.get("symbol_vol_mult"), (int, float)):
+            features["symbol_vol_mult"] = float(base["symbol_vol_mult"])
+
+        market_context = {
+            "derived_from": "bybit_kline_5m",
+            "ret_1h": base.get("ret_1h"),
+            "ret_4h": base.get("ret_4h"),
+            "symbol_vol_mult": base.get("symbol_vol_mult"),
+        }
+        return {"features": features, "market_context": market_context}
+
     def _build_signal_payload(
         self,
         status: str,
@@ -867,6 +934,15 @@ class MatrixRlSidecarClient:
     ) -> dict:
         probability = None
         threshold = None
+        market_enrichment = self._market_features_for_signal(sig)
+        feature_payload = {
+            "ml_probability": probability,
+            "ml_threshold": threshold,
+            "matrix_status_accepted": 1.0 if status == "accepted" else 0.0,
+            "matrix_status_rejected": 1.0 if status == "rejected" else 0.0,
+        }
+        feature_payload.update(market_enrichment.get("features") or {})
+        feature_columns = list(feature_payload.keys())
         return {
             "schema_version": "rl_signal_v1",
             "event_id": uuid.uuid4().hex,
@@ -877,24 +953,18 @@ class MatrixRlSidecarClient:
             "symbol": sig.get("symbol"),
             "strategy": sig.get("strategy", "matrix"),
             "direction": sig.get("signal"),
+            "room_id": sig.get("room_id"),
             "setup": {
                 "entry": sig.get("entry"),
                 "stop_loss": sig.get("sl"),
                 "take_profit": sig.get("tp1"),
                 "entry_time": datetime.now(timezone.utc).isoformat(),
             },
-            "features": {
-                "ml_probability": probability,
-                "ml_threshold": threshold,
-                "matrix_status_accepted": 1.0 if status == "accepted" else 0.0,
-                "matrix_status_rejected": 1.0 if status == "rejected" else 0.0,
-            },
-            "feature_columns": [
-                "matrix_status_accepted",
-                "matrix_status_rejected",
-            ],
+            "features": feature_payload,
+            "feature_columns": feature_columns,
             "ml_probability": probability,
             "ml_threshold": threshold,
+            "market_context": market_enrichment.get("market_context") or {},
             "raw_signal": sig,
             "extra": {},
         }

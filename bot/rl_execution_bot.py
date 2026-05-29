@@ -75,8 +75,8 @@ EXECUTION_QUEUE_SIZE = env_int("RL_EXECUTION_QUEUE_SIZE", 2000)
 
 BYBIT_DEMO = env_bool("RL_BYBIT_DEMO", True)
 TRADING_ENABLED = env_bool("RL_TRADING_ENABLED", False)
-API_KEY = os.environ.get("RL_BYBIT_API_KEY", "").strip()
-API_SECRET = os.environ.get("RL_BYBIT_API_SECRET", "").strip()
+API_KEY = os.environ.get("RL_BYBIT_API_KEY", os.environ.get("BYBIT_API_KEY", "")).strip()
+API_SECRET = os.environ.get("RL_BYBIT_API_SECRET", os.environ.get("BYBIT_API_SECRET", "")).strip()
 ENABLE_PRIVATE_ORDER_WS = env_bool("RL_ENABLE_PRIVATE_ORDER_WS", True)
 REWARD_POLL_SECONDS = env_float("RL_REWARD_POLL_SECONDS", 30.0)
 HEARTBEAT_CHECK_SECONDS = env_float("RL_HEARTBEAT_CHECK_SECONDS", 60.0)
@@ -1242,7 +1242,12 @@ class RLExecutionService:
             expected_qty = to_float(decision.get("qty_float") or decision.get("qty"))
             if qty is not None and expected_qty is not None:
                 tolerance = max(abs(expected_qty) * 1e-6, 1e-12)
-                if abs(qty - expected_qty) > tolerance:
+                if self._is_exit_order(order):
+                    # Exit updates can report partial quantities while the remaining
+                    # part of the entry is still open. Only reject impossible oversize.
+                    if qty - expected_qty > tolerance:
+                        continue
+                elif abs(qty - expected_qty) > tolerance:
                     continue
             matching.append(decision)
         if not matching:
@@ -1273,6 +1278,12 @@ class RLExecutionService:
                     if order_id == decision.get("entry_order_id") or order_link_id == decision.get("entry_order_link_id"):
                         decision["entry_filled_at_ms"] = int(to_float(order.get("updatedTime")) or now_ms())
                         decision["entry_fill_raw"] = order
+                        filled_qty = to_float(order.get("cumExecQty") or order.get("qty"))
+                        if filled_qty is not None and filled_qty > 0:
+                            info = self.instrument_cache.get(symbol, {})
+                            step = float(info.get("qty_step", 0.0) or 0.0)
+                            decision["qty_float"] = filled_qty
+                            decision["qty"] = qty_to_str(filled_qty, step)
                     continue
 
                 dedupe_key = order_id or f"{symbol}:{order.get('updatedTime')}:{order.get('avgPrice')}"
@@ -1418,7 +1429,56 @@ class RLExecutionService:
             "by_strategy": by_strategy,
         }
 
+    def _training_status_summary(self) -> dict[str, Any]:
+        rewards = self._iter_jsonl(REWARDS_PATH)
+        examples = self._iter_jsonl(TRAINING_EXAMPLES_PATH)
+
+        reward_values = [to_float(row.get("reward_default_r")) for row in rewards]
+        reward_values = [value for value in reward_values if value is not None]
+        recent = reward_values[-20:]
+        previous = reward_values[-40:-20]
+        recent_avg = sum(recent) / len(recent) if recent else 0.0
+        previous_avg = sum(previous) / len(previous) if previous else 0.0
+        delta = recent_avg - previous_avg if previous else 0.0
+
+        last_reward_at = None
+        for row in reversed(rewards):
+            ts = self._parse_iso(row.get("received_at"))
+            if ts is not None:
+                last_reward_at = ts
+                break
+
+        with self.lock:
+            weight_count = len(self.agent.weights)
+            stat_count = len(self.agent.stats)
+            reward_updates = self.agent.reward_updates
+            baseline = self.agent.reward_baseline
+
+        if len(reward_values) < 10:
+            phase = "warming"
+        elif len(reward_values) >= 40 and abs(delta) <= 0.01:
+            phase = "plateauing"
+        elif delta > 0.0:
+            phase = "improving"
+        else:
+            phase = "learning"
+
+        return {
+            "phase": phase,
+            "reward_updates": reward_updates,
+            "baseline": baseline,
+            "total_rewards": len(rewards),
+            "total_examples": len(examples),
+            "recent_reward_avg": recent_avg,
+            "previous_reward_avg": previous_avg,
+            "reward_delta": delta,
+            "weight_count": weight_count,
+            "stat_count": stat_count,
+            "last_reward_at": last_reward_at,
+        }
+
     def _send_daily_heartbeat(self, summary: dict[str, Any]) -> None:
+        training = self._training_status_summary()
         lines = [
             f"<b>[RL DAILY HEARTBEAT] {escape(str(summary['day']))}</b>",
             f"Decisions: <code>{summary['decisions']}</code>  Source A/R: <code>{summary['source_accepted']}/{summary['source_rejected']}</code>",
@@ -1428,6 +1488,9 @@ class RLExecutionService:
             f"Closed today: <code>{summary['closed']}</code>  W/L/BE: <code>{summary['wins']}/{summary['losses']}/{summary['breakeven']}</code>",
             f"PnL: <code>{self._fmt_money(float(summary['total_pnl']))}</code>  Reward: <code>{self._fmt_r(float(summary['total_r']))}</code>",
             f"Agent updates: <code>{summary['agent_updates']}</code>  Baseline: <code>{float(summary['reward_baseline']):+.4f}R</code>",
+            f"Training: <code>{escape(str(training['phase']))}</code>  Rewards/examples: <code>{training['total_rewards']}/{training['total_examples']}</code>",
+            f"Recent reward avg: <code>{self._fmt_r(float(training['recent_reward_avg']))}</code>  Prev avg: <code>{self._fmt_r(float(training['previous_reward_avg']))}</code>  Delta: <code>{self._fmt_r(float(training['reward_delta']))}</code>",
+            f"Weights/stats: <code>{training['weight_count']}/{training['stat_count']}</code>  Last reward: <code>{escape(training['last_reward_at'].isoformat() if training['last_reward_at'] else '-')}</code>",
         ]
         by_strategy = summary.get("by_strategy") if isinstance(summary.get("by_strategy"), dict) else {}
         if by_strategy:
@@ -1495,14 +1558,22 @@ class RLExecutionService:
             return False
         if str(row.get("symbol") or "").upper() != str(decision.get("symbol") or "").upper():
             return False
-        row_side = str(row.get("side") or "")
-        if row_side and row_side != str(decision.get("exit_side") or ""):
+        row_position_idx = int(to_float(row.get("positionIdx")) or 0)
+        decision_position_idx = int(to_float(decision.get("position_idx")) or 0)
+        if row_position_idx and decision_position_idx and row_position_idx != decision_position_idx:
             return False
+        row_side = str(row.get("side") or "")
+        if row_side:
+            exit_side = str(decision.get("exit_side") or "")
+            entry_side = str(decision.get("entry_side") or "")
+            # Bybit closed-pnl side may be reported as entry or exit side.
+            if row_side not in {exit_side, entry_side}:
+                return False
         row_qty = to_float(row.get("qty") or row.get("closedSize") or row.get("cumExecQty"))
         expected_qty = to_float(decision.get("qty_float") or decision.get("qty"))
         if row_qty is not None and expected_qty is not None:
             tolerance = max(abs(expected_qty) * 1e-6, 1e-12)
-            if abs(row_qty - expected_qty) > tolerance:
+            if row_qty - expected_qty > tolerance:
                 return False
         return True
 
