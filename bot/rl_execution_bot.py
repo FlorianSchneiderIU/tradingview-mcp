@@ -326,7 +326,7 @@ class ContextualRiskAgent:
     def __init__(self) -> None:
         self.weights: dict[str, float] = {"__bias__": logit(INITIAL_ACTION)}
         self.stats: dict[str, dict[str, float]] = {}
-        self.trade_history: dict[str, deque[dict[str, float]]] = {}
+        self.trade_history: dict[str, deque[dict[str, Any]]] = {}
         self.reward_baseline = 0.0
         self.reward_updates = 0
         self.lock = threading.Lock()
@@ -366,6 +366,8 @@ class ContextualRiskAgent:
                                 "closed_pnl": closed_pnl,
                                 "reward_default_r": float(row.get("reward_default_r", 0.0) or 0.0),
                                 "won": 1.0 if closed_pnl > 0 else 0.0,
+                                "direction": str(row.get("direction") or "").strip().lower(),
+                                "session_tag": str(row.get("session_tag") or "").strip().lower(),
                             }
                         )
                     if bucket:
@@ -448,14 +450,14 @@ class ContextualRiskAgent:
         cleaned = [ContextualRiskAgent._sanitize_name(part).lower() for part in parts if str(part or "").strip()]
         return "::".join(cleaned) if cleaned else "global"
 
-    def _trade_history_candidates(self, payload: dict[str, Any]) -> list[tuple[str, deque[dict[str, float]]]]:
+    def _trade_history_candidates(self, payload: dict[str, Any]) -> list[tuple[str, deque[dict[str, Any]]]]:
         candidates = [
             self._scope_key(payload.get("strategy"), payload.get("room_id")),
             self._scope_key(payload.get("strategy")),
             self._scope_key(payload.get("room_id")),
             "global",
         ]
-        out: list[tuple[str, deque[dict[str, float]]]] = []
+        out: list[tuple[str, deque[dict[str, Any]]]] = []
         for key in candidates:
             history = self.trade_history.get(key)
             if history:
@@ -463,7 +465,7 @@ class ContextualRiskAgent:
         return out
 
     @staticmethod
-    def _rolling_stats(history: deque[dict[str, float]], window: int) -> dict[str, float]:
+    def _rolling_stats(history: deque[dict[str, Any]], window: int, payload: dict[str, Any]) -> dict[str, float]:
         items = list(history)[-window:] if window > 0 else list(history)
         if not items:
             return {
@@ -474,13 +476,51 @@ class ContextualRiskAgent:
                 "reward_sum": 0.0,
                 "reward_avg": 0.0,
             }
+
+        def payload_context() -> tuple[str, str]:
+            direction = str((payload or {}).get("direction") or "").strip().lower()
+            market = payload.get("market_context") if isinstance((payload or {}).get("market_context"), dict) else {}
+            regime = market.get("regime") if isinstance(market.get("regime"), dict) else {}
+            session_tag = str(regime.get("session_tag") or "").strip().lower()
+            return direction, session_tag
+
+        def select_conditioned_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            direction, session_tag = payload_context()
+            if not direction and not session_tag:
+                return rows
+
+            min_required = min(3, len(rows))
+            direction_rows = [
+                row for row in rows
+                if not direction or str(row.get("direction") or "").strip().lower() == direction
+            ]
+            session_rows = [
+                row for row in rows
+                if not session_tag or str(row.get("session_tag") or "").strip().lower() == session_tag
+            ]
+            both_rows = [
+                row for row in rows
+                if (
+                    (not direction or str(row.get("direction") or "").strip().lower() == direction)
+                    and (not session_tag or str(row.get("session_tag") or "").strip().lower() == session_tag)
+                )
+            ]
+
+            for candidate in (both_rows, direction_rows, session_rows):
+                if len(candidate) >= min_required and candidate:
+                    return candidate
+            return rows
+
+        items = select_conditioned_rows(items)
         trade_count = float(len(items))
         wins = sum(1 for row in items if float(row.get("closed_pnl", 0.0) or 0.0) > 0)
         pnl_sum = sum(float(row.get("closed_pnl", 0.0) or 0.0) for row in items)
         reward_sum = sum(float(row.get("reward_default_r", 0.0) or 0.0) for row in items)
+        # Smoothed winrate reduces small-sample noise while keeping the same feature key.
+        smoothed_winrate = (wins + 1.0) / (trade_count + 2.0)
         return {
             "trade_count": trade_count,
-            "winrate": wins / trade_count if trade_count else 0.0,
+            "winrate": smoothed_winrate,
             "pnl_sum": pnl_sum,
             "pnl_avg": pnl_sum / trade_count if trade_count else 0.0,
             "reward_sum": reward_sum,
@@ -506,7 +546,7 @@ class ContextualRiskAgent:
         if scope_code:
             features["perf.history_scope_code"] = scope_code
         for window in ROLLING_WINDOWS:
-            stats = self._rolling_stats(history, window)
+            stats = self._rolling_stats(history, window, payload)
             features[f"perf.rolling_winrate_{window}"] = stats["winrate"]
             features[f"perf.rolling_reward_r_sum_{window}"] = stats["reward_sum"]
             features[f"perf.rolling_reward_r_avg_{window}"] = stats["reward_avg"]
@@ -698,10 +738,14 @@ class ContextualRiskAgent:
                 self.weights[str(key)] = clamp(decayed + gradient_scale * x, -12.0, 12.0)
 
     def add_trade_history(self, payload: dict[str, Any], *, closed_pnl: float, reward_default_r: float) -> None:
+        market = payload.get("market_context") if isinstance(payload.get("market_context"), dict) else {}
+        regime = market.get("regime") if isinstance(market.get("regime"), dict) else {}
         summary = {
             "closed_pnl": float(closed_pnl),
             "reward_default_r": float(reward_default_r),
             "won": 1.0 if closed_pnl > 0 else 0.0,
+            "direction": str(payload.get("direction") or "").strip().lower(),
+            "session_tag": str(regime.get("session_tag") or "").strip().lower(),
         }
         keys = [
             self._scope_key(payload.get("strategy"), payload.get("room_id")),
