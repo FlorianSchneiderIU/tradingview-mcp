@@ -1639,9 +1639,22 @@ class Bot:
                         f"{resp.text[:300]}"
                     )
                 else:
-                    log.debug(
-                        f"[rl] Dispatched {payload.get('status')} signal "
-                        f"{payload.get('symbol')} {payload.get('strategy')}"
+                    try:
+                        reply = resp.json()
+                    except Exception:
+                        reply = {}
+                    log.info(
+                        "[rl] Dispatched %s signal %s %s decision=%s status=%s action=%s",
+                        payload.get("status"),
+                        payload.get("symbol"),
+                        payload.get("strategy"),
+                        reply.get("decision_id", "-") if isinstance(reply, dict) else "-",
+                        reply.get("execution_status", "-") if isinstance(reply, dict) else "-",
+                        (
+                            f"{float(reply.get('action')):.3f}"
+                            if isinstance(reply, dict) and reply.get("action") is not None
+                            else "-"
+                        ),
                     )
             except Exception as exc:
                 log.warning(f"[rl] Signal dispatch failed: {exc}")

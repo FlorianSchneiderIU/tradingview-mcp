@@ -44,9 +44,12 @@ Optional env vars
   NOTIONAL_PCT                — fraction of equity risked (default 0.01)
   TAKER_FEE_RATE              — estimated one-way taker fee (default 0.00055)
   MAX_FEE_TO_PRICE_RISK       — reject when fees > this fraction of SL risk (default 0.25)
-  ORDER_LEVERAGE_BUFFER       — dynamic leverage buffer (default 2.0)
+  ORDER_LEVERAGE_BUFFER       — legacy setting; leverage is now based on SL distance
   MIN_STOP_DISTANCE_PCT       — minimum SL distance as fraction of entry (default 0.001)
   MAX_OPEN_POSITIONS          — max simultaneous positions (default 5)
+  MATRIX_MAX_SYMBOL_POSITIONS — max simultaneous positions for one symbol (-1 disables; default -1)
+  MATRIX_DEDUP_SECONDS        — ignore identical repeated signals within this window (0 disables; default 0)
+  MATRIX_MAX_RISK_MULTIPLIER  — reject orders whose rounded size exceeds target risk by this multiple (default 1.05)
   MATRIX_SIGNAL_SENDER        — restrict signals to this Matrix user ID (optional)
   MATRIX_POST_REPLY           — "true" to post order confirmations back to room (default true)
   LOG_DIR                     — log directory (default /app/logs)
@@ -77,9 +80,13 @@ LIVE_TRADING_CONFIRM = os.environ.get("LIVE_TRADING_CONFIRM", "false").lower() i
 NOTIONAL_PCT = float(os.environ.get("NOTIONAL_PCT", os.environ.get("RISK_PCT", "0.01")))
 TAKER_FEE_RATE = float(os.environ.get("TAKER_FEE_RATE", "0.00055"))
 MAX_FEE_TO_PRICE_RISK = float(os.environ.get("MAX_FEE_TO_PRICE_RISK", "0.25"))
+# Kept for env-file compatibility; order leverage is derived from stop distance.
 ORDER_LEVERAGE_BUFFER = float(os.environ.get("ORDER_LEVERAGE_BUFFER", "2.0"))
 MIN_STOP_DISTANCE_PCT = float(os.environ.get("MIN_STOP_DISTANCE_PCT", "0.001"))
 MAX_OPEN = int(os.environ.get("MAX_OPEN_POSITIONS", "5"))
+MAX_SYMBOL_POSITIONS = int(os.environ.get("MATRIX_MAX_SYMBOL_POSITIONS", "-1"))
+MATRIX_DEDUP_SECONDS = float(os.environ.get("MATRIX_DEDUP_SECONDS", "0"))
+MATRIX_MAX_RISK_MULTIPLIER = float(os.environ.get("MATRIX_MAX_RISK_MULTIPLIER", "1.05"))
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
 ACTIVE_TRADES_STATE_PATH = os.environ.get(
     "ACTIVE_TRADES_STATE_PATH",
@@ -449,6 +456,13 @@ def floor_to_step(value: float, step: float) -> float:
     return round(math.floor(value / step) * step, precision)
 
 
+def ceil_to_step(value: float, step: float) -> float:
+    if step <= 0:
+        return value
+    precision = max(0, round(-math.log10(step)))
+    return round(math.ceil(value / step) * step, precision)
+
+
 def qty_to_str(value: float, step: float = 0.0) -> str:
     if step > 0:
         precision = max(0, round(-math.log10(step)))
@@ -470,7 +484,9 @@ def get_instrument_info(http: HTTP, symbol: str) -> dict:
         "qty_step":     float(lot.get("qtyStep",     "0.001")),
         "min_qty":      float(lot.get("minOrderQty", "0.001")),
         "tick_size":    float(price.get("tickSize",  "0.01")),
+        "min_leverage": float(lev.get("minLeverage", "1") or "1"),
         "max_leverage": float(lev.get("maxLeverage", "1") or "1"),
+        "leverage_step": float(lev.get("leverageStep", "0.01") or "0.01"),
     }
 
 
@@ -497,16 +513,46 @@ def get_balance_metrics(http: HTTP) -> dict[str, float]:
     return {"equity": equity, "available": available}
 
 
+def get_open_positions(http: HTTP) -> list[dict]:
+    """Return non-flat USDT linear positions across one-way and hedge modes."""
+    positions: list[dict] = []
+    cursor = None
+    while True:
+        kwargs: dict = {"category": "linear", "settleCoin": "USDT", "limit": 200}
+        if cursor:
+            kwargs["cursor"] = cursor
+        resp = http.get_positions(**kwargs)
+        ret_code = int(resp.get("retCode", 0) or 0)
+        if ret_code != 0:
+            raise RuntimeError(
+                f"get_positions failed ({ret_code}): {resp.get('retMsg', '?')}"
+            )
+        result = resp.get("result", {})
+        for pos in result.get("list", []) or []:
+            try:
+                size = abs(float(pos.get("size", 0) or 0))
+            except (TypeError, ValueError):
+                size = 0.0
+            if size <= 0:
+                continue
+            positions.append(pos)
+        cursor = result.get("nextPageCursor")
+        if not cursor:
+            return positions
+
+
 # --- Order executor -----------------------------------------------------------
 
 class OrderExecutor:
     """Thin wrapper around Bybit HTTP that executes a single signal."""
 
-    def __init__(self, http: HTTP, *, open_count_fn=None):
+    def __init__(self, http: HTTP, *, open_count_fn=None, position_snapshot_fn=None):
         self._http = http
         self._lock = threading.Lock()
-        # Callable returning current open position count for gate-check.
-        self._open_count_fn = open_count_fn or (lambda: 0)
+        # Test hooks. Production uses get_positions directly and fails closed if
+        # the account state cannot be read.
+        self._open_count_fn = open_count_fn
+        self._position_snapshot_fn = position_snapshot_fn
         self._info_cache: dict[str, dict] = {}
 
     def _get_info(self, symbol: str) -> dict:
@@ -514,18 +560,46 @@ class OrderExecutor:
             self._info_cache[symbol] = get_instrument_info(self._http, symbol)
         return self._info_cache[symbol]
 
-    def _set_leverage(self, symbol: str, leverage: int) -> None:
+    def _fetch_open_positions(self) -> list[dict]:
+        if self._position_snapshot_fn is not None:
+            return list(self._position_snapshot_fn())
+        return get_open_positions(self._http)
+
+    def _position_counts(self, symbol: str) -> tuple[int, int]:
+        if self._open_count_fn is not None and self._position_snapshot_fn is None:
+            return int(self._open_count_fn()), 0
+        positions = self._fetch_open_positions()
+        symbol_positions = [
+            pos for pos in positions
+            if str(pos.get("symbol", "")).upper() == symbol.upper()
+        ]
+        return len(positions), len(symbol_positions)
+
+    def _set_leverage(self, symbol: str, leverage: float, step: float) -> None:
+        leverage_text = qty_to_str(leverage, step)
         try:
             self._http.set_leverage(
                 category="linear",
                 symbol=symbol,
-                buyLeverage=str(leverage),
-                sellLeverage=str(leverage),
+                buyLeverage=leverage_text,
+                sellLeverage=leverage_text,
             )
         except Exception as exc:
             log.debug("[%s] set_leverage skipped: %s", symbol, exc)
 
+    def _determine_order_leverage(self, info: dict, entry: float, stop: float) -> float:
+        max_leverage = max(float(info.get("max_leverage", 1.0)), 1.0)
+        min_leverage = max(float(info.get("min_leverage", 1.0)), 1.0)
+        leverage_step = float(info.get("leverage_step", 0.01) or 0.01)
+        stop_distance_pct = abs(entry - stop) / entry if entry > 0 else 0.0
+        risk_leverage = (1.0 / stop_distance_pct) if stop_distance_pct > 0 else max_leverage
+        return min(max_leverage, max(min_leverage, ceil_to_step(risk_leverage, leverage_step)))
+
     def execute(self, sig: dict) -> dict:
+        with self._lock:
+            return self._execute_locked(sig)
+
+    def _execute_locked(self, sig: dict) -> dict:
         """
         Place a market order from a parsed signal dict.
         Returns a result dict with keys: ok, order_id, message.
@@ -537,13 +611,27 @@ class OrderExecutor:
         tp1    = float(sig.get("tp1") or 0.0)
         strategy = str(sig.get("strategy", "matrix"))
 
-        with self._lock:
-            open_count = self._open_count_fn()
-            if open_count >= MAX_OPEN:
-                return {
-                    "ok": False,
-                    "message": f"Position limit reached ({open_count}/{MAX_OPEN})",
-                }
+        try:
+            open_count, symbol_count = self._position_counts(symbol)
+        except Exception as exc:
+            log.warning("[%s] Could not fetch open positions; rejecting signal: %s", symbol, exc)
+            return {
+                "ok": False,
+                "message": f"Could not verify open positions: {exc}",
+            }
+        if open_count >= MAX_OPEN:
+            return {
+                "ok": False,
+                "message": f"Position limit reached ({open_count}/{MAX_OPEN})",
+            }
+        if MAX_SYMBOL_POSITIONS >= 0 and symbol_count >= MAX_SYMBOL_POSITIONS:
+            return {
+                "ok": False,
+                "message": (
+                    f"Symbol position limit reached for {symbol} "
+                    f"({symbol_count}/{MAX_SYMBOL_POSITIONS})"
+                ),
+            }
 
         info = self._get_info(symbol)
         if not info:
@@ -577,14 +665,16 @@ class OrderExecutor:
         if equity <= 0:
             return {"ok": False, "message": f"Bad equity: {equity}"}
 
-        max_leverage = max(float(info.get("max_leverage", 1.0)), 1.0)
+        leverage_step = float(info.get("leverage_step", 0.01) or 0.01)
+        order_lev = self._determine_order_leverage(info, entry, stop)
         risk_budget  = equity * NOTIONAL_PCT
         raw_qty      = risk_budget / (unit_risk + fee_risk_per_unit)
         margin_basis = available if available > 0 else equity
-        max_qty_by_margin = (margin_basis * max_leverage * 0.95) / entry
+        max_qty_by_margin = (margin_basis * order_lev * 0.95) / entry
         if raw_qty > max_qty_by_margin:
             log.warning(
-                "[%s] qty capped by margin: raw=%.6g max=%.6g", symbol, raw_qty, max_qty_by_margin
+                "[%s] qty capped by margin: raw=%.6g max=%.6g lev=%.6gx",
+                symbol, raw_qty, max_qty_by_margin, order_lev,
             )
             raw_qty = max_qty_by_margin
 
@@ -595,12 +685,21 @@ class OrderExecutor:
         if qty < min_q:
             qty = min_q
 
-        # Dynamic leverage: set to the minimum needed to cover the notional
-        notional   = qty * entry
-        lev_needed = math.ceil(notional / max(equity * NOTIONAL_PCT, 1.0) * ORDER_LEVERAGE_BUFFER)
-        order_lev  = max(1, min(int(lev_needed), int(max_leverage)))
+        notional = qty * entry
+        expected_price_sl_loss = qty * unit_risk
+        expected_fee_loss = qty * fee_risk_per_unit
+        expected_sl_loss = expected_price_sl_loss + expected_fee_loss
+        if expected_sl_loss > risk_budget * MATRIX_MAX_RISK_MULTIPLIER:
+            return {
+                "ok": False,
+                "message": (
+                    f"Rounded order risk too high: {expected_sl_loss:.2f} "
+                    f"> target {risk_budget:.2f}"
+                ),
+            }
+        margin_est = notional / max(order_lev, 1.0)
         try:
-            self._set_leverage(symbol, order_lev)
+            self._set_leverage(symbol, order_lev, leverage_step)
         except Exception:
             pass
 
@@ -613,6 +712,8 @@ class OrderExecutor:
         pos_idx   = 0
         order_link_id = f"mx_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
 
+        # Partial TP/SL makes Bybit create protection for the actual filled
+        # quantity of this entry, instead of replacing the whole position TP/SL.
         order_kwargs: dict = dict(
             category    = "linear",
             symbol      = symbol,
@@ -621,20 +722,31 @@ class OrderExecutor:
             qty         = qty_to_str(qty, q_step),
             stopLoss    = str(sl_price),
             slTriggerBy = "LastPrice",
+            tpslMode    = "Partial",
+            slOrderType = "Market",
             positionIdx = pos_idx,
             orderLinkId = order_link_id,
         )
         if tp_price is not None and tp_price > 0:
             order_kwargs["takeProfit"]  = str(tp_price)
             order_kwargs["tpTriggerBy"] = "LastPrice"
-            order_kwargs["tpslMode"]    = "Full"   # close 100% of position at TP1
+            order_kwargs["tpOrderType"] = "Market"
 
         log.info(
             "[%s] SIGNAL %s | strategy=%s entry~%.5g sl=%s tp=%s "
-            "qty=%s notional=%.2f lev=%dx equity=%.2f",
+            "qty=%s notional=%.2f margin~%.2f lev=%sx "
+            "price_risk~%.2f fees~%.2f risk_at_sl~%.2f (target=%.2f, %.2f%% equity) "
+            "equity=%.2f open=%d/%d symbol_open=%d/%s",
             symbol, direction.upper(), strategy,
             entry, sl_price, tp_price or "-",
-            qty_to_str(qty, q_step), notional, order_lev, equity,
+            qty_to_str(qty, q_step), notional, margin_est, qty_to_str(order_lev, leverage_step),
+            expected_price_sl_loss, expected_fee_loss, expected_sl_loss, risk_budget,
+            (expected_sl_loss / equity * 100.0) if equity > 0 else 0.0,
+            equity,
+            open_count,
+            MAX_OPEN,
+            symbol_count,
+            "off" if MAX_SYMBOL_POSITIONS < 0 else str(MAX_SYMBOL_POSITIONS),
         )
 
         try:
@@ -648,9 +760,8 @@ class OrderExecutor:
                     "[%s] Account is in hedge mode — retrying with positionIdx=%d", symbol, hedge_idx
                 )
                 order_kwargs["positionIdx"] = hedge_idx
-                order_kwargs["orderLinkId"] = (
-                    f"mx_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
-                )
+                order_link_id = f"mx_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
+                order_kwargs["orderLinkId"] = order_link_id
                 try:
                     resp = self._http.place_order(**order_kwargs)
                 except Exception as exc2:
@@ -668,9 +779,8 @@ class OrderExecutor:
                 "[%s] Account is in hedge mode (retCode) — retrying with positionIdx=%d", symbol, hedge_idx
             )
             order_kwargs["positionIdx"] = hedge_idx
-            order_kwargs["orderLinkId"] = (
-                f"mx_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
-            )
+            order_link_id = f"mx_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
+            order_kwargs["orderLinkId"] = order_link_id
             try:
                 resp = self._http.place_order(**order_kwargs)
             except Exception as exc:
@@ -691,8 +801,16 @@ class OrderExecutor:
             "link_id": order_link_id,
             "qty":     qty_to_str(qty, q_step),
             "notional": f"{notional:.2f}",
+            "margin": f"{margin_est:.2f}",
+            "leverage": f"{qty_to_str(order_lev, leverage_step)}x",
+            "price_risk_at_sl": f"{expected_price_sl_loss:.2f}",
+            "estimated_fees": f"{expected_fee_loss:.2f}",
+            "risk_at_sl": f"{expected_sl_loss:.2f}",
+            "risk_pct": f"{expected_sl_loss / equity:.4%}",
+            "tpsl_mode": "Partial",
             "message": (
                 f"Order placed: {side} {qty_to_str(qty, q_step)} {symbol} "
+                f"| risk_at_sl~{expected_sl_loss:.2f} ({expected_sl_loss / equity:.2%}) "
                 f"| sl={sl_price} tp={tp_price or '-'} | id={order_id}"
             ),
         }
@@ -716,6 +834,38 @@ class MatrixSignalBot:
         self._client.access_token = MATRIX_ACCESS_TOKEN
         self._client.user_id = None  # will be populated by whoami()
         self._processed_event_ids: set[str] = set()
+        self._recent_signal_keys: dict[str, float] = {}
+
+    @staticmethod
+    def _signal_key(sig: dict) -> str:
+        def fmt(value: object) -> str:
+            try:
+                return f"{float(value):.8g}"
+            except (TypeError, ValueError):
+                return str(value)
+        return "|".join(
+            [
+                str(sig.get("symbol", "")).upper(),
+                str(sig.get("signal", "")).lower(),
+                fmt(sig.get("entry")),
+                fmt(sig.get("sl")),
+                fmt(sig.get("tp1", "")),
+            ]
+        )
+
+    def _claim_signal(self, sig: dict) -> tuple[bool, float]:
+        if MATRIX_DEDUP_SECONDS <= 0:
+            return True, 0.0
+        now = time.time()
+        expired = [key for key, expires_at in self._recent_signal_keys.items() if expires_at <= now]
+        for key in expired:
+            self._recent_signal_keys.pop(key, None)
+        key = self._signal_key(sig)
+        expires_at = self._recent_signal_keys.get(key, 0.0)
+        if expires_at > now:
+            return False, expires_at - now
+        self._recent_signal_keys[key] = now + MATRIX_DEDUP_SECONDS
+        return True, 0.0
 
     async def start(self) -> None:
         log.info(
@@ -792,9 +942,20 @@ class MatrixSignalBot:
             sig.get("sl"), sig.get("tp1", "-"), sig.get("strategy"), event.sender,
         )
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, self._executor.execute, sig
-        )
+        claimed, wait_seconds = self._claim_signal(sig)
+        if not claimed:
+            result = {
+                "ok": False,
+                "message": f"Duplicate signal ignored for {wait_seconds:.0f}s",
+            }
+        else:
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, self._executor.execute, sig
+                )
+            except Exception as exc:
+                log.exception("Execution failed")
+                result = {"ok": False, "message": f"Execution failed: {exc}"}
 
         reply = self._format_reply(sig, result)
         log.info("Execution result: %s", result.get("message"))
@@ -812,6 +973,11 @@ class MatrixSignalBot:
         ]
         if result["ok"]:
             lines.append(f"Qty: {result.get('qty')}  Notional: {result.get('notional')}")
+            lines.append(
+                f"Risk at SL: {result.get('risk_at_sl')} ({result.get('risk_pct')})  "
+                f"Lev: {result.get('leverage')}"
+            )
+            lines.append(f"TP/SL mode: {result.get('tpsl_mode')}")
             lines.append(f"Order ID: {result.get('order_id')}")
         else:
             lines.append(f"Reason: {result.get('message')}")

@@ -20,11 +20,13 @@ import threading
 import time
 import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+import requests
 from pybit.unified_trading import HTTP, WebSocket
 
 
@@ -66,6 +68,7 @@ TRAINING_EXAMPLES_PATH = os.environ.get(
     "RL_TRAINING_EXAMPLES_PATH",
     os.path.join(LOG_DIR, "training_examples.jsonl"),
 )
+HEARTBEAT_STATE_PATH = os.environ.get("RL_HEARTBEAT_STATE_PATH", os.path.join(LOG_DIR, "heartbeat_state.json"))
 PRETRAIN_PATH = os.environ.get("RL_PRETRAIN_PATH", "").strip()
 PRETRAIN_ON_START = env_bool("RL_PRETRAIN_ON_START", False)
 EXECUTION_QUEUE_SIZE = env_int("RL_EXECUTION_QUEUE_SIZE", 2000)
@@ -76,6 +79,11 @@ API_KEY = os.environ.get("RL_BYBIT_API_KEY", "").strip()
 API_SECRET = os.environ.get("RL_BYBIT_API_SECRET", "").strip()
 ENABLE_PRIVATE_ORDER_WS = env_bool("RL_ENABLE_PRIVATE_ORDER_WS", True)
 REWARD_POLL_SECONDS = env_float("RL_REWARD_POLL_SECONDS", 30.0)
+HEARTBEAT_CHECK_SECONDS = env_float("RL_HEARTBEAT_CHECK_SECONDS", 60.0)
+DAILY_HEARTBEAT_UTC_HOUR = env_int("RL_DAILY_HEARTBEAT_UTC_HOUR", env_int("DAILY_HEARTBEAT_UTC_HOUR", 0))
+DAILY_HEARTBEAT_UTC_MINUTE = env_int("RL_DAILY_HEARTBEAT_UTC_MINUTE", env_int("DAILY_HEARTBEAT_UTC_MINUTE", 5))
+TELEGRAM_BOT_TOKEN = os.environ.get("RL_TELEGRAM_BOT_TOKEN", os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+TELEGRAM_CHAT_ID = os.environ.get("RL_TELEGRAM_CHAT_ID", os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")).strip()
 
 DEFAULT_RISK_USDT = env_float("RL_DEFAULT_RISK_USDT", 100.0)
 MIN_ACTION_TO_TRADE = env_float("RL_MIN_ACTION_TO_TRADE", 0.05)
@@ -89,6 +97,11 @@ TAKER_FEE_RATE = env_float("RL_TAKER_FEE_RATE", env_float("TAKER_FEE_RATE", 0.00
 MIN_STOP_DISTANCE_PCT = env_float("RL_MIN_STOP_DISTANCE_PCT", env_float("MIN_STOP_DISTANCE_PCT", 0.001))
 MAX_FEE_TO_PRICE_RISK = env_float("RL_MAX_FEE_TO_PRICE_RISK", env_float("MAX_FEE_TO_PRICE_RISK", 0.25))
 ALLOW_MIN_QTY_OVERRISK = env_bool("RL_ALLOW_MIN_QTY_OVERRISK", False)
+
+TRAILING_CONVERSION_REASON = (
+    "Bybit trailing stops are scoped to the whole hedge-mode position side; "
+    "RL multi-trade execution uses order-attached Partial TP/SL sized to the entry qty instead"
+)
 
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -235,6 +248,62 @@ def append_jsonl(path: str, row: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(jsonable(row), sort_keys=True) + "\n")
+
+
+class TelegramNotifier:
+    def __init__(self, *, token: str, chat_id: str) -> None:
+        self.token = token
+        self.chat_id, self.thread_id = self._parse_chat_target(chat_id)
+        self.enabled = bool(self.token and self.chat_id)
+
+    @staticmethod
+    def _parse_chat_target(raw: str) -> tuple[str, int | None]:
+        text = str(raw or "").strip()
+        if not text:
+            return "", None
+        for separator in ("_", ":"):
+            head, sep, tail = text.rpartition(separator)
+            if sep and head and tail.isdigit():
+                return head, int(tail)
+        return text, None
+
+    @staticmethod
+    def _redact(value: object, token: str = "") -> str:
+        text = str(value)
+        return text.replace(token, "<redacted>") if token else text
+
+    @staticmethod
+    def _fmt_float(value: object, digits: int = 2) -> str:
+        number = to_float(value)
+        if number is None:
+            return "-"
+        return f"{number:.{digits}f}"
+
+    def send_lines(self, lines: list[str]) -> None:
+        if not self.enabled:
+            return
+        try:
+            payload: dict[str, object] = {
+                "chat_id": self.chat_id,
+                "text": "\n".join(lines),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if self.thread_id is not None:
+                payload["message_thread_id"] = self.thread_id
+            resp = requests.post(
+                f"https://api.telegram.org/bot{self.token}/sendMessage",
+                json=payload,
+                timeout=10,
+            )
+            if resp.status_code >= 400:
+                log.warning(
+                    "[telegram] sendMessage failed status=%s: %s",
+                    resp.status_code,
+                    self._redact(resp.text[:200], self.token),
+                )
+        except Exception as exc:
+            log.warning("[telegram] sendMessage failed: %s", self._redact(exc, self.token))
 
 
 class ContextualRiskAgent:
@@ -557,7 +626,10 @@ class RLExecutionService:
         self.notified_exit_ids: set[str] = set()
         self.execution_queue: queue.Queue[str] = queue.Queue(maxsize=max(1, EXECUTION_QUEUE_SIZE))
         self.started_at = now_iso()
+        self.telegram = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_CHAT_ID)
+        self.last_daily_heartbeat_key = ""
         self._load_runtime_state()
+        self._load_heartbeat_state()
         threading.Thread(target=self._execution_worker, daemon=True, name="rl-execution-worker").start()
         self._requeue_pending_executions()
 
@@ -566,6 +638,7 @@ class RLExecutionService:
             if ENABLE_PRIVATE_ORDER_WS:
                 self._open_private_ws()
             threading.Thread(target=self._reward_poll_loop, daemon=True, name="rl-reward-poll").start()
+            threading.Thread(target=self._heartbeat_loop, daemon=True, name="rl-heartbeat").start()
         elif TRADING_ENABLED:
             log.error("RL_TRADING_ENABLED=true but RL_BYBIT_API_KEY/SECRET are missing")
         else:
@@ -594,6 +667,36 @@ class RLExecutionService:
                 break
         if pending:
             log.info("Requeued %d pending RL execution decisions", len(pending))
+
+    def _load_heartbeat_state(self) -> None:
+        if not os.path.exists(HEARTBEAT_STATE_PATH):
+            return
+        try:
+            with open(HEARTBEAT_STATE_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            self.last_daily_heartbeat_key = str(data.get("last_daily_heartbeat_key", ""))
+            log.info(
+                "Loaded RL heartbeat state from %s  last_daily=%s",
+                HEARTBEAT_STATE_PATH,
+                self.last_daily_heartbeat_key or "-",
+            )
+        except Exception as exc:
+            log.warning("Could not load RL heartbeat state %s: %s", HEARTBEAT_STATE_PATH, exc)
+
+    def _save_heartbeat_state(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(HEARTBEAT_STATE_PATH) or ".", exist_ok=True)
+            tmp_path = f"{HEARTBEAT_STATE_PATH}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"last_daily_heartbeat_key": self.last_daily_heartbeat_key},
+                    fh,
+                    indent=2,
+                    sort_keys=True,
+                )
+            os.replace(tmp_path, HEARTBEAT_STATE_PATH)
+        except Exception as exc:
+            log.warning("Could not save RL heartbeat state %s: %s", HEARTBEAT_STATE_PATH, exc)
 
     def _load_runtime_state(self) -> None:
         if not os.path.exists(STATE_PATH):
@@ -689,6 +792,25 @@ class RLExecutionService:
                 "agent_reward_baseline": self.agent.reward_baseline,
             }
 
+    @staticmethod
+    def _source_exit_style(setup: dict[str, Any]) -> str:
+        return str(setup.get("exit_style") or "fixed_tp").strip().lower() or "fixed_tp"
+
+    @classmethod
+    def _exit_request_metadata(cls, setup: dict[str, Any]) -> dict[str, Any]:
+        source_exit_style = cls._source_exit_style(setup)
+        source_trail_dist = to_float(setup.get("trail_dist"))
+        fixed_exit_styles = {"fixed_tp", "fixed-tp", "fixedtp", "fixed", "partial_fixed_tp_sl"}
+        source_requests_trailing = source_exit_style not in fixed_exit_styles
+        return {
+            "source_exit_style": source_exit_style,
+            "source_trail_dist": source_trail_dist,
+            "source_requests_trailing": source_requests_trailing,
+            "exit_style_conversion_reason": (
+                TRAILING_CONVERSION_REASON if source_requests_trailing else None
+            ),
+        }
+
     def handle_signal(self, payload: dict[str, Any]) -> dict[str, Any]:
         event_id = str(payload.get("event_id") or uuid.uuid4().hex)
         with self.lock:
@@ -699,6 +821,7 @@ class RLExecutionService:
         action, agent_info = self.agent.decide(payload)
         decision_id = uuid.uuid4().hex
         setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
+        exit_request = self._exit_request_metadata(setup)
         decision: dict[str, Any] = {
             "decision_id": decision_id,
             "event_id": event_id,
@@ -712,6 +835,7 @@ class RLExecutionService:
             "risk_mode": "fixed_usdt",
             "default_risk_usdt": DEFAULT_RISK_USDT,
             "setup": setup,
+            **exit_request,
             "payload": payload,
             "agent": agent_info,
             "executed": False,
@@ -732,6 +856,15 @@ class RLExecutionService:
         with self.lock:
             self._save_runtime_state_locked()
         append_jsonl(DECISIONS_PATH, decision)
+        log.info(
+            "[%s] RL signal queued status=%s strategy=%s direction=%s action=%.3f decision=%s",
+            decision.get("symbol") or "-",
+            decision.get("source_status") or "-",
+            decision.get("strategy") or "-",
+            decision.get("direction") or "-",
+            action,
+            decision_id,
+        )
         return self._decision_response(decision)
 
     @staticmethod
@@ -746,6 +879,9 @@ class RLExecutionService:
             "skip_reason": decision.get("skip_reason"),
             "order_id": decision.get("entry_order_id"),
             "order_link_id": decision.get("entry_order_link_id"),
+            "source_exit_style": decision.get("source_exit_style"),
+            "effective_exit_style": decision.get("effective_exit_style"),
+            "exit_style_converted": decision.get("exit_style_converted"),
             "reward": decision.get("reward"),
         }
 
@@ -766,6 +902,16 @@ class RLExecutionService:
                 try:
                     self._maybe_execute(decision)
                     decision["execution_status"] = "executed" if decision.get("executed") else "skipped"
+                    if not decision.get("executed"):
+                        log.info(
+                            "[%s] RL order skipped decision=%s status=%s strategy=%s action=%.3f reason=%s",
+                            decision.get("symbol") or "-",
+                            decision_id,
+                            decision.get("source_status") or "-",
+                            decision.get("strategy") or "-",
+                            float(decision.get("action") or 0.0),
+                            decision.get("skip_reason") or "not executed",
+                        )
                 except Exception as exc:
                     decision["execution_status"] = "failed"
                     decision["execution_error"] = str(exc)
@@ -855,7 +1001,9 @@ class RLExecutionService:
         stop = to_float(setup.get("stop_loss"))
         target = to_float(setup.get("take_profit"))
         trail_dist = to_float(setup.get("trail_dist"))
-        exit_style = str(setup.get("exit_style") or "fixed_tp")
+        exit_request = self._exit_request_metadata(setup)
+        source_requests_trailing = bool(exit_request["source_requests_trailing"])
+        decision.update(exit_request)
 
         if action < MIN_ACTION_TO_TRADE:
             decision["skip_reason"] = f"action {action:.4f} below RL_MIN_ACTION_TO_TRADE={MIN_ACTION_TO_TRADE:.4f}"
@@ -939,6 +1087,7 @@ class RLExecutionService:
         sl_price = round_to_step(stop, tick)
         tp_price = round_to_step(target, tick) if target is not None else None
         trail_price_dist = round_to_step(trail_dist, tick) if trail_dist is not None else 0.0
+        effective_exit_style = "partial_fixed_tp_sl" if tp_price is not None else "unprotected_market_entry"
         side = "Buy" if direction == "long" else "Sell"
         position_idx = 1 if side == "Buy" else 2
         order_link_id = self._order_link_id(decision.get("strategy"), symbol, direction)
@@ -1010,11 +1159,10 @@ class RLExecutionService:
             "order_request": order_kwargs,
             "order_response": resp,
             "partial_tpsl_mode": bool(tp_price is not None),
-            "trailing_disabled_reason": (
-                "RL hedge-mode execution uses attached Partial TP/SL sized to the entry qty; "
-                "full-position trailing stops are disabled"
-                if exit_style != "fixed_tp" or trail_price_dist > 0 else None
-            ),
+            "source_trail_dist_rounded": trail_price_dist,
+            "effective_exit_style": effective_exit_style,
+            "exit_style_converted": source_requests_trailing,
+            "trailing_disabled_reason": TRAILING_CONVERSION_REASON if source_requests_trailing else None,
         })
         with self.lock:
             decision_id = str(decision["decision_id"])
@@ -1153,6 +1301,181 @@ class RLExecutionService:
             except Exception:
                 log.exception("Reward poll failed")
 
+    @staticmethod
+    def _parse_iso(raw: object) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            text = str(raw).replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _iter_jsonl(path: str) -> list[dict[str, Any]]:
+        if not os.path.exists(path):
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except Exception as exc:
+            log.warning("Could not read %s for heartbeat: %s", path, exc)
+        return rows
+
+    @staticmethod
+    def _fmt_money(value: float) -> str:
+        return f"{value:+.2f} USDT"
+
+    @staticmethod
+    def _fmt_r(value: float) -> str:
+        return f"{value:+.3f}R"
+
+    def _heartbeat_summary_for_day(self, day_key: str) -> dict[str, Any]:
+        decisions = []
+        rewards = []
+        for row in self._iter_jsonl(DECISIONS_PATH):
+            ts = self._parse_iso(row.get("received_at"))
+            if ts is not None and ts.strftime("%Y-%m-%d") == day_key:
+                decisions.append(row)
+        for row in self._iter_jsonl(REWARDS_PATH):
+            ts = self._parse_iso(row.get("received_at"))
+            if ts is not None and ts.strftime("%Y-%m-%d") == day_key:
+                rewards.append(row)
+
+        latest: dict[str, dict[str, Any]] = {}
+        for row in decisions:
+            decision_id = str(row.get("decision_id") or "")
+            if decision_id:
+                latest[decision_id] = row
+        total_decisions = len(latest)
+        executed = sum(1 for row in latest.values() if row.get("executed"))
+        skipped = sum(1 for row in latest.values() if row.get("skip_reason") and not row.get("executed"))
+        failed = sum(1 for row in latest.values() if row.get("execution_status") == "failed")
+        queued = sum(1 for row in latest.values() if row.get("execution_status") in {"queued", "running"})
+        accepted_src = sum(1 for row in latest.values() if row.get("source_status") == "accepted")
+        rejected_src = sum(1 for row in latest.values() if row.get("source_status") == "rejected")
+        actions = [to_float(row.get("action")) for row in latest.values()]
+        actions = [value for value in actions if value is not None]
+        avg_action = sum(actions) / len(actions) if actions else 0.0
+
+        pnl_values = [to_float(row.get("closed_pnl")) for row in rewards]
+        pnl_values = [value for value in pnl_values if value is not None]
+        reward_r_values = [to_float(row.get("reward_default_r")) for row in rewards]
+        reward_r_values = [value for value in reward_r_values if value is not None]
+        total_pnl = sum(pnl_values)
+        total_r = sum(reward_r_values)
+        wins = sum(1 for value in pnl_values if value > 0)
+        losses = sum(1 for value in pnl_values if value < 0)
+        breakeven = sum(1 for value in pnl_values if value == 0)
+
+        by_strategy: dict[str, dict[str, float]] = {}
+        for row in rewards:
+            strategy = str(row.get("strategy") or "unknown")
+            bucket = by_strategy.setdefault(strategy, {"closed": 0, "pnl": 0.0, "r": 0.0})
+            bucket["closed"] += 1
+            bucket["pnl"] += to_float(row.get("closed_pnl")) or 0.0
+            bucket["r"] += to_float(row.get("reward_default_r")) or 0.0
+
+        with self.lock:
+            active = len(self.active_trades)
+            queue_depth = self.execution_queue.qsize()
+            agent_updates = self.agent.reward_updates
+            baseline = self.agent.reward_baseline
+
+        return {
+            "day": day_key,
+            "decisions": total_decisions,
+            "source_accepted": accepted_src,
+            "source_rejected": rejected_src,
+            "executed": executed,
+            "skipped": skipped,
+            "failed": failed,
+            "queued": queued,
+            "active": active,
+            "queue_depth": queue_depth,
+            "avg_action": avg_action,
+            "closed": len(rewards),
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "total_pnl": total_pnl,
+            "total_r": total_r,
+            "agent_updates": agent_updates,
+            "reward_baseline": baseline,
+            "by_strategy": by_strategy,
+        }
+
+    def _send_daily_heartbeat(self, summary: dict[str, Any]) -> None:
+        lines = [
+            f"<b>[RL DAILY HEARTBEAT] {escape(str(summary['day']))}</b>",
+            f"Decisions: <code>{summary['decisions']}</code>  Source A/R: <code>{summary['source_accepted']}/{summary['source_rejected']}</code>",
+            f"Executed / skipped / failed / queued: <code>{summary['executed']} / {summary['skipped']} / {summary['failed']} / {summary['queued']}</code>",
+            f"Active RL trades: <code>{summary['active']}</code>  Queue: <code>{summary['queue_depth']}</code>",
+            f"Avg action: <code>{summary['avg_action']:.3f}</code>  Default risk: <code>{DEFAULT_RISK_USDT:.2f} USDT</code>",
+            f"Closed today: <code>{summary['closed']}</code>  W/L/BE: <code>{summary['wins']}/{summary['losses']}/{summary['breakeven']}</code>",
+            f"PnL: <code>{self._fmt_money(float(summary['total_pnl']))}</code>  Reward: <code>{self._fmt_r(float(summary['total_r']))}</code>",
+            f"Agent updates: <code>{summary['agent_updates']}</code>  Baseline: <code>{float(summary['reward_baseline']):+.4f}R</code>",
+        ]
+        by_strategy = summary.get("by_strategy") if isinstance(summary.get("by_strategy"), dict) else {}
+        if by_strategy:
+            top = sorted(
+                by_strategy.items(),
+                key=lambda item: abs(float(item[1].get("pnl", 0.0))),
+                reverse=True,
+            )[:6]
+            lines.append("<b>By strategy</b>")
+            for strategy, bucket in top:
+                lines.append(
+                    f"{escape(strategy)}: <code>{int(bucket.get('closed', 0))} closed, "
+                    f"{self._fmt_money(float(bucket.get('pnl', 0.0)))}, "
+                    f"{self._fmt_r(float(bucket.get('r', 0.0)))}</code>"
+                )
+        self.telegram.send_lines(lines)
+
+    def _maybe_send_daily_heartbeat(self) -> None:
+        now = datetime.now(timezone.utc)
+        if (
+            now.hour < DAILY_HEARTBEAT_UTC_HOUR
+            or (now.hour == DAILY_HEARTBEAT_UTC_HOUR and now.minute < DAILY_HEARTBEAT_UTC_MINUTE)
+        ):
+            return
+        day_key = now.strftime("%Y-%m-%d")
+        if self.last_daily_heartbeat_key == day_key:
+            return
+        report_day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        summary = self._heartbeat_summary_for_day(report_day)
+        self._send_daily_heartbeat(summary)
+        self.last_daily_heartbeat_key = day_key
+        self._save_heartbeat_state()
+        log.info(
+            "RL daily heartbeat sent day=%s decisions=%d closed=%d pnl=%.2f",
+            report_day,
+            summary["decisions"],
+            summary["closed"],
+            summary["total_pnl"],
+        )
+
+    def _heartbeat_loop(self) -> None:
+        while True:
+            time.sleep(max(10.0, HEARTBEAT_CHECK_SECONDS))
+            try:
+                self._maybe_send_daily_heartbeat()
+            except Exception:
+                log.exception("RL heartbeat failed")
+
     def _closed_pnl_row_matches_decision(self, row: dict[str, Any], decision: dict[str, Any]) -> bool:
         row_keys = [
             row.get("orderId"),
@@ -1283,6 +1606,12 @@ class RLExecutionService:
                 "default_risk_usdt": decision.get("default_risk_usdt"),
                 "risk_budget_usdt": decision.get("risk_budget_usdt"),
                 "expected_sl_loss_usdt": decision.get("expected_sl_loss_usdt"),
+                "source_exit_style": decision.get("source_exit_style"),
+                "source_trail_dist": decision.get("source_trail_dist"),
+                "source_requests_trailing": decision.get("source_requests_trailing"),
+                "effective_exit_style": decision.get("effective_exit_style"),
+                "exit_style_converted": decision.get("exit_style_converted"),
+                "exit_style_conversion_reason": decision.get("exit_style_conversion_reason"),
                 "setup": decision.get("setup"),
                 "source_features": payload.get("features"),
                 "feature_columns": payload.get("feature_columns"),

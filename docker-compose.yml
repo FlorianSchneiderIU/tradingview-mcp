@@ -122,6 +122,37 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # BTC weekday/Monday/regime edge bot.
+  # Listens to Bybit public 1h klines, sends Telegram signals with the
+  # historical 1R stats, and can optionally execute on a separate Bybit Demo
+  # account via WEEKDAY_EDGE_BYBIT_API_KEY / WEEKDAY_EDGE_BYBIT_API_SECRET.
+  weekday-edge-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python weekday_edge_bot.py
+    container_name: weekday-edge-bot
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env
+    depends_on:
+      - rl-exec-bot
+    environment:
+      LOG_DIR: /app/logs
+      WEEKDAY_EDGE_LOG_DIR: /app/logs
+      WEEKDAY_EDGE_LEDGER_PATH: /app/logs/weekday_edge_signals.jsonl
+      WEEKDAY_EDGE_STATS_PATH: /app/weekday_1r_eval/btcusdt_20210525_20260525_1r_weekday_entry_hour_meaningful.csv
+      WEEKDAY_EDGE_RL_EXECUTION_URL: http://rl-exec-bot:8090/v1/signals
+      WEEKDAY_EDGE_RL_EXECUTION_TIMEOUT_SECONDS: "1.0"
+    volumes:
+      - ./bot/logs:/app/logs
+      - ./scripts/output/bybit_regime_histogram/weekday_1r_eval:/app/weekday_1r_eval:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Matrix signal follower.
   # Joins a Matrix room, parses signal messages, and places Bybit orders.
   # Configure MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN, MATRIX_ROOM_ID in .env.

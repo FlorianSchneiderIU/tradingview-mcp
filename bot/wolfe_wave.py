@@ -26,7 +26,7 @@ log = logging.getLogger("mm")
 
 WOLFE_WAVE_INTERVAL = "5m"
 WOLFE_WAVE_BYBIT_INTERVAL = "5"
-DEFAULT_WOLFE_WAVE_SYMBOLS = "BTCUSDT,ETHUSDT,XRPUSDT,BNBUSDT,LINKUSDT"
+DEFAULT_WOLFE_WAVE_SYMBOLS = "BTCUSDT,ETHUSDT,LINKUSDT,LTCUSDT,SOLUSDT,UNIUSDT,XRPUSDT"
 DEFAULT_WOLFE_WAVE_CONFIG = WolfeConfig(
     exec_tf=WOLFE_WAVE_INTERVAL,
     pattern_tf="1h",
@@ -40,6 +40,7 @@ DEFAULT_WOLFE_WAVE_CONFIG = WolfeConfig(
     target_projection_bars=18,
     max_hold_bars=288,
     trend_filter="rsi",
+    regime_filter="none",
 )
 
 
@@ -110,7 +111,9 @@ def load_wolfe_wave_configs(
         out[normalized] = cfg
         log.info(
             f"[wolfe] {normalized}: config loaded pattern_tf={cfg.pattern_tf} "
-            f"pivots={cfg.pivot_method} min_score={cfg.min_score:.1f}"
+            f"pivots={cfg.pivot_method}/{cfg.pivot_source} min_score={cfg.min_score:.1f} "
+            f"trend={cfg.trend_filter} regime={cfg.regime_filter} "
+            f"directions={'L' if cfg.allow_longs else '-'}{'S' if cfg.allow_shorts else '-'}"
         )
     return out
 
@@ -165,6 +168,7 @@ class WolfeWaveEngine:
             "entry_time": signal.entry_time.isoformat(),
             "pattern_tf": signal.pattern_tf,
             "pivot_method": signal.pivot_method,
+            "trend_context": signal.trend_context,
             "target_rr_planned": float(signal.target_rr_planned),
             "score": float(signal.score),
             "p5_break_atr": float(signal.p5_break_atr),

@@ -33,3 +33,6 @@ bot/__pycache__/
 bot/__pycache__/bot.cpython-314.pyc
 bot/.env.matrix
 scripts/output/
+scripts/**/*.json
+scripts/**/*.err
+scripts/**/*.pid

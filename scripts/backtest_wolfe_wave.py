@@ -26,6 +26,45 @@ INTERVAL_MS = {
     "4h": 14_400_000,
     "1d": 86_400_000,
 }
+
+LOWPASS_NUMERIC_WEIGHTS = {
+    "pivot_window": 0.45,
+    "pivot_confirm_window": 0.35,
+    "zigzag_atr_mult": 0.80,
+    "max_time_ratio": 0.70,
+    "max_p5_break_atr": 0.65,
+    "stop_atr_buffer": 0.80,
+    "min_rr": 0.90,
+    "min_score": 1.15,
+    "target_projection_bars": 0.65,
+    "max_hold_bars": 0.55,
+}
+LOWPASS_CATEGORICAL_WEIGHTS = {
+    "pattern_tf": 1.25,
+    "pivot_method": 0.85,
+    "pivot_source": 0.45,
+    "trend_filter": 0.65,
+    "regime_filter": 0.70,
+}
+LOWPASS_MEDIAN_METRICS = [
+    "robust_score",
+    "train_net_r",
+    "validation_net_r",
+    "oos_net_r",
+    "all_net_r",
+    "train_avg_r",
+    "validation_avg_r",
+    "oos_avg_r",
+    "all_avg_r",
+    "train_profit_factor",
+    "validation_profit_factor",
+    "oos_profit_factor",
+    "all_profit_factor",
+    "train_trades",
+    "validation_trades",
+    "oos_trades",
+    "all_trades",
+]
 RESAMPLE_RULE = {
     "3m": "3min",
     "5m": "5min",
@@ -164,6 +203,23 @@ def fetch_bybit_klines(
     return frame[["open_time", "close_time", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
+def fetch_bybit_mintick(symbol: str, *, category: str = "linear", base_url: str = BYBIT_URL) -> float:
+    response = requests.get(
+        f"{base_url.rstrip('/')}/v5/market/instruments-info",
+        params={"category": category, "symbol": bybit_symbol(symbol)},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    ret_code = payload.get("retCode", 0)
+    if ret_code not in (0, "0"):
+        raise RuntimeError(f"Bybit returned retCode={ret_code} retMsg={payload.get('retMsg')}")
+    rows = payload.get("result", {}).get("list", [])
+    if not rows:
+        raise RuntimeError(f"No Bybit {category} instrument found for {symbol}")
+    return float(rows[0].get("priceFilter", {}).get("tickSize", "0.01"))
+
+
 def resample_ohlc(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     timeframe = normalize_timeframe(timeframe)
     if timeframe not in RESAMPLE_RULE:
@@ -231,6 +287,9 @@ def add_indicators(df: pd.DataFrame, atr_length: int, ema_length: int, rsi_lengt
     ).max(axis=1)
     out["atr"] = rma(tr, atr_length)
     out["ema"] = out["close"].ewm(span=ema_length, adjust=False).mean()
+    out["ema_slope_atr"] = (out["ema"] - out["ema"].shift(20)) / out["atr"].replace(0.0, np.nan)
+    atr_baseline = out["atr"].rolling(200, min_periods=50).median()
+    out["atr_ratio"] = out["atr"] / atr_baseline.replace(0.0, np.nan)
     delta = out["close"].diff()
     gain = delta.clip(lower=0.0)
     loss = (-delta).clip(lower=0.0)
@@ -290,6 +349,7 @@ class WolfeConfig:
     require_reclaim_vs_p5: bool = True
     min_volume_ratio: float = 0.0
     trend_filter: str = "none"
+    regime_filter: str = "none"
     long_max_rsi: float = 58.0
     short_min_rsi: float = 42.0
     max_hold_bars: int = 288
@@ -597,20 +657,24 @@ def score_pattern(
 
 def _pattern_context_ok(pattern_row: pd.Series, direction: str, cfg: WolfeConfig) -> tuple[bool, str]:
     trend_filter = cfg.trend_filter.strip().lower()
+    regime_filter = cfg.regime_filter.strip().lower()
     rsi = float(pattern_row.get("rsi", math.nan))
     close = float(pattern_row.get("close", math.nan))
     ema = float(pattern_row.get("ema", math.nan))
     atr = float(pattern_row.get("atr", math.nan))
+    ema_slope_atr = float(pattern_row.get("ema_slope_atr", math.nan))
+    atr_ratio = float(pattern_row.get("atr_ratio", math.nan))
 
+    contexts: list[str] = []
     if trend_filter in {"none", ""}:
-        return True, "none"
-    if trend_filter == "rsi":
+        contexts.append("trend:none")
+    elif trend_filter == "rsi":
         if direction == "long" and _finite(rsi) and rsi > cfg.long_max_rsi:
             return False, f"rsi>{cfg.long_max_rsi:g}"
         if direction == "short" and _finite(rsi) and rsi < cfg.short_min_rsi:
             return False, f"rsi<{cfg.short_min_rsi:g}"
-        return True, "rsi"
-    if trend_filter == "counter_ema":
+        contexts.append("trend:rsi")
+    elif trend_filter == "counter_ema":
         if not (_finite(close) and _finite(ema) and _finite(atr) and atr > 0):
             return False, "trend_unavailable"
         dist_atr = (close - ema) / atr
@@ -618,8 +682,39 @@ def _pattern_context_ok(pattern_row: pd.Series, direction: str, cfg: WolfeConfig
             return False, "deep_below_ema"
         if direction == "short" and dist_atr > 6.0:
             return False, "deep_above_ema"
-        return True, "counter_ema"
-    raise ValueError(f"Unknown trend_filter: {cfg.trend_filter!r}")
+        contexts.append("trend:counter_ema")
+    else:
+        raise ValueError(f"Unknown trend_filter: {cfg.trend_filter!r}")
+
+    if regime_filter in {"none", ""}:
+        contexts.append("regime:none")
+    elif regime_filter == "high_vol":
+        if not (_finite(atr_ratio) and atr_ratio >= 1.0):
+            return False, "regime_not_high_vol"
+        contexts.append("regime:high_vol")
+    elif regime_filter == "low_vol":
+        if not (_finite(atr_ratio) and atr_ratio <= 1.0):
+            return False, "regime_not_low_vol"
+        contexts.append("regime:low_vol")
+    elif regime_filter == "trend_aligned":
+        if not (_finite(close) and _finite(ema) and _finite(ema_slope_atr)):
+            return False, "regime_unavailable"
+        if direction == "long" and not (close >= ema and ema_slope_atr >= 0.0):
+            return False, "regime_not_bull_trend"
+        if direction == "short" and not (close <= ema and ema_slope_atr <= 0.0):
+            return False, "regime_not_bear_trend"
+        contexts.append("regime:trend_aligned")
+    elif regime_filter == "mean_reversion":
+        if not (_finite(close) and _finite(ema) and _finite(ema_slope_atr)):
+            return False, "regime_unavailable"
+        if direction == "long" and not (close <= ema and ema_slope_atr <= 0.0):
+            return False, "regime_not_down_reversion"
+        if direction == "short" and not (close >= ema and ema_slope_atr >= 0.0):
+            return False, "regime_not_up_reversion"
+        contexts.append("regime:mean_reversion")
+    else:
+        raise ValueError(f"Unknown regime_filter: {cfg.regime_filter!r}")
+    return True, "|".join(contexts)
 
 
 def validate_pivot_five(
@@ -1069,14 +1164,481 @@ def metric_row(trades: pd.DataFrame, prefix: str) -> dict[str, float]:
     return {f"{prefix}_{key}": value for key, value in strategy_metrics(trades).items()}
 
 
-def tune_btc(
+def finite_metric(values: pd.Series, cap: float | None = None) -> np.ndarray:
+    out = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+    finite = out[np.isfinite(out)]
+    fill = float(np.nanmedian(finite)) if finite.size else 0.0
+    out = np.where(np.isfinite(out), out, fill)
+    if cap is not None:
+        out = np.clip(out, -cap, cap)
+    return out
+
+
+def parameter_distance2(rows: pd.DataFrame) -> np.ndarray:
+    n = len(rows)
+    d2 = np.zeros((n, n), dtype=float)
+    for col, weight in LOWPASS_NUMERIC_WEIGHTS.items():
+        if col not in rows.columns:
+            continue
+        values = pd.to_numeric(rows[col], errors="coerce").to_numpy(dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            continue
+        values = np.where(np.isfinite(values), values, np.nanmedian(finite))
+        span = float(np.nanmax(values) - np.nanmin(values))
+        if span <= 0.0:
+            continue
+        delta = (values[:, None] - values[None, :]) / span
+        d2 += weight * delta * delta
+
+    for col, weight in LOWPASS_CATEGORICAL_WEIGHTS.items():
+        if col not in rows.columns:
+            continue
+        values = rows[col].astype(str).to_numpy()
+        d2 += weight * (values[:, None] != values[None, :]).astype(float)
+    return d2
+
+
+def median_lowpass_scores(
+    scores: pd.DataFrame,
+    *,
+    radius: float,
+    min_neighbors: int,
+    outlier_penalty: float,
+) -> pd.DataFrame:
+    if scores.empty or "robust_score" not in scores.columns:
+        return scores
+
+    out = scores.copy().reset_index(drop=True)
+    n = len(out)
+    error_mask = out["error"].notna().to_numpy() if "error" in out.columns else np.zeros(n, dtype=bool)
+    evaluated_mask = ~error_mask & pd.to_numeric(out["robust_score"], errors="coerce").notna().to_numpy()
+    if not evaluated_mask.any():
+        return out
+
+    d2 = parameter_distance2(out)
+    radius2 = max(float(radius), 0.0) ** 2
+    min_neighbors = min(max(int(min_neighbors), 1), int(evaluated_mask.sum()))
+    metric_values = {
+        metric: finite_metric(out[metric], cap=10.0 if metric.endswith("profit_factor") else None)
+        for metric in LOWPASS_MEDIAN_METRICS
+        if metric in out.columns
+    }
+    pass_mask = (
+        out["selection_pass"].fillna(False).astype(bool).to_numpy()
+        if "selection_pass" in out.columns
+        else np.ones(n, dtype=bool)
+    )
+
+    neighbor_counts = np.zeros(n, dtype=int)
+    local_pass_rates = np.full(n, np.nan, dtype=float)
+    lowpass_values: dict[str, np.ndarray] = {
+        metric: np.full(n, np.nan, dtype=float) for metric in metric_values
+    }
+
+    evaluated_indices = np.flatnonzero(evaluated_mask)
+    for row_idx in range(n):
+        if not evaluated_mask[row_idx]:
+            continue
+        local_mask = (d2[row_idx] <= radius2) & evaluated_mask
+        if int(local_mask.sum()) < min_neighbors:
+            nearest = evaluated_indices[np.argsort(d2[row_idx, evaluated_indices])[:min_neighbors]]
+            local_mask[nearest] = True
+
+        neighbor_counts[row_idx] = int(local_mask.sum())
+        local_pass_rates[row_idx] = float(pass_mask[local_mask].mean()) if local_mask.any() else np.nan
+        for metric, values in metric_values.items():
+            lowpass_values[metric][row_idx] = float(np.median(values[local_mask]))
+
+    for metric, values in lowpass_values.items():
+        out[f"lowpass_{metric}"] = values
+
+    raw_score = pd.to_numeric(out["robust_score"], errors="coerce").to_numpy(dtype=float)
+    lowpass_score = out["lowpass_robust_score"].to_numpy(dtype=float)
+    out["local_neighbor_count"] = neighbor_counts
+    out["local_pass_rate"] = local_pass_rates
+    out["lowpass_outlier_gap"] = np.maximum(raw_score - lowpass_score, 0.0)
+    out["optimization_score"] = lowpass_score
+    out["stability_score"] = lowpass_score - float(outlier_penalty) * out["lowpass_outlier_gap"].to_numpy(dtype=float)
+    return out
+
+
+BTC_TUNE_KEYS = [
+    "pivot_method",
+    "pattern_tf",
+    "pivot_source",
+    "pivot_window",
+    "pivot_confirm_window",
+    "zigzag_atr_mult",
+    "max_time_ratio",
+    "max_p5_break_atr",
+    "stop_atr_buffer",
+    "min_rr",
+    "min_score",
+    "target_projection_bars",
+    "max_hold_bars",
+    "trend_filter",
+    "regime_filter",
+]
+BTC_TUNE_VALUES = {
+    "pattern_tf": ("5m", "15m", "1h", "4h"),
+    "pivot_source": ("wick", "body", "close"),
+    "pivot_window": (3, 5, 8, 12),
+    "zigzag_atr_mult": (1.0, 1.4, 1.8, 2.2),
+    "max_time_ratio": (2.2, 3.0, 3.8),
+    "max_p5_break_atr": (1.4, 2.2, 3.0),
+    "stop_atr_buffer": (0.30, 0.50, 0.75),
+    "min_rr": (1.2, 1.5, 2.0),
+    "min_score": (48.0, 58.0, 64.0, 70.0),
+    "target_projection_bars": (8, 12, 18, 30),
+    "max_hold_bars": (96, 144, 288, 432, 576),
+    "trend_filter": ("none", "rsi"),
+    "regime_filter": ("none", "high_vol", "low_vol", "trend_aligned", "mean_reversion"),
+}
+BTC_CONFIRM_VALUES = {
+    "zigzag": (0,),
+    "fractal": (0, 3, 5, 8, 12),
+}
+
+
+def btc_parameter_grid(max_configs: int, seed: int = 42) -> list[dict[str, Any]]:
+    methods = ("zigzag", "fractal")
+
+    def rows_in_order():
+        for pivot_method in methods:
+            for values in itertools.product(
+                BTC_TUNE_VALUES["pattern_tf"],
+                BTC_TUNE_VALUES["pivot_source"],
+                BTC_TUNE_VALUES["pivot_window"],
+                BTC_CONFIRM_VALUES[pivot_method],
+                BTC_TUNE_VALUES["zigzag_atr_mult"],
+                BTC_TUNE_VALUES["max_time_ratio"],
+                BTC_TUNE_VALUES["max_p5_break_atr"],
+                BTC_TUNE_VALUES["stop_atr_buffer"],
+                BTC_TUNE_VALUES["min_rr"],
+                BTC_TUNE_VALUES["min_score"],
+                BTC_TUNE_VALUES["target_projection_bars"],
+                BTC_TUNE_VALUES["max_hold_bars"],
+                BTC_TUNE_VALUES["trend_filter"],
+                BTC_TUNE_VALUES["regime_filter"],
+            ):
+                yield dict(zip(BTC_TUNE_KEYS, (pivot_method, *values)))
+
+    if max_configs <= 0:
+        return list(rows_in_order())
+
+    total = sum(
+        math.prod(
+            [
+                len(BTC_TUNE_VALUES["pattern_tf"]),
+                len(BTC_TUNE_VALUES["pivot_source"]),
+                len(BTC_TUNE_VALUES["pivot_window"]),
+                len(BTC_CONFIRM_VALUES[method]),
+                len(BTC_TUNE_VALUES["zigzag_atr_mult"]),
+                len(BTC_TUNE_VALUES["max_time_ratio"]),
+                len(BTC_TUNE_VALUES["max_p5_break_atr"]),
+                len(BTC_TUNE_VALUES["stop_atr_buffer"]),
+                len(BTC_TUNE_VALUES["min_rr"]),
+                len(BTC_TUNE_VALUES["min_score"]),
+                len(BTC_TUNE_VALUES["target_projection_bars"]),
+                len(BTC_TUNE_VALUES["max_hold_bars"]),
+                len(BTC_TUNE_VALUES["trend_filter"]),
+                len(BTC_TUNE_VALUES["regime_filter"]),
+            ]
+        )
+        for method in methods
+    )
+    target = min(int(max_configs), total)
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+
+    def pick(values: tuple[Any, ...]) -> Any:
+        return values[int(rng.integers(len(values)))]
+
+    attempts = 0
+    while len(rows) < target and attempts < target * 100:
+        attempts += 1
+        pivot_method = str(pick(methods))
+        row = {
+            "pivot_method": pivot_method,
+            "pattern_tf": pick(BTC_TUNE_VALUES["pattern_tf"]),
+            "pivot_source": pick(BTC_TUNE_VALUES["pivot_source"]),
+            "pivot_window": pick(BTC_TUNE_VALUES["pivot_window"]),
+            "pivot_confirm_window": pick(BTC_CONFIRM_VALUES[pivot_method]),
+            "zigzag_atr_mult": pick(BTC_TUNE_VALUES["zigzag_atr_mult"]),
+            "max_time_ratio": pick(BTC_TUNE_VALUES["max_time_ratio"]),
+            "max_p5_break_atr": pick(BTC_TUNE_VALUES["max_p5_break_atr"]),
+            "stop_atr_buffer": pick(BTC_TUNE_VALUES["stop_atr_buffer"]),
+            "min_rr": pick(BTC_TUNE_VALUES["min_rr"]),
+            "min_score": pick(BTC_TUNE_VALUES["min_score"]),
+            "target_projection_bars": pick(BTC_TUNE_VALUES["target_projection_bars"]),
+            "max_hold_bars": pick(BTC_TUNE_VALUES["max_hold_bars"]),
+            "trend_filter": pick(BTC_TUNE_VALUES["trend_filter"]),
+            "regime_filter": pick(BTC_TUNE_VALUES["regime_filter"]),
+        }
+        key = tuple(row[key] for key in BTC_TUNE_KEYS)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+
+    if len(rows) < target:
+        for row in rows_in_order():
+            key = tuple(row[key] for key in BTC_TUNE_KEYS)
+            if key in seen:
+                continue
+            rows.append(row)
+            if len(rows) >= target:
+                break
+    return rows
+
+
+def plain_value(value: Any) -> Any:
+    return value.item() if hasattr(value, "item") else value
+
+
+def coerce_tune_param(key: str, value: Any) -> Any:
+    if key in {"pivot_window", "pivot_confirm_window", "target_projection_bars", "max_hold_bars"}:
+        return int(float(value))
+    if key in {
+        "zigzag_atr_mult",
+        "max_time_ratio",
+        "max_p5_break_atr",
+        "stop_atr_buffer",
+        "min_rr",
+        "min_score",
+    }:
+        return float(value)
+    return str(value)
+
+
+def btc_params_from_row(row: pd.Series) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    for key in BTC_TUNE_KEYS:
+        if key not in row.index or pd.isna(row[key]):
+            continue
+        params[key] = coerce_tune_param(key, plain_value(row[key]))
+    if "pivot_method" in params:
+        method = str(params["pivot_method"])
+        if method in BTC_CONFIRM_VALUES and params.get("pivot_confirm_window") not in BTC_CONFIRM_VALUES[method]:
+            params["pivot_confirm_window"] = BTC_CONFIRM_VALUES[method][0]
+    return params
+
+
+def config_key(values: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(values.get(key) for key in BTC_TUNE_KEYS)
+
+
+def adjacent_values(values: tuple[Any, ...], current: Any, width: int) -> tuple[Any, ...]:
+    if not values:
+        return (current,)
+    if isinstance(values[0], str):
+        try:
+            idx = values.index(str(current))
+        except ValueError:
+            return (current, *values)
+    else:
+        numeric = [float(value) for value in values]
+        target = float(current)
+        idx = int(np.argmin(np.abs(np.asarray(numeric) - target)))
+    lo = max(0, idx - max(int(width), 0))
+    hi = min(len(values), idx + max(int(width), 0) + 1)
+    out = list(values[lo:hi])
+    if current not in out:
+        out.insert(0, current)
+    return tuple(dict.fromkeys(out))
+
+
+def local_refinement_options(seed_params: dict[str, Any], width: int) -> dict[str, tuple[Any, ...]]:
+    method = str(seed_params.get("pivot_method", "fractal"))
+    confirm_values = BTC_CONFIRM_VALUES.get(method, (0,))
+    return {
+        "pivot_method": (method,),
+        "pattern_tf": adjacent_values(BTC_TUNE_VALUES["pattern_tf"], seed_params.get("pattern_tf", "15m"), width),
+        "pivot_source": tuple(dict.fromkeys((seed_params.get("pivot_source", "wick"), *BTC_TUNE_VALUES["pivot_source"]))),
+        "pivot_window": adjacent_values(BTC_TUNE_VALUES["pivot_window"], seed_params.get("pivot_window", 8), width),
+        "pivot_confirm_window": adjacent_values(confirm_values, seed_params.get("pivot_confirm_window", 0), width),
+        "zigzag_atr_mult": adjacent_values(BTC_TUNE_VALUES["zigzag_atr_mult"], seed_params.get("zigzag_atr_mult", 1.4), width),
+        "max_time_ratio": adjacent_values(BTC_TUNE_VALUES["max_time_ratio"], seed_params.get("max_time_ratio", 3.0), width),
+        "max_p5_break_atr": adjacent_values(BTC_TUNE_VALUES["max_p5_break_atr"], seed_params.get("max_p5_break_atr", 2.2), width),
+        "stop_atr_buffer": adjacent_values(BTC_TUNE_VALUES["stop_atr_buffer"], seed_params.get("stop_atr_buffer", 0.5), width),
+        "min_rr": adjacent_values(BTC_TUNE_VALUES["min_rr"], seed_params.get("min_rr", 1.5), width),
+        "min_score": adjacent_values(BTC_TUNE_VALUES["min_score"], seed_params.get("min_score", 58.0), width),
+        "target_projection_bars": adjacent_values(
+            BTC_TUNE_VALUES["target_projection_bars"],
+            seed_params.get("target_projection_bars", 18),
+            width,
+        ),
+        "max_hold_bars": adjacent_values(BTC_TUNE_VALUES["max_hold_bars"], seed_params.get("max_hold_bars", 288), width),
+        "trend_filter": tuple(dict.fromkeys((seed_params.get("trend_filter", "none"), *BTC_TUNE_VALUES["trend_filter"]))),
+        "regime_filter": tuple(
+            dict.fromkeys((seed_params.get("regime_filter", "none"), *BTC_TUNE_VALUES["regime_filter"]))
+        ),
+    }
+
+
+def sample_local_configs(
+    seed_params: dict[str, Any],
+    *,
+    samples: int,
+    width: int,
+    rng: np.random.Generator,
+) -> list[dict[str, Any]]:
+    options = local_refinement_options(seed_params, width)
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+
+    def add(row: dict[str, Any]) -> None:
+        normalized = {key: coerce_tune_param(key, row[key]) for key in BTC_TUNE_KEYS if key in row}
+        key = config_key(normalized)
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append(normalized)
+
+    add(seed_params)
+    for key, values in options.items():
+        for value in values:
+            row = {**seed_params, key: value}
+            add(row)
+
+    attempts = 0
+    target = max(int(samples), len(rows))
+    while len(rows) < target and attempts < target * 100:
+        attempts += 1
+        row = {key: values[int(rng.integers(len(values)))] for key, values in options.items()}
+        add(row)
+    return rows[:target]
+
+
+def select_refinement_seeds(
+    scores: pd.DataFrame,
+    *,
+    max_seeds: int,
+    seed: int,
+) -> pd.DataFrame:
+    if scores.empty:
+        return scores
+    rows = scores.copy()
+    if "error" in rows.columns:
+        rows = rows[rows["error"].isna()].copy()
+    rows = rows.dropna(subset=[key for key in BTC_TUNE_KEYS if key in rows.columns])
+    if rows.empty:
+        return rows
+
+    rng = np.random.default_rng(seed)
+    picks: list[pd.Series] = []
+    seen: set[tuple[Any, ...]] = set()
+
+    def add(frame: pd.DataFrame, reason: str, limit: int) -> None:
+        nonlocal picks
+        if limit <= 0 or frame.empty:
+            return
+        for _, row in frame.iterrows():
+            params = btc_params_from_row(row)
+            key = config_key(params)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = row.copy()
+            item["refine_seed_reason"] = reason
+            picks.append(item)
+            if len(picks) >= max_seeds or sum(1 for pick in picks if pick.get("refine_seed_reason") == reason) >= limit:
+                break
+
+    lowpass_cols = [col for col in ["optimization_score", "stability_score", "local_pass_rate", "robust_score"] if col in rows.columns]
+    if lowpass_cols:
+        add(rows.sort_values(lowpass_cols, ascending=[False] * len(lowpass_cols), na_position="last"), "top_lowpass", max(1, max_seeds // 4))
+
+    selection = rows[rows.get("selection_pass", pd.Series(False, index=rows.index)).fillna(False)].copy()
+    both = selection[selection.get("oos_pass", pd.Series(False, index=selection.index)).fillna(False)].copy()
+    raw_cols = [col for col in ["robust_score", "oos_net_r", "validation_net_r", "train_net_r"] if col in rows.columns]
+    if raw_cols:
+        add(both.sort_values(raw_cols, ascending=[False] * len(raw_cols), na_position="last"), "both_pass_raw", max(1, max_seeds // 4))
+        add(selection.sort_values(raw_cols, ascending=[False] * len(raw_cols), na_position="last"), "selection_pass_raw", max(1, max_seeds // 4))
+
+    if len(picks) < max_seeds:
+        okay = rows.copy()
+        mask = pd.Series(False, index=okay.index)
+        if "selection_pass" in okay.columns:
+            mask |= okay["selection_pass"].fillna(False).astype(bool)
+        robust_values = pd.to_numeric(okay.get("robust_score", pd.Series(np.nan, index=okay.index)), errors="coerce")
+        robust_finite = robust_values[np.isfinite(robust_values)]
+        if "oos_pass" in okay.columns:
+            mask |= okay["oos_pass"].fillna(False).astype(bool) & (robust_values >= 0.0)
+        for col in ["optimization_score", "robust_score", "lowpass_robust_score"]:
+            if col in okay.columns:
+                values = pd.to_numeric(okay[col], errors="coerce")
+                finite = values[np.isfinite(values)]
+                if not finite.empty:
+                    floor = 0.0 if col == "robust_score" else -50.0
+                    mask |= values >= max(float(finite.quantile(0.65)), floor)
+        okay = okay[mask].copy()
+        if not okay.empty:
+            order = rng.permutation(len(okay))
+            add(okay.iloc[order], "random_okayish", max_seeds - len(picks))
+
+    if len(picks) < max_seeds and raw_cols:
+        add(rows.sort_values(raw_cols, ascending=[False] * len(raw_cols), na_position="last"), "fallback_raw", max_seeds - len(picks))
+
+    out = pd.DataFrame([row.to_dict() for row in picks[:max_seeds]])
+    if not out.empty:
+        if "refine_seed_id" in out.columns:
+            out = out.drop(columns=["refine_seed_id"])
+        out.insert(0, "refine_seed_id", range(1, len(out) + 1))
+    return out
+
+
+def refinement_grid_from_scores(
+    scores: pd.DataFrame,
+    *,
+    max_seeds: int,
+    samples_per_seed: int,
+    neighbor_width: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], pd.DataFrame]:
+    seeds = select_refinement_seeds(scores, max_seeds=max_seeds, seed=seed)
+    rng = np.random.default_rng(seed + 1)
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for _, seed_row in seeds.iterrows():
+        seed_params = btc_params_from_row(seed_row)
+        local_rows = sample_local_configs(
+            seed_params,
+            samples=samples_per_seed,
+            width=neighbor_width,
+            rng=rng,
+        )
+        for local in local_rows:
+            key = config_key(local)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    **local,
+                    "refine_seed_id": int(seed_row["refine_seed_id"]),
+                    "refine_seed_reason": str(seed_row.get("refine_seed_reason", "")),
+                    "refine_seed_optimization_score": float(seed_row.get("optimization_score", np.nan)),
+                    "refine_seed_robust_score": float(seed_row.get("robust_score", np.nan)),
+                }
+            )
+    return rows, seeds
+
+
+def evaluate_btc_grid(
     df: pd.DataFrame,
     base_cfg: WolfeConfig,
     *,
     symbol: str,
-    max_configs: int = 0,
+    grid: list[dict[str, Any]],
     min_train_trades: int = 8,
     min_validation_trades: int = 3,
+    lowpass: bool = True,
+    lowpass_radius: float = 0.45,
+    lowpass_min_neighbors: int = 9,
+    lowpass_outlier_penalty: float = 0.65,
 ) -> pd.DataFrame:
     frame = ensure_ohlcv_frame(df)
     start = pd.Timestamp(frame["open_time"].iloc[0]).tz_convert("UTC")
@@ -1085,65 +1647,33 @@ def tune_btc(
     validation_end = start + (end - start) * 0.80
     rows: list[dict[str, Any]] = []
 
-    grid = list(itertools.product(
-        ["zigzag", "fractal"],
-        ["15m", "1h", "4h"],
-        [3, 5, 8],
-        [1.0, 1.4, 1.8, 2.2],
-        [2.2, 3.0, 3.8],
-        [1.4, 2.2, 3.0],
-        [0.30, 0.50, 0.75],
-        [1.2, 1.5, 2.0],
-        [48.0, 58.0, 64.0, 70.0],
-        [8, 12, 18, 30],
-        [96, 144, 288, 432],
-        ["none", "rsi"],
-    ))
-    if max_configs > 0 and len(grid) > max_configs:
-        rng = np.random.default_rng(42)
-        keep = np.sort(rng.choice(len(grid), size=max_configs, replace=False))
-        grid = [grid[int(idx)] for idx in keep]
-
-    for (
-        pivot_method,
-        pattern_tf,
-        pivot_window,
-        zigzag_atr_mult,
-        max_time_ratio,
-        max_p5_break_atr,
-        stop_atr_buffer,
-        min_rr,
-        min_score,
-        target_projection_bars,
-        max_hold_bars,
-        trend_filter,
-    ) in grid:
-        cfg = WolfeConfig.from_mapping(
-            {
-                **asdict(base_cfg),
-                "pivot_method": pivot_method,
-                "pattern_tf": pattern_tf,
-                "pivot_window": pivot_window,
-                "zigzag_atr_mult": zigzag_atr_mult,
-                "max_time_ratio": max_time_ratio,
-                "max_p5_break_atr": max_p5_break_atr,
-                "stop_atr_buffer": stop_atr_buffer,
-                "min_rr": min_rr,
-                "min_score": min_score,
-                "target_projection_bars": target_projection_bars,
-                "max_hold_bars": max_hold_bars,
-                "trend_filter": trend_filter,
-            }
-        )
+    config_fields = set(WolfeConfig.__dataclass_fields__)  # type: ignore[attr-defined]
+    for idx, params in enumerate(grid, start=1):
+        config_params = {key: params[key] for key in params if key in config_fields}
+        meta = {key: params[key] for key in params if key not in config_fields}
+        cfg = WolfeConfig.from_mapping({**asdict(base_cfg), **config_params})
         try:
             trades = run_backtest(frame, cfg, symbol=symbol)
         except Exception as exc:  # noqa: BLE001 - bad research configs should not kill the sweep.
-            rows.append({"error": str(exc), **asdict(cfg)})
+            rows.append({"grid_index": idx, "error": str(exc), **meta, **asdict(cfg)})
             continue
         buckets = split_trades(trades, train_end=train_end, validation_end=validation_end)
         train_m = strategy_metrics(buckets["train"])
         val_m = strategy_metrics(buckets["validation"])
         oos_m = strategy_metrics(buckets["oos"])
+        selection_pass = (
+            train_m["trades"] >= min_train_trades
+            and val_m["trades"] >= min_validation_trades
+            and train_m["net_r"] > 0.0
+            and val_m["net_r"] > 0.0
+            and train_m["profit_factor"] >= 1.05
+            and val_m["profit_factor"] >= 1.05
+        )
+        oos_pass = (
+            oos_m["trades"] >= min_validation_trades
+            and oos_m["net_r"] > 0.0
+            and oos_m["profit_factor"] >= 1.05
+        )
         robust_score = (
             min(train_m["avg_r"], val_m["avg_r"]) * 120.0
             + min(train_m["profit_factor"], val_m["profit_factor"], 5.0) * 5.0
@@ -1156,11 +1686,15 @@ def tune_btc(
             robust_score -= (min_validation_trades - val_m["trades"]) * 20.0
         rows.append(
             {
+                "grid_index": idx,
                 "robust_score": float(robust_score),
                 "train_start": start,
                 "train_end": train_end,
                 "validation_end": validation_end,
                 "data_end": end,
+                "selection_pass": selection_pass,
+                "oos_pass": oos_pass,
+                **meta,
                 **asdict(cfg),
                 **metric_row(buckets["train"], "train"),
                 **metric_row(buckets["validation"], "validation"),
@@ -1169,26 +1703,113 @@ def tune_btc(
             }
         )
     out = pd.DataFrame(rows)
-    if "robust_score" in out.columns:
-        out = out.sort_values(
-            ["robust_score", "oos_net_r", "validation_avg_r", "train_avg_r"],
-            ascending=[False, False, False, False],
-            na_position="last",
+    if lowpass and "robust_score" in out.columns:
+        out = median_lowpass_scores(
+            out,
+            radius=lowpass_radius,
+            min_neighbors=lowpass_min_neighbors,
+            outlier_penalty=lowpass_outlier_penalty,
         )
+    sort_cols = (
+        [
+            "optimization_score",
+            "stability_score",
+            "local_pass_rate",
+            "robust_score",
+            "oos_net_r",
+            "validation_avg_r",
+            "train_avg_r",
+        ]
+        if lowpass and "optimization_score" in out.columns
+        else ["robust_score", "oos_net_r", "validation_avg_r", "train_avg_r"]
+    )
+    sort_cols = [col for col in sort_cols if col in out.columns]
+    if sort_cols:
+        out = out.sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
     return out.reset_index(drop=True)
 
 
+def tune_btc(
+    df: pd.DataFrame,
+    base_cfg: WolfeConfig,
+    *,
+    symbol: str,
+    max_configs: int = 0,
+    min_train_trades: int = 8,
+    min_validation_trades: int = 3,
+    lowpass: bool = True,
+    lowpass_radius: float = 0.45,
+    lowpass_min_neighbors: int = 9,
+    lowpass_outlier_penalty: float = 0.65,
+) -> pd.DataFrame:
+    grid = btc_parameter_grid(max_configs, seed=42)
+    return evaluate_btc_grid(
+        df,
+        base_cfg,
+        symbol=symbol,
+        grid=grid,
+        min_train_trades=min_train_trades,
+        min_validation_trades=min_validation_trades,
+        lowpass=lowpass,
+        lowpass_radius=lowpass_radius,
+        lowpass_min_neighbors=lowpass_min_neighbors,
+        lowpass_outlier_penalty=lowpass_outlier_penalty,
+    )
+
+
+def refine_btc(
+    df: pd.DataFrame,
+    base_cfg: WolfeConfig,
+    *,
+    symbol: str,
+    scores: pd.DataFrame,
+    max_seeds: int,
+    samples_per_seed: int,
+    neighbor_width: int,
+    seed: int,
+    min_train_trades: int = 8,
+    min_validation_trades: int = 3,
+    lowpass: bool = True,
+    lowpass_radius: float = 0.45,
+    lowpass_min_neighbors: int = 9,
+    lowpass_outlier_penalty: float = 0.65,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    grid, seeds = refinement_grid_from_scores(
+        scores,
+        max_seeds=max_seeds,
+        samples_per_seed=samples_per_seed,
+        neighbor_width=neighbor_width,
+        seed=seed,
+    )
+    result = evaluate_btc_grid(
+        df,
+        base_cfg,
+        symbol=symbol,
+        grid=grid,
+        min_train_trades=min_train_trades,
+        min_validation_trades=min_validation_trades,
+        lowpass=lowpass,
+        lowpass_radius=lowpass_radius,
+        lowpass_min_neighbors=lowpass_min_neighbors,
+        lowpass_outlier_penalty=lowpass_outlier_penalty,
+    )
+    return result, seeds
+
+
 def save_best_config(path: Path, symbol: str, row: pd.Series) -> None:
-    fields = set(WolfeConfig.__dataclass_fields__)  # type: ignore[attr-defined]
-    payload = {
-        symbol.upper(): {
-            key: row[key].item() if hasattr(row[key], "item") else row[key]
-            for key in fields
-            if key in row.index and pd.notna(row[key])
-        }
+    fields = tuple(WolfeConfig.__dataclass_fields__)  # type: ignore[attr-defined]
+    payload: dict[str, Any] = {}
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(existing, dict):
+            payload = existing
+    payload[symbol.upper()] = {
+        key: row[key].item() if hasattr(row[key], "item") else row[key]
+        for key in fields
+        if key in row.index and pd.notna(row[key])
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
 
 
 def load_ohlcv_csv(path: Path) -> pd.DataFrame:
@@ -1237,12 +1858,52 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--csv", type=Path)
     parser.add_argument("--cache-csv", type=Path)
     parser.add_argument("--config-json", type=Path)
+    parser.add_argument("--mintick", type=float)
+    parser.add_argument("--no-auto-mintick", action="store_true")
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--max-configs", type=int, default=500)
+    parser.add_argument("--refine-from-tuning", type=Path)
+    parser.add_argument("--refine-seeds", type=int, default=12)
+    parser.add_argument("--refine-samples-per-seed", type=int, default=80)
+    parser.add_argument("--refine-neighbor-width", type=int, default=1)
+    parser.add_argument("--refine-random-seed", type=int, default=725)
+    parser.add_argument("--pattern-tfs", help="Comma-separated pattern timeframes to include in tuning/refinement.")
+    parser.add_argument("--regime-filters", help="Comma-separated regime filters to include in tuning/refinement.")
+    parser.add_argument("--disable-lowpass", action="store_true")
+    parser.add_argument("--lowpass-radius", type=float, default=0.45)
+    parser.add_argument("--lowpass-min-neighbors", type=int, default=9)
+    parser.add_argument("--lowpass-outlier-penalty", type=float, default=0.65)
+    parser.add_argument("--allow-unstable-lowpass-save", action="store_true")
+    parser.add_argument("--require-oos-pass-to-save", action="store_true")
     parser.add_argument("--output-prefix", type=Path, default=Path("scripts/wolfe_wave_btc"))
     parser.add_argument("--save-best-config", type=Path, default=Path("bot/configs/wolfe_wave_configs.json"))
     parser.add_argument("--synthetic-smoke", action="store_true")
     return parser.parse_args()
+
+
+def split_cli_values(raw: str | None) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    values = tuple(value.strip() for value in raw.split(",") if value.strip())
+    return values or None
+
+
+def apply_tune_value_filters(args: argparse.Namespace) -> None:
+    pattern_tfs = split_cli_values(args.pattern_tfs)
+    if pattern_tfs is not None:
+        normalized = tuple(normalize_timeframe(value) for value in pattern_tfs)
+        unknown = [value for value in normalized if value not in BTC_TUNE_VALUES["pattern_tf"]]
+        if unknown:
+            raise ValueError(f"Unknown pattern timeframe(s): {', '.join(unknown)}")
+        BTC_TUNE_VALUES["pattern_tf"] = normalized
+
+    regime_filters = split_cli_values(args.regime_filters)
+    if regime_filters is not None:
+        normalized_filters = tuple(value.lower() for value in regime_filters)
+        unknown_filters = [value for value in normalized_filters if value not in BTC_TUNE_VALUES["regime_filter"]]
+        if unknown_filters:
+            raise ValueError(f"Unknown regime filter(s): {', '.join(unknown_filters)}")
+        BTC_TUNE_VALUES["regime_filter"] = normalized_filters
 
 
 def config_from_file(path: Path | None, symbol: str, interval: str) -> WolfeConfig:
@@ -1291,23 +1952,79 @@ def main() -> None:
     args = parse_args()
     args.symbol = bybit_symbol(args.symbol)
     args.interval = normalize_timeframe(args.interval)
+    apply_tune_value_filters(args)
     frame = load_or_fetch_data(args)
     cfg = config_from_file(args.config_json, args.symbol, args.interval)
+    if args.mintick is not None:
+        cfg = WolfeConfig.from_mapping({**asdict(cfg), "mintick": float(args.mintick)})
+    elif not args.synthetic_smoke and not args.no_auto_mintick:
+        try:
+            cfg = WolfeConfig.from_mapping({**asdict(cfg), "mintick": fetch_bybit_mintick(args.symbol)})
+        except Exception as exc:  # noqa: BLE001 - research can still run with config/default mintick.
+            print(f"{args.symbol}: mintick lookup failed ({exc}); using mintick={cfg.mintick:g}", flush=True)
     print(
         f"{args.symbol}: loaded {len(frame)} {args.interval} bars "
-        f"{pd.Timestamp(frame['open_time'].iloc[0]).date()} -> {pd.Timestamp(frame['open_time'].iloc[-1]).date()}"
+        f"{pd.Timestamp(frame['open_time'].iloc[0]).date()} -> {pd.Timestamp(frame['open_time'].iloc[-1]).date()} "
+        f"mintick={cfg.mintick:g}"
     )
 
     if args.tune:
-        result = tune_btc(frame, cfg, symbol=args.symbol, max_configs=args.max_configs)
+        seed_table = pd.DataFrame()
+        if args.refine_from_tuning is not None:
+            if args.output_prefix == Path("scripts/wolfe_wave_btc"):
+                args.output_prefix = Path("scripts/wolfe_wave_btc_refined")
+            source_scores = pd.read_csv(args.refine_from_tuning)
+            result, seed_table = refine_btc(
+                frame,
+                cfg,
+                symbol=args.symbol,
+                scores=source_scores,
+                max_seeds=args.refine_seeds,
+                samples_per_seed=args.refine_samples_per_seed,
+                neighbor_width=args.refine_neighbor_width,
+                seed=args.refine_random_seed,
+                lowpass=not args.disable_lowpass,
+                lowpass_radius=args.lowpass_radius,
+                lowpass_min_neighbors=args.lowpass_min_neighbors,
+                lowpass_outlier_penalty=args.lowpass_outlier_penalty,
+            )
+        else:
+            result = tune_btc(
+                frame,
+                cfg,
+                symbol=args.symbol,
+                max_configs=args.max_configs,
+                lowpass=not args.disable_lowpass,
+                lowpass_radius=args.lowpass_radius,
+                lowpass_min_neighbors=args.lowpass_min_neighbors,
+                lowpass_outlier_penalty=args.lowpass_outlier_penalty,
+            )
         args.output_prefix.parent.mkdir(parents=True, exist_ok=True)
         result_path = args.output_prefix.with_suffix(".tuning.csv")
         result.to_csv(result_path, index=False)
         print(f"Saved tuning table: {result_path}")
+        if not seed_table.empty:
+            seeds_path = args.output_prefix.with_suffix(".seeds.csv")
+            seed_table.to_csv(seeds_path, index=False)
+            print(f"Saved refinement seeds: {seeds_path}")
         if not result.empty and "robust_score" in result.columns:
             print(result.head(20).to_string(index=False))
-            save_best_config(args.save_best_config, args.symbol, result.iloc[0])
-            print(f"Saved best config: {args.save_best_config}")
+            save_candidates = result.copy()
+            if not args.allow_unstable_lowpass_save and "selection_pass" in result.columns:
+                save_candidates = save_candidates[save_candidates["selection_pass"].fillna(False)].copy()
+            if args.require_oos_pass_to_save and "oos_pass" in save_candidates.columns:
+                save_candidates = save_candidates[save_candidates["oos_pass"].fillna(False)].copy()
+            if save_candidates.empty:
+                print("No candidate passed the requested save gates; best config left unchanged.")
+            else:
+                best = save_candidates.iloc[0]
+                if "selection_pass" in best.index and not bool(best["selection_pass"]):
+                    print(
+                        "Best low-pass candidate did not pass the raw train/validation gate; "
+                        "saving because --allow-unstable-lowpass-save was set."
+                    )
+                save_best_config(args.save_best_config, args.symbol, best)
+                print(f"Saved best config: {args.save_best_config}")
         return
 
     signals = find_wolfe_signals(frame, cfg, symbol=args.symbol)
