@@ -153,9 +153,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Matrix signal follower.
-  # Joins a Matrix room, parses signal messages, and places Bybit orders.
-  # Configure MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN, MATRIX_ROOM_ID in .env.
+  # Matrix signal listener/forwarder.
+  # Joins a Matrix room, parses signal messages, and forwards them to the
+  # matrix-dedicated RL sidecar for execution and reward handling.
+  # Configure MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN, MATRIX_ROOM_ID in .env.matrix.
   matrix-bot:
     build:
       context: .
@@ -165,11 +166,42 @@ services:
     restart: unless-stopped
     env_file:
       - ./bot/.env.matrix
+    depends_on:
+      - matrix-rl-exec-bot
     environment:
-      ACTIVE_TRADES_STATE_PATH: /app/logs/active_trades.json
+      MATRIX_RL_EXECUTION_URL: http://matrix-rl-exec-bot:8091/v1/signals
+      MATRIX_RL_EXECUTION_TIMEOUT_SECONDS: "1.0"
       LOG_DIR: /app/logs
     volumes:
       - ./bot/logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Matrix-dedicated RL execution sidecar.
+  # Uses credentials from bot/.env.matrix and executes matrix-room setups.
+  matrix-rl-exec-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python rl_execution_bot.py
+    container_name: matrix-rl-exec-bot
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env.matrix
+    environment:
+      RL_HOST: 0.0.0.0
+      RL_PORT: "8091"
+      RL_LOG_DIR: /app/rl_matrix
+      RL_STATE_PATH: /app/rl_matrix/runtime_state.json
+      RL_MODEL_PATH: /app/rl_matrix/agent_state.json
+      RL_DECISIONS_PATH: /app/rl_matrix/decisions.jsonl
+      RL_REWARDS_PATH: /app/rl_matrix/rewards.jsonl
+      RL_TRAINING_EXAMPLES_PATH: /app/rl_matrix/training_examples.jsonl
+    volumes:
+      - ./bot/logs/rl_matrix:/app/rl_matrix
     logging:
       driver: json-file
       options:

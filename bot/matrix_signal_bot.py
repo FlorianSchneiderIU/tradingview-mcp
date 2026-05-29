@@ -32,12 +32,10 @@ Signal fields recognised
 
 Required env vars
 -----------------
-  BYBIT_API_KEY, BYBIT_API_SECRET
-  BYBIT_DEMO                  — "true" (default) = demo, "false" = live
-  LIVE_TRADING_CONFIRM        — must be "true" when BYBIT_DEMO=false
   MATRIX_HOMESERVER           — e.g. https://matrix.org
   MATRIX_ACCESS_TOKEN         — bot account access token
-  MATRIX_ROOM_ID              — !roomid:homeserver  (must already be joined)
+  MATRIX_ROOM_IDS             — comma-separated room IDs (!roomid:homeserver) (optional; if blank, listens to all joined rooms)
+  MATRIX_RL_EXECUTION_URL     — RL sidecar /v1/signals endpoint
 
 Optional env vars
 -----------------
@@ -52,8 +50,9 @@ Optional env vars
   MATRIX_MAX_RISK_MULTIPLIER  — reject orders whose rounded size exceeds target risk by this multiple (default 1.05)
   MATRIX_SIGNAL_SENDER        — restrict signals to this Matrix user ID (optional)
   MATRIX_POST_REPLY           — "true" to post order confirmations back to room (default true)
+    MATRIX_RL_EXECUTION_TIMEOUT_SECONDS — RL sidecar HTTP timeout (default 1.0)
+    MATRIX_RL_EXECUTION_QUEUE_SIZE — queued RL dispatch items (default 1000)
   LOG_DIR                     — log directory (default /app/logs)
-  ACTIVE_TRADES_STATE_PATH    — shared active-trades JSON (default /app/logs/active_trades.json)
 """
 from __future__ import annotations
 
@@ -63,11 +62,13 @@ import json
 import logging
 import math
 import os
+import queue
 import re
 import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -95,9 +96,27 @@ ACTIVE_TRADES_STATE_PATH = os.environ.get(
 
 MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "").strip()
 MATRIX_ACCESS_TOKEN = os.environ.get("MATRIX_ACCESS_TOKEN", "").strip()
-MATRIX_ROOM_ID = os.environ.get("MATRIX_ROOM_ID", "").strip()
+# Support both legacy MATRIX_ROOM_ID (single) and new MATRIX_ROOM_IDS (comma-separated list)
+_matrix_room_ids_raw = (
+    os.environ.get("MATRIX_ROOM_IDS", "")
+    or os.environ.get("MATRIX_ROOM_ID", "")
+).strip()
+MATRIX_ROOM_IDS = set(r.strip() for r in _matrix_room_ids_raw.split(",") if r.strip()) if _matrix_room_ids_raw else set()
 MATRIX_SIGNAL_SENDER = os.environ.get("MATRIX_SIGNAL_SENDER", "").strip()
 MATRIX_POST_REPLY = os.environ.get("MATRIX_POST_REPLY", "true").lower() in ("1", "true", "yes")
+MATRIX_RL_EXECUTION_URL = os.environ.get("MATRIX_RL_EXECUTION_URL", os.environ.get("RL_EXECUTION_URL", "")).strip()
+MATRIX_RL_EXECUTION_TIMEOUT_SECONDS = float(
+    os.environ.get(
+        "MATRIX_RL_EXECUTION_TIMEOUT_SECONDS",
+        os.environ.get("RL_EXECUTION_TIMEOUT_SECONDS", "1.0"),
+    )
+)
+MATRIX_RL_EXECUTION_QUEUE_SIZE = int(
+    os.environ.get(
+        "MATRIX_RL_EXECUTION_QUEUE_SIZE",
+        os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"),
+    )
+)
 
 # --- Logging ------------------------------------------------------------------
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -816,6 +835,142 @@ class OrderExecutor:
         }
 
 
+# --- RL sidecar forwarding ----------------------------------------------------
+
+class MatrixRlSidecarClient:
+    """Asynchronous dispatch client for matrix->RL sidecar forwarding."""
+
+    def __init__(self) -> None:
+        self._url = MATRIX_RL_EXECUTION_URL
+        self._timeout = max(0.1, MATRIX_RL_EXECUTION_TIMEOUT_SECONDS)
+        self._queue: queue.Queue[dict] | None = None
+        self._dispatch_thread: threading.Thread | None = None
+
+        if self._url:
+            self._queue = queue.Queue(maxsize=max(1, MATRIX_RL_EXECUTION_QUEUE_SIZE))
+            self._dispatch_thread = threading.Thread(
+                target=self._dispatch_worker,
+                daemon=True,
+                name="matrix-rl-dispatch",
+            )
+            self._dispatch_thread.start()
+            log.info("Matrix RL sidecar enabled  signal_url=%s", self._url)
+        else:
+            log.info("Matrix RL sidecar disabled; MATRIX_RL_EXECUTION_URL is empty")
+
+    def _build_signal_payload(
+        self,
+        status: str,
+        *,
+        sig: dict,
+        reason: str | None,
+    ) -> dict:
+        probability = None
+        threshold = None
+        return {
+            "schema_version": "rl_signal_v1",
+            "event_id": uuid.uuid4().hex,
+            "source": "matrix-bot",
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "reason": reason,
+            "symbol": sig.get("symbol"),
+            "strategy": sig.get("strategy", "matrix"),
+            "direction": sig.get("signal"),
+            "setup": {
+                "entry": sig.get("entry"),
+                "stop_loss": sig.get("sl"),
+                "take_profit": sig.get("tp1"),
+                "entry_time": datetime.now(timezone.utc).isoformat(),
+            },
+            "features": {
+                "ml_probability": probability,
+                "ml_threshold": threshold,
+                "matrix_status_accepted": 1.0 if status == "accepted" else 0.0,
+                "matrix_status_rejected": 1.0 if status == "rejected" else 0.0,
+            },
+            "feature_columns": [
+                "matrix_status_accepted",
+                "matrix_status_rejected",
+            ],
+            "ml_probability": probability,
+            "ml_threshold": threshold,
+            "raw_signal": sig,
+            "extra": {},
+        }
+
+    def enqueue_signal(self, sig: dict, status: str, reason: str | None) -> dict:
+        if not self._url or self._queue is None:
+            return {
+                "enabled": False,
+                "queued": False,
+                "message": "MATRIX_RL_EXECUTION_URL is empty",
+            }
+        payload = self._build_signal_payload(status, sig=sig, reason=reason)
+        try:
+            self._queue.put_nowait(payload)
+        except queue.Full:
+            log.warning(
+                "[matrix-rl] Dispatch queue full; dropping %s signal %s %s",
+                status,
+                sig.get("symbol"),
+                sig.get("strategy", "matrix"),
+            )
+            return {
+                "enabled": True,
+                "queued": False,
+                "message": "RL dispatch queue full",
+            }
+        return {
+            "enabled": True,
+            "queued": True,
+            "message": "RL sidecar signal queued",
+        }
+
+    def _dispatch_worker(self) -> None:
+        assert self._queue is not None
+        while True:
+            payload = self._queue.get()
+            try:
+                self._dispatch_signal(payload)
+            except Exception as exc:
+                log.warning("[matrix-rl] Dispatch failed: %s", exc)
+            finally:
+                self._queue.task_done()
+
+    def _dispatch_signal(self, payload: dict) -> None:
+        response = requests.post(
+            self._url,
+            json=payload,
+            timeout=self._timeout,
+        )
+        if response.status_code >= 300:
+            log.warning(
+                "[matrix-rl] Sidecar returned HTTP %s: %s",
+                response.status_code,
+                response.text[:300],
+            )
+            return
+        try:
+            reply = response.json()
+        except Exception:
+            reply = {}
+
+        log.info(
+            "[matrix-rl] Dispatched %s signal %s %s decision=%s status=%s action=%s",
+            payload.get("status"),
+            payload.get("symbol"),
+            payload.get("strategy"),
+            reply.get("decision_id", "-") if isinstance(reply, dict) else "-",
+            reply.get("execution_status", "-") if isinstance(reply, dict) else "-",
+            (
+                f"{float(reply.get('action')):.3f}"
+                if isinstance(reply, dict) and reply.get("action") is not None
+                else "-"
+            ),
+        )
+
+
 # --- Matrix client (nio) ------------------------------------------------------
 
 try:
@@ -828,8 +983,8 @@ except ImportError:
 
 
 class MatrixSignalBot:
-    def __init__(self, executor: OrderExecutor):
-        self._executor = executor
+    def __init__(self, rl_client: MatrixRlSidecarClient):
+        self._rl_client = rl_client
         self._client = AsyncClient(MATRIX_HOMESERVER)
         self._client.access_token = MATRIX_ACCESS_TOKEN
         self._client.user_id = None  # will be populated by whoami()
@@ -868,10 +1023,11 @@ class MatrixSignalBot:
         return True, 0.0
 
     async def start(self) -> None:
+        room_list = ", ".join(sorted(MATRIX_ROOM_IDS)) if MATRIX_ROOM_IDS else "(all joined rooms)"
         log.info(
-            "Matrix bot starting | homeserver=%s room=%s sender_filter=%s",
+            "Matrix bot starting | homeserver=%s rooms=%s sender_filter=%s",
             MATRIX_HOMESERVER,
-            MATRIX_ROOM_ID or "(all joined rooms)",
+            room_list,
             MATRIX_SIGNAL_SENDER or "(any)",
         )
         # Verify credentials with a whoami call
@@ -911,8 +1067,8 @@ class MatrixSignalBot:
             log.warning("Failed to join room %s: %s", room.room_id, result)
 
     async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
-        # Filter by configured room if set; otherwise accept any joined room
-        if MATRIX_ROOM_ID and room.room_id != MATRIX_ROOM_ID:
+        # Filter by configured rooms if set; otherwise accept any joined room
+        if MATRIX_ROOM_IDS and room.room_id not in MATRIX_ROOM_IDS:
             return
         # Dedup (nio may deliver the same event twice after reconnect)
         if event.event_id in self._processed_event_ids:
@@ -936,54 +1092,78 @@ class MatrixSignalBot:
         if sig is None:
             return  # Not a signal message
 
+        # Add room metadata to signal for RL feature vector
+        sig["room_id"] = room.room_id
+
         log.info(
-            "Signal detected | symbol=%s dir=%s entry=%s sl=%s tp=%s strategy=%s | from=%s",
+            "Signal detected | symbol=%s dir=%s entry=%s sl=%s tp=%s strategy=%s | from=%s room=%s",
             sig["symbol"], sig["signal"], sig.get("entry"),
-            sig.get("sl"), sig.get("tp1", "-"), sig.get("strategy"), event.sender,
+            sig.get("sl"), sig.get("tp1", "-"), sig.get("strategy"), event.sender, room.room_id,
         )
 
         claimed, wait_seconds = self._claim_signal(sig)
+        dispatch_result: dict
         if not claimed:
+            reason = f"Duplicate signal ignored for {wait_seconds:.0f}s"
+            dispatch_result = self._rl_client.enqueue_signal(
+                sig,
+                status="rejected",
+                reason=reason,
+            )
             result = {
-                "ok": False,
-                "message": f"Duplicate signal ignored for {wait_seconds:.0f}s",
+                "forwarded": bool(dispatch_result.get("queued")),
+                "status": "rejected",
+                "message": reason,
+                "dispatch": dispatch_result,
             }
         else:
             try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, self._executor.execute, sig
+                dispatch_result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self._rl_client.enqueue_signal,
+                    sig,
+                    "accepted",
+                    None,
                 )
+                result = {
+                    "forwarded": bool(dispatch_result.get("queued")),
+                    "status": "accepted",
+                    "message": str(dispatch_result.get("message") or ""),
+                    "dispatch": dispatch_result,
+                }
             except Exception as exc:
-                log.exception("Execution failed")
-                result = {"ok": False, "message": f"Execution failed: {exc}"}
+                log.exception("RL forward failed")
+                result = {
+                    "forwarded": False,
+                    "status": "accepted",
+                    "message": f"RL forward failed: {exc}",
+                    "dispatch": {"enabled": True, "queued": False, "message": str(exc)},
+                }
 
         reply = self._format_reply(sig, result)
-        log.info("Execution result: %s", result.get("message"))
+        log.info("Forward result: %s", result.get("message"))
 
         if MATRIX_POST_REPLY:
-            await self._send_message(reply, reply_to=event.event_id)
+            await self._send_message(reply, room_id=room.room_id, reply_to=event.event_id)
 
     def _format_reply(self, sig: dict, result: dict) -> str:
         symbol    = sig["symbol"]
         direction = sig["signal"].upper()
-        status    = "✅ ACCEPTED" if result["ok"] else "❌ REJECTED"
+        forwarded = bool(result.get("forwarded"))
+        upstream_status = str(result.get("status") or "accepted").upper()
+        status = "✅ FORWARDED" if forwarded else "⚠️ NOT FORWARDED"
         lines = [
-            f"{status} | {symbol} {direction}",
+            f"{status} | {symbol} {direction} ({upstream_status})",
             f"Entry: {sig.get('entry', '?')}  SL: {sig.get('sl', '?')}  TP: {sig.get('tp1', '-')}",
         ]
-        if result["ok"]:
-            lines.append(f"Qty: {result.get('qty')}  Notional: {result.get('notional')}")
-            lines.append(
-                f"Risk at SL: {result.get('risk_at_sl')} ({result.get('risk_pct')})  "
-                f"Lev: {result.get('leverage')}"
-            )
-            lines.append(f"TP/SL mode: {result.get('tpsl_mode')}")
-            lines.append(f"Order ID: {result.get('order_id')}")
-        else:
-            lines.append(f"Reason: {result.get('message')}")
+        dispatch = result.get("dispatch") if isinstance(result.get("dispatch"), dict) else {}
+        rl_state = "queued" if dispatch.get("queued") else "not queued"
+        if dispatch.get("enabled"):
+            lines.append(f"RL sidecar: {rl_state}")
+        lines.append(f"Message: {result.get('message')}")
         return "\n".join(lines)
 
-    async def _send_message(self, body: str, *, reply_to: Optional[str] = None) -> None:
+    async def _send_message(self, body: str, *, room_id: str, reply_to: Optional[str] = None) -> None:
         content: dict = {
             "msgtype": "m.text",
             "body": body,
@@ -994,7 +1174,7 @@ class MatrixSignalBot:
             }
         try:
             await self._client.room_send(
-                room_id=MATRIX_ROOM_ID,
+                room_id=room_id,
                 message_type="m.room.message",
                 content=content,
             )
@@ -1008,10 +1188,9 @@ def _validate_config() -> None:
     missing = [
         name
         for name, val in [
-            ("BYBIT_API_KEY",       os.environ.get("BYBIT_API_KEY")),
-            ("BYBIT_API_SECRET",    os.environ.get("BYBIT_API_SECRET")),
             ("MATRIX_HOMESERVER",   MATRIX_HOMESERVER),
             ("MATRIX_ACCESS_TOKEN", MATRIX_ACCESS_TOKEN),
+            ("MATRIX_RL_EXECUTION_URL", MATRIX_RL_EXECUTION_URL),
             # MATRIX_ROOM_ID is optional: if blank the bot handles all joined rooms
         ]
         if not val
@@ -1034,15 +1213,9 @@ def _enforce_live_trading_confirmation() -> None:
 
 async def main() -> None:
     _validate_config()
-    _enforce_live_trading_confirmation()
 
-    api_key    = os.environ["BYBIT_API_KEY"]
-    api_secret = os.environ["BYBIT_API_SECRET"]
-
-    http = HTTP(testnet=False, demo=DEMO, api_key=api_key, api_secret=api_secret)
-
-    executor = OrderExecutor(http)
-    bot      = MatrixSignalBot(executor)
+    rl_client = MatrixRlSidecarClient()
+    bot      = MatrixSignalBot(rl_client)
     await bot.start()
 
 

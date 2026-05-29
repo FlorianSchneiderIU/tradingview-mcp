@@ -526,7 +526,7 @@ class ContextualRiskAgent:
             vector[key] = self._normalise(key, value)
             self._update_stat(key, value)
 
-        for field in ("symbol", "strategy", "direction", "status"):
+        for field in ("symbol", "strategy", "direction", "status", "room_id"):
             value = payload.get(field)
             if value:
                 vector[f"c:{field}:{self._sanitize_name(value).lower()}"] = 1.0
