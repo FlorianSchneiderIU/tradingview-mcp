@@ -72,6 +72,20 @@ HEARTBEAT_STATE_PATH = os.environ.get("RL_HEARTBEAT_STATE_PATH", os.path.join(LO
 PRETRAIN_PATH = os.environ.get("RL_PRETRAIN_PATH", "").strip()
 PRETRAIN_ON_START = env_bool("RL_PRETRAIN_ON_START", False)
 EXECUTION_QUEUE_SIZE = env_int("RL_EXECUTION_QUEUE_SIZE", 2000)
+ROLLING_WINDOWS = tuple(
+    sorted(
+        {
+            window
+            for window in (
+                env_int("RL_ROLLING_WINDOW_SHORT", 5),
+                env_int("RL_ROLLING_WINDOW_MEDIUM", 20),
+                env_int("RL_ROLLING_WINDOW_LONG", 50),
+            )
+            if window > 0
+        }
+    )
+)
+ROLLING_HISTORY_MAXLEN = env_int("RL_ROLLING_HISTORY_MAXLEN", 200)
 
 BYBIT_DEMO = env_bool("RL_BYBIT_DEMO", True)
 TRADING_ENABLED = env_bool("RL_TRADING_ENABLED", False)
@@ -312,6 +326,7 @@ class ContextualRiskAgent:
     def __init__(self) -> None:
         self.weights: dict[str, float] = {"__bias__": logit(INITIAL_ACTION)}
         self.stats: dict[str, dict[str, float]] = {}
+        self.trade_history: dict[str, deque[dict[str, float]]] = {}
         self.reward_baseline = 0.0
         self.reward_updates = 0
         self.lock = threading.Lock()
@@ -336,6 +351,25 @@ class ContextualRiskAgent:
                     for k, v in data["stats"].items()
                     if isinstance(v, dict)
                 }
+            if isinstance(data.get("trade_history"), dict):
+                agent.trade_history = {}
+                for key, rows in data["trade_history"].items():
+                    if not isinstance(rows, list):
+                        continue
+                    bucket = deque(maxlen=ROLLING_HISTORY_MAXLEN)
+                    for row in rows[-ROLLING_HISTORY_MAXLEN:]:
+                        if not isinstance(row, dict):
+                            continue
+                        closed_pnl = float(row.get("closed_pnl", 0.0) or 0.0)
+                        bucket.append(
+                            {
+                                "closed_pnl": closed_pnl,
+                                "reward_default_r": float(row.get("reward_default_r", 0.0) or 0.0),
+                                "won": 1.0 if closed_pnl > 0 else 0.0,
+                            }
+                        )
+                    if bucket:
+                        agent.trade_history[str(key)] = bucket
             agent.reward_baseline = float(data.get("reward_baseline", 0.0) or 0.0)
             agent.reward_updates = int(data.get("reward_updates", 0) or 0)
             log.info(
@@ -357,6 +391,11 @@ class ContextualRiskAgent:
                 {
                     "weights": self.weights,
                     "stats": self.stats,
+                    "trade_history": {
+                        key: list(bucket)[-ROLLING_HISTORY_MAXLEN:]
+                        for key, bucket in self.trade_history.items()
+                        if bucket
+                    },
                     "reward_baseline": self.reward_baseline,
                     "reward_updates": self.reward_updates,
                     "saved_at": now_iso(),
@@ -403,6 +442,76 @@ class ContextualRiskAgent:
         if abs(value) <= 10.0:
             return clamp(value, -6.0, 6.0)
         return math.tanh(value / 10.0)
+
+    @staticmethod
+    def _scope_key(*parts: Any) -> str:
+        cleaned = [ContextualRiskAgent._sanitize_name(part).lower() for part in parts if str(part or "").strip()]
+        return "::".join(cleaned) if cleaned else "global"
+
+    def _trade_history_candidates(self, payload: dict[str, Any]) -> list[tuple[str, deque[dict[str, float]]]]:
+        candidates = [
+            self._scope_key(payload.get("strategy"), payload.get("room_id")),
+            self._scope_key(payload.get("strategy")),
+            self._scope_key(payload.get("room_id")),
+            "global",
+        ]
+        out: list[tuple[str, deque[dict[str, float]]]] = []
+        for key in candidates:
+            history = self.trade_history.get(key)
+            if history:
+                out.append((key, history))
+        return out
+
+    @staticmethod
+    def _rolling_stats(history: deque[dict[str, float]], window: int) -> dict[str, float]:
+        items = list(history)[-window:] if window > 0 else list(history)
+        if not items:
+            return {
+                "trade_count": 0.0,
+                "winrate": 0.0,
+                "pnl_sum": 0.0,
+                "pnl_avg": 0.0,
+                "reward_sum": 0.0,
+                "reward_avg": 0.0,
+            }
+        trade_count = float(len(items))
+        wins = sum(1 for row in items if float(row.get("closed_pnl", 0.0) or 0.0) > 0)
+        pnl_sum = sum(float(row.get("closed_pnl", 0.0) or 0.0) for row in items)
+        reward_sum = sum(float(row.get("reward_default_r", 0.0) or 0.0) for row in items)
+        return {
+            "trade_count": trade_count,
+            "winrate": wins / trade_count if trade_count else 0.0,
+            "pnl_sum": pnl_sum,
+            "pnl_avg": pnl_sum / trade_count if trade_count else 0.0,
+            "reward_sum": reward_sum,
+            "reward_avg": reward_sum / trade_count if trade_count else 0.0,
+        }
+
+    def _rolling_perf_features(self, payload: dict[str, Any]) -> dict[str, float]:
+        candidates = self._trade_history_candidates(payload)
+        if not candidates:
+            return {}
+        scope_key, history = candidates[0]
+        for candidate_key, candidate_history in candidates:
+            if len(candidate_history) >= 3:
+                scope_key, history = candidate_key, candidate_history
+                break
+        features: dict[str, float] = {}
+        scope_code = {
+            self._scope_key(payload.get("strategy"), payload.get("room_id")): 4.0,
+            self._scope_key(payload.get("strategy")): 3.0,
+            self._scope_key(payload.get("room_id")): 2.0,
+            "global": 1.0,
+        }.get(scope_key, 0.0)
+        if scope_code:
+            features["perf.history_scope_code"] = scope_code
+        for window in ROLLING_WINDOWS:
+            stats = self._rolling_stats(history, window)
+            features[f"perf.rolling_winrate_{window}"] = stats["winrate"]
+            features[f"perf.rolling_reward_r_sum_{window}"] = stats["reward_sum"]
+            features[f"perf.rolling_reward_r_avg_{window}"] = stats["reward_avg"]
+            features[f"perf.rolling_trade_count_{window}"] = stats["trade_count"]
+        return features
 
     def _numeric_features(self, payload: dict[str, Any]) -> dict[str, float]:
         out: dict[str, float] = {}
@@ -479,6 +588,9 @@ class ContextualRiskAgent:
             plan = market.get("execution_plan") if isinstance(market.get("execution_plan"), dict) else {}
             add_number("execution.stop_distance_ticks_log", plan.get("stop_distance_ticks"), log1p_abs=True)
             add_number("execution.target_distance_ticks_log", plan.get("target_distance_ticks"), log1p_abs=True)
+
+        for name, value in self._rolling_perf_features(payload).items():
+            add_number(name, value)
 
         setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
         entry = to_float(setup.get("entry"))
@@ -584,6 +696,26 @@ class ContextualRiskAgent:
                 old_weight = self.weights.get(str(key), 0.0)
                 decayed = old_weight * (1.0 - WEIGHT_DECAY)
                 self.weights[str(key)] = clamp(decayed + gradient_scale * x, -12.0, 12.0)
+
+    def add_trade_history(self, payload: dict[str, Any], *, closed_pnl: float, reward_default_r: float) -> None:
+        summary = {
+            "closed_pnl": float(closed_pnl),
+            "reward_default_r": float(reward_default_r),
+            "won": 1.0 if closed_pnl > 0 else 0.0,
+        }
+        keys = [
+            self._scope_key(payload.get("strategy"), payload.get("room_id")),
+            self._scope_key(payload.get("strategy")),
+            self._scope_key(payload.get("room_id")),
+            "global",
+        ]
+        with self.lock:
+            for key in keys:
+                bucket = self.trade_history.get(key)
+                if bucket is None:
+                    bucket = deque(maxlen=ROLLING_HISTORY_MAXLEN)
+                    self.trade_history[key] = bucket
+                bucket.append(summary)
 
     def pretrain_from_path(self, path: str) -> int:
         if not path or not os.path.exists(path):
@@ -1697,6 +1829,7 @@ class RLExecutionService:
             if exit_order_id:
                 self.order_to_decision[str(exit_order_id)] = decision_id
                 self.claimed_closed_pnl_ids.add(str(exit_order_id))
+            self.agent.add_trade_history(payload, closed_pnl=closed_pnl, reward_default_r=reward_default_r)
             self.agent.learn(decision, reward_default_r)
             self.agent.save(MODEL_PATH)
             self._save_runtime_state_locked()
