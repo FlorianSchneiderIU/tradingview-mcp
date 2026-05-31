@@ -71,9 +71,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-import numpy as np
 import requests
 from pybit.unified_trading import HTTP
+from market_context import MarketContextEnricher
 
 # --- Config -------------------------------------------------------------------
 DEMO = os.environ.get("BYBIT_DEMO", "true").lower() in ("1", "true", "yes")
@@ -117,8 +117,6 @@ MATRIX_RL_EXECUTION_QUEUE_SIZE = int(
         os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"),
     )
 )
-MATRIX_MARKET_FEATURE_CACHE_SECONDS = float(os.environ.get("MATRIX_MARKET_FEATURE_CACHE_SECONDS", "30"))
-
 # --- Logging ------------------------------------------------------------------
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -162,6 +160,11 @@ log = logging.getLogger("matrix_bot")
 #   TP1: 4560.03  ...  TP10: 5417.86
 #   ❌ Stop: 4424.58
 #   Leverage: 300x Cross
+#
+# Format E — wolf channel compact multiline:
+#   🐺 #XRP 5m BEAR @ $1.3455
+#   🌊 [entry] · T $1.3335
+#   SL $1.3471 · R/R 4.01 · 300xn
 
 _ENTRY_ZONE_RE = re.compile(
     r"➾\s+(Long|Short)\s+Entry\s+Zone:\s*([\d,]+(?:\.\d+)?)",
@@ -176,6 +179,16 @@ _SYM_RE   = re.compile(r"#([A-Z]{2,10}(?:USDT|USDC|BTC|ETH|USD|XAU|XAG|XRP|XLM|S
 # Format A header (🔔) and Format D header (🌀 curling)
 _OPEN_DIR_RE   = re.compile(r"🔔\s+OPEN\s+(LONG|SHORT)", re.IGNORECASE)
 _CURLING_DIR_RE = re.compile(r"🌀\s+OPEN\s+(LONG|SHORT)", re.IGNORECASE)
+# Wolf channel compact multiline format
+_WOLFE_CHANNEL_HEADER_RE = re.compile(
+    r"(?:🐺\s*)?#(?P<sym>[A-Z]{2,10})\s+\d+[smhdw]\s+(?P<dir>BULL|BEAR)\s*@\s*\$?(?P<entry>[\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_WOLFE_CHANNEL_TARGET_RE = re.compile(
+    r"(?:🌊\s*)?(?:\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)?\s*[|·•\-]?\s*T\s*\$?(?P<tp>[\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_WOLFE_CHANNEL_SL_RE = re.compile(r"\bSL\s*\$?(?P<sl>[\d,]+(?:\.\d+)?)", re.IGNORECASE)
 # Preliminary signals (need confirmation — skip for auto-trading)
 _PRELIMINARY_RE = re.compile(r"⚡\s*//\s*PRELIMINARY", re.IGNORECASE)
 # wolfe_entry / wolfe_long / wolfe_short keywords
@@ -243,10 +256,11 @@ def parse_signal(text: str) -> Optional[dict]:
       1. Preliminary signals (⚡ PRELIMINARY) → skip, return None
       2. Bandit/LDZ format A (🔔 OPEN LONG/SHORT)
       3. Bandit/LDZ format B (#SYMBOL TF | ⅂ⅆℤ)
-      4. wolfe_entry / wolfe_long / wolfe_short keyword lines
-      5. JSON fragments
-      6. Generic key=value scan
-      7. Inline compact (SYMBOL LONG entry=X sl=Y)
+            4. Wolf channel compact multiline (🐺 ... BULL/BEAR @ ...)
+            5. wolfe_entry / wolfe_long / wolfe_short keyword lines
+            6. JSON fragments
+            7. Generic key=value scan
+            8. Inline compact (SYMBOL LONG entry=X sl=Y)
     """
     clean = _strip_html(text).strip()
 
@@ -299,7 +313,28 @@ def parse_signal(text: str) -> Optional[dict]:
             if _is_valid_signal(sig):
                 return sig
 
-    # 4. wolfe_entry / wolfe_long / wolfe_short keyword
+    # 4. Wolf channel compact multiline format
+    wolfe_head_m = _WOLFE_CHANNEL_HEADER_RE.search(clean)
+    if wolfe_head_m:
+        direction = "long" if wolfe_head_m.group("dir").upper() == "BULL" else "short"
+        wcsig: dict = {
+            "symbol": _normalise_symbol(wolfe_head_m.group("sym")),
+            "signal": direction,
+            "entry": _parse_price(wolfe_head_m.group("entry")),
+            "strategy": "wolfe_channel",
+        }
+        wolfe_sl_m = _WOLFE_CHANNEL_SL_RE.search(clean)
+        if wolfe_sl_m:
+            wcsig["sl"] = _parse_price(wolfe_sl_m.group("sl"))
+        wolfe_tp_m = _WOLFE_CHANNEL_TARGET_RE.search(clean)
+        if wolfe_tp_m:
+            wcsig["tp1"] = _parse_price(wolfe_tp_m.group("tp"))
+        if _is_valid_signal(wcsig):
+            return wcsig
+
+    # 5. wolfe_entry / wolfe_long / wolfe_short keyword
+    parsed_all_tps = {int(m.group(1)): _parse_price(m.group(2)) for m in _TP_ALL_RE.finditer(clean)}
+
     wolfe_m = _WOLFE_RE.search(clean)
     if wolfe_m:
         kw = wolfe_m.group(1).lower()
@@ -363,9 +398,11 @@ def parse_signal(text: str) -> Optional[dict]:
                         wsig["tp1"] = float(rev_m.group("tp"))
 
         if _is_valid_signal(wsig):
+            if len(parsed_all_tps) > 1 and "tps" not in wsig:
+                wsig["tps"] = [parsed_all_tps[k] for k in sorted(parsed_all_tps)]
             return wsig
 
-    # 5. JSON fragments
+    # 6. JSON fragments
     for fragment in re.findall(r"\{[^{}]+\}", clean, re.DOTALL):
         try:
             obj = json.loads(fragment)
@@ -375,7 +412,7 @@ def parse_signal(text: str) -> Optional[dict]:
         except json.JSONDecodeError:
             pass
 
-    # 6. Generic key=value scan
+    # 7. Generic key=value scan
     kvsig: dict = {}
     for m in _KV_RE.finditer(clean):
         if m.group("sym") and "symbol" not in kvsig:
@@ -392,9 +429,11 @@ def parse_signal(text: str) -> Optional[dict]:
             kvsig["strategy"] = m.group("strat")
     if _is_valid_signal(kvsig):
         kvsig.setdefault("strategy", "matrix")
+        if len(parsed_all_tps) > 1 and "tps" not in kvsig:
+            kvsig["tps"] = [parsed_all_tps[k] for k in sorted(parsed_all_tps)]
         return kvsig
 
-    # 7. Inline compact: "BTCUSDT LONG entry=X sl=Y tp=Z"
+    # 8. Inline compact: "BTCUSDT LONG entry=X sl=Y tp=Z"
     m2 = _INLINE_RE.search(clean)
     if m2:
         inlsig: dict = {
@@ -409,6 +448,8 @@ def parse_signal(text: str) -> Optional[dict]:
         if m2.group("tp"):
             inlsig["tp1"] = float(m2.group("tp"))
         if _is_valid_signal(inlsig):
+            if len(parsed_all_tps) > 1 and "tps" not in inlsig:
+                inlsig["tps"] = [parsed_all_tps[k] for k in sorted(parsed_all_tps)]
             return inlsig
 
     return None
@@ -439,6 +480,20 @@ def _build_from_dict(obj: dict) -> Optional[dict]:
                 except (TypeError, ValueError):
                     pass
     sig.setdefault("strategy", str(obj.get("strategy", "matrix")))
+    for ladder_key in ("tps", "tp_levels", "take_profit_levels", "take_profits"):
+        raw = obj.get(ladder_key)
+        if isinstance(raw, list):
+            tps = []
+            for value in raw:
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    tps.append(parsed)
+            if len(tps) > 1:
+                sig["tps"] = tps
+                break
     return sig if _is_valid_signal(sig) else None
 
 
@@ -847,7 +902,7 @@ class MatrixRlSidecarClient:
         self._queue: queue.Queue[dict] | None = None
         self._dispatch_thread: threading.Thread | None = None
         self._market_http = HTTP(testnet=False, demo=DEMO)
-        self._market_feature_cache: dict[str, tuple[float, dict]] = {}
+        self._market_enricher = MarketContextEnricher(self._market_http, logger=log)
 
         if self._url:
             self._queue = queue.Queue(maxsize=max(1, MATRIX_RL_EXECUTION_QUEUE_SIZE))
@@ -867,63 +922,42 @@ class MatrixRlSidecarClient:
         if not symbol or direction not in {"long", "short"}:
             return {"features": {}, "market_context": {}}
 
-        now = time.time()
-        cached = self._market_feature_cache.get(symbol)
-        if cached and (now - cached[0]) <= max(0.0, MATRIX_MARKET_FEATURE_CACHE_SECONDS):
-            base = dict(cached[1])
-        else:
-            base = {}
-            try:
-                resp = self._market_http.get_kline(
-                    category="linear",
-                    symbol=symbol,
-                    interval="5",
-                    limit=300,
-                )
-                items = resp.get("result", {}).get("list", [])
-                if items:
-                    bars = list(reversed(items))
-                    closes = [float(it[4]) for it in bars]
-                    vols = [float(it[5]) for it in bars]
-
-                    ret_1h = None
-                    ret_4h = None
-                    symbol_vol_mult = None
-
-                    if len(closes) >= 13 and closes[-13] > 0:
-                        ret_1h = ((closes[-1] / closes[-13]) - 1.0) * 100.0
-                    if len(closes) >= 49 and closes[-49] > 0:
-                        ret_4h = ((closes[-1] / closes[-49]) - 1.0) * 100.0
-                    if len(vols) >= 20:
-                        vol_sma20 = float(np.mean(vols[-20:]))
-                        if vol_sma20 > 0:
-                            symbol_vol_mult = vols[-1] / vol_sma20
-
-                    base = {
-                        "ret_1h": ret_1h,
-                        "ret_4h": ret_4h,
-                        "symbol_vol_mult": symbol_vol_mult,
-                    }
-            except Exception as exc:
-                log.debug("[matrix-rl] market feature fetch failed for %s: %s", symbol, exc)
-            self._market_feature_cache[symbol] = (now, dict(base))
+        shared_context = self._market_enricher.build_context(
+            symbol=symbol,
+            sig={
+                "symbol": symbol,
+                "signal": direction,
+                "strategy": sig.get("strategy", "matrix"),
+                "entry": sig.get("entry"),
+                "sl": sig.get("sl"),
+                "tp1": sig.get("tp1"),
+                "entry_time": datetime.now(timezone.utc).isoformat(),
+                "session": sig.get("session"),
+            },
+            instrument_info={},
+            provenance={
+                "bot_version": "matrix",
+                "strategy": sig.get("strategy", "matrix"),
+                "symbol": symbol,
+                "timeframe": "5",
+                "runtime": {"bybit_demo": DEMO},
+                "build": {
+                    "git_commit": os.environ.get("GIT_COMMIT") or os.environ.get("COMMIT_SHA"),
+                    "image_tag": os.environ.get("IMAGE_TAG") or os.environ.get("DOCKER_IMAGE_TAG"),
+                },
+            },
+        )
+        derived = shared_context.get("derived") if isinstance(shared_context.get("derived"), dict) else {}
 
         sign = 1.0 if direction == "long" else -1.0
         features: dict[str, float] = {}
-        if isinstance(base.get("ret_1h"), (int, float)):
-            features["ret_1h_dir"] = sign * float(base["ret_1h"])
-        if isinstance(base.get("ret_4h"), (int, float)):
-            features["ret_4h_dir"] = sign * float(base["ret_4h"])
-        if isinstance(base.get("symbol_vol_mult"), (int, float)):
-            features["symbol_vol_mult"] = float(base["symbol_vol_mult"])
-
-        market_context = {
-            "derived_from": "bybit_kline_5m",
-            "ret_1h": base.get("ret_1h"),
-            "ret_4h": base.get("ret_4h"),
-            "symbol_vol_mult": base.get("symbol_vol_mult"),
-        }
-        return {"features": features, "market_context": market_context}
+        if isinstance(derived.get("ret_1h"), (int, float)):
+            features["ret_1h_dir"] = sign * float(derived["ret_1h"])
+        if isinstance(derived.get("ret_4h"), (int, float)):
+            features["ret_4h_dir"] = sign * float(derived["ret_4h"])
+        if isinstance(derived.get("symbol_vol_mult"), (int, float)):
+            features["symbol_vol_mult"] = float(derived["symbol_vol_mult"])
+        return {"features": features, "market_context": shared_context}
 
     def _build_signal_payload(
         self,
@@ -958,6 +992,7 @@ class MatrixRlSidecarClient:
                 "entry": sig.get("entry"),
                 "stop_loss": sig.get("sl"),
                 "take_profit": sig.get("tp1"),
+                "take_profit_levels": sig.get("tps"),
                 "entry_time": datetime.now(timezone.utc).isoformat(),
             },
             "features": feature_payload,

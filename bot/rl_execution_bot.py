@@ -104,6 +104,8 @@ MIN_ACTION_TO_TRADE = env_float("RL_MIN_ACTION_TO_TRADE", 0.05)
 INITIAL_ACTION = env_float("RL_INITIAL_ACTION", 0.10)
 EXPLORATION_RATE = env_float("RL_EXPLORATION_RATE", 0.02)
 EXPLORATION_MAX_ACTION = env_float("RL_EXPLORATION_MAX_ACTION", 0.25)
+TP_SCALE_MAX = max(1, env_int("RL_TP_SCALE_MAX", 10))
+INITIAL_TP_SCALE = env_float("RL_INITIAL_TP_SCALE", 3.0)
 LEARNING_RATE = env_float("RL_LEARNING_RATE", 0.03)
 WEIGHT_DECAY = env_float("RL_WEIGHT_DECAY", 0.0001)
 
@@ -325,6 +327,8 @@ class ContextualRiskAgent:
 
     def __init__(self) -> None:
         self.weights: dict[str, float] = {"__bias__": logit(INITIAL_ACTION)}
+        initial_tp_fraction = clamp(INITIAL_TP_SCALE / max(float(TP_SCALE_MAX), 1.0), 1e-4, 1.0 - 1e-4)
+        self.tp_weights: dict[str, float] = {"__bias__": logit(initial_tp_fraction)}
         self.stats: dict[str, dict[str, float]] = {}
         self.trade_history: dict[str, deque[dict[str, Any]]] = {}
         self.reward_baseline = 0.0
@@ -341,6 +345,8 @@ class ContextualRiskAgent:
                 data = json.load(fh)
             if isinstance(data.get("weights"), dict):
                 agent.weights = {str(k): float(v) for k, v in data["weights"].items()}
+            if isinstance(data.get("tp_weights"), dict):
+                agent.tp_weights = {str(k): float(v) for k, v in data["tp_weights"].items()}
             if isinstance(data.get("stats"), dict):
                 agent.stats = {
                     str(k): {
@@ -368,6 +374,7 @@ class ContextualRiskAgent:
                                 "won": 1.0 if closed_pnl > 0 else 0.0,
                                 "direction": str(row.get("direction") or "").strip().lower(),
                                 "session_tag": str(row.get("session_tag") or "").strip().lower(),
+                                "entry_slippage_bps": to_float(row.get("entry_slippage_bps")),
                             }
                         )
                     if bucket:
@@ -392,6 +399,7 @@ class ContextualRiskAgent:
             json.dump(
                 {
                     "weights": self.weights,
+                    "tp_weights": self.tp_weights,
                     "stats": self.stats,
                     "trade_history": {
                         key: list(bucket)[-ROLLING_HISTORY_MAXLEN:]
@@ -475,6 +483,8 @@ class ContextualRiskAgent:
                 "pnl_avg": 0.0,
                 "reward_sum": 0.0,
                 "reward_avg": 0.0,
+                "entry_slippage_bps_avg": 0.0,
+                "entry_slippage_bps_abs_avg": 0.0,
             }
 
         def payload_context() -> tuple[str, str]:
@@ -516,6 +526,9 @@ class ContextualRiskAgent:
         wins = sum(1 for row in items if float(row.get("closed_pnl", 0.0) or 0.0) > 0)
         pnl_sum = sum(float(row.get("closed_pnl", 0.0) or 0.0) for row in items)
         reward_sum = sum(float(row.get("reward_default_r", 0.0) or 0.0) for row in items)
+        slippage_values = [to_float(row.get("entry_slippage_bps")) for row in items]
+        slippage_values = [value for value in slippage_values if value is not None]
+        slippage_abs_values = [abs(value) for value in slippage_values]
         # Smoothed winrate reduces small-sample noise while keeping the same feature key.
         smoothed_winrate = (wins + 1.0) / (trade_count + 2.0)
         return {
@@ -525,6 +538,8 @@ class ContextualRiskAgent:
             "pnl_avg": pnl_sum / trade_count if trade_count else 0.0,
             "reward_sum": reward_sum,
             "reward_avg": reward_sum / trade_count if trade_count else 0.0,
+            "entry_slippage_bps_avg": (sum(slippage_values) / len(slippage_values)) if slippage_values else 0.0,
+            "entry_slippage_bps_abs_avg": (sum(slippage_abs_values) / len(slippage_abs_values)) if slippage_abs_values else 0.0,
         }
 
     def _rolling_perf_features(self, payload: dict[str, Any]) -> dict[str, float]:
@@ -551,6 +566,8 @@ class ContextualRiskAgent:
             features[f"perf.rolling_reward_r_sum_{window}"] = stats["reward_sum"]
             features[f"perf.rolling_reward_r_avg_{window}"] = stats["reward_avg"]
             features[f"perf.rolling_trade_count_{window}"] = stats["trade_count"]
+            features[f"perf.rolling_entry_slippage_bps_avg_{window}"] = stats["entry_slippage_bps_avg"]
+            features[f"perf.rolling_entry_slippage_bps_abs_avg_{window}"] = stats["entry_slippage_bps_abs_avg"]
         return features
 
     def _numeric_features(self, payload: dict[str, Any]) -> dict[str, float]:
@@ -576,10 +593,16 @@ class ContextualRiskAgent:
         if isinstance(market, dict):
             basis = market.get("basis") if isinstance(market.get("basis"), dict) else {}
             add_number("market.basis_pct", basis.get("basis_pct"))
+            add_number("market.basis_divergence_zscore", basis.get("divergence_zscore"))
 
             orderbook = market.get("orderbook") if isinstance(market.get("orderbook"), dict) else {}
             add_number("orderbook.spread_bps", orderbook.get("spread_bps"))
+            add_number("orderbook.spread_bps_zscore", orderbook.get("spread_bps_zscore"))
+            add_number("orderbook.spread_bps_percentile_200", orderbook.get("spread_bps_percentile_200"))
             add_number("orderbook.imbalance_top10", orderbook.get("imbalance_top10"))
+            add_number("orderbook.imbalance_top3", orderbook.get("imbalance_top3"))
+            add_number("orderbook.imbalance_far_4_10", orderbook.get("imbalance_far_4_10"))
+            add_number("orderbook.depth_skew_near_far", orderbook.get("depth_skew_near_far"))
             bid_depth = to_float(orderbook.get("bid_notional_top10"))
             ask_depth = to_float(orderbook.get("ask_notional_top10"))
             if bid_depth is not None:
@@ -604,10 +627,16 @@ class ContextualRiskAgent:
                 add_number(f"oi.delta_{window}_log", delta, log1p_abs=True)
                 if oi_current not in (None, 0.0) and delta is not None:
                     add_number(f"oi.delta_{window}_pct", delta / oi_current)
+            add_number("oi.delta_1h_pct", oi.get("delta_1h_pct"))
+            add_number("oi.price_ret_1h", oi.get("price_ret_1h"))
+            add_number("oi.price_oi_state_code", oi.get("oi_price_state_code"))
 
             funding = market.get("funding") if isinstance(market.get("funding"), dict) else {}
             add_number("funding.current", funding.get("current"))
             add_number("funding.zscore", funding.get("zscore"))
+            add_number("funding.delta_1h", funding.get("delta_1h"))
+            add_number("funding.delta_4h", funding.get("delta_4h"))
+            add_number("funding.accel_1h_minus_4h", funding.get("accel_1h_minus_4h"))
             mins_to_funding = to_float(funding.get("minutes_to_next_funding"))
             if mins_to_funding is not None:
                 add_number("funding.minutes_to_next", mins_to_funding)
@@ -703,16 +732,24 @@ class ContextualRiskAgent:
             vector = self.build_vector(payload)
             score = sum(self.weights.get(k, 0.0) * v for k, v in vector.items())
             policy_action = sigmoid(score)
+            tp_scale_score = sum(self.tp_weights.get(k, 0.0) * v for k, v in vector.items())
+            policy_tp_fraction = sigmoid(tp_scale_score)
+            policy_tp_scale = int(round(policy_tp_fraction * float(TP_SCALE_MAX)))
             action = policy_action
+            tp_scale = policy_tp_scale
             explored = False
             if random.random() < EXPLORATION_RATE:
                 explored = True
                 action = random.uniform(0.0, clamp(EXPLORATION_MAX_ACTION, 0.0, 1.0))
+                tp_scale = random.randint(0, TP_SCALE_MAX)
             action = clamp(action, 0.0, 1.0)
             return action, {
                 "policy_action": policy_action,
                 "score": score,
                 "explored": explored,
+                "policy_tp_scale": policy_tp_scale,
+                "tp_scale": tp_scale,
+                "tp_scale_score": tp_scale_score,
                 "feature_vector": vector,
             }
 
@@ -729,6 +766,9 @@ class ContextualRiskAgent:
             self.reward_baseline = (1.0 - baseline_alpha) * self.reward_baseline + baseline_alpha * reward
             advantage = clamp(reward - old_baseline, -5.0, 5.0)
             gradient_scale = LEARNING_RATE * advantage * max(0.05, action * (1.0 - action))
+            tp_scale = to_float(decision.get("tp_scale"))
+            tp_fraction = clamp((tp_scale or 0.0) / float(TP_SCALE_MAX), 0.0, 1.0)
+            gradient_scale_tp = LEARNING_RATE * advantage * max(0.05, tp_fraction * (1.0 - tp_fraction))
             for key, value in vector.items():
                 x = to_float(value)
                 if x is None:
@@ -736,8 +776,18 @@ class ContextualRiskAgent:
                 old_weight = self.weights.get(str(key), 0.0)
                 decayed = old_weight * (1.0 - WEIGHT_DECAY)
                 self.weights[str(key)] = clamp(decayed + gradient_scale * x, -12.0, 12.0)
+                old_tp_weight = self.tp_weights.get(str(key), 0.0)
+                decayed_tp = old_tp_weight * (1.0 - WEIGHT_DECAY)
+                self.tp_weights[str(key)] = clamp(decayed_tp + gradient_scale_tp * x, -12.0, 12.0)
 
-    def add_trade_history(self, payload: dict[str, Any], *, closed_pnl: float, reward_default_r: float) -> None:
+    def add_trade_history(
+        self,
+        payload: dict[str, Any],
+        *,
+        closed_pnl: float,
+        reward_default_r: float,
+        entry_slippage_bps: float | None,
+    ) -> None:
         market = payload.get("market_context") if isinstance(payload.get("market_context"), dict) else {}
         regime = market.get("regime") if isinstance(market.get("regime"), dict) else {}
         summary = {
@@ -746,6 +796,7 @@ class ContextualRiskAgent:
             "won": 1.0 if closed_pnl > 0 else 0.0,
             "direction": str(payload.get("direction") or "").strip().lower(),
             "session_tag": str(regime.get("session_tag") or "").strip().lower(),
+            "entry_slippage_bps": entry_slippage_bps,
         }
         keys = [
             self._scope_key(payload.get("strategy"), payload.get("room_id")),
@@ -1008,6 +1059,8 @@ class RLExecutionService:
             "strategy": payload.get("strategy"),
             "direction": payload.get("direction"),
             "action": action,
+            "tp_scale": int(agent_info.get("tp_scale") or 0),
+            "tp_scale_max": TP_SCALE_MAX,
             "risk_mode": "fixed_usdt",
             "default_risk_usdt": DEFAULT_RISK_USDT,
             "setup": setup,
@@ -1050,6 +1103,10 @@ class RLExecutionService:
             "symbol": decision.get("symbol"),
             "strategy": decision.get("strategy"),
             "action": decision.get("action"),
+            "tp_scale": decision.get("tp_scale"),
+            "tp_scale_max": decision.get("tp_scale_max"),
+            "selected_tp_index": decision.get("selected_tp_index"),
+            "selected_take_profit": decision.get("selected_take_profit"),
             "executed": decision.get("executed", False),
             "execution_status": decision.get("execution_status"),
             "skip_reason": decision.get("skip_reason"),
@@ -1170,12 +1227,30 @@ class RLExecutionService:
 
     def _maybe_execute(self, decision: dict[str, Any]) -> None:
         action = float(decision["action"])
+        tp_scale = int(to_float(decision.get("tp_scale")) or 0)
         symbol = str(decision.get("symbol") or "").upper()
         direction = str(decision.get("direction") or "").lower()
         setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
         entry = to_float(setup.get("entry"))
         stop = to_float(setup.get("stop_loss"))
         target = to_float(setup.get("take_profit"))
+        levels_raw = setup.get("take_profit_levels")
+        tp_levels = [
+            float(value)
+            for value in (levels_raw or [])
+            if to_float(value) is not None and float(value) > 0
+        ] if isinstance(levels_raw, list) else []
+        if tp_levels:
+            max_idx = max(0, len(tp_levels) - 1)
+            scaled_fraction = clamp(tp_scale / float(max(TP_SCALE_MAX, 1)), 0.0, 1.0)
+            selected_idx = int(round(scaled_fraction * max_idx))
+            target = float(tp_levels[selected_idx])
+            decision["selected_tp_index"] = selected_idx + 1
+            decision["selected_take_profit"] = target
+            decision["available_tp_count"] = len(tp_levels)
+        elif target is not None:
+            decision["selected_tp_index"] = 1
+            decision["selected_take_profit"] = target
         trail_dist = to_float(setup.get("trail_dist"))
         exit_request = self._exit_request_metadata(setup)
         source_requests_trailing = bool(exit_request["source_requests_trailing"])
@@ -1346,13 +1421,22 @@ class RLExecutionService:
             if order_id:
                 self.order_to_decision[order_id] = decision_id
             self.order_to_decision[order_link_id] = decision_id
+        selected_tp_index = decision.get("selected_tp_index")
+        selected_take_profit = decision.get("selected_take_profit")
+        available_tp_count = decision.get("available_tp_count")
         log.info(
-            "[%s] RL order accepted action=%.3f qty=%s risk~%.2f default_risk=%.2f orderId=%s",
+            "[%s] RL order accepted decision=%s action=%.3f qty=%s risk~%.2f default_risk=%.2f tp_scale=%s/%s selected_tp=%s/%s@%s orderId=%s",
             symbol,
+            decision_id,
             action,
             qty_to_str(qty, q_step),
             expected_sl_loss,
             default_risk_usdt,
+            decision.get("tp_scale") if decision.get("tp_scale") is not None else "-",
+            decision.get("tp_scale_max") if decision.get("tp_scale_max") is not None else "-",
+            selected_tp_index if selected_tp_index is not None else "-",
+            available_tp_count if available_tp_count is not None else "-",
+            f"{float(selected_take_profit):.4f}" if selected_take_profit is not None else "-",
             order_id or "-",
         )
 
@@ -1819,6 +1903,17 @@ class RLExecutionService:
             actual_risk = to_float(decision.get("risk_budget_usdt")) or to_float(decision.get("expected_sl_loss_usdt")) or 0.0
             reward_default_r = closed_pnl / default_risk if default_risk > 0 else 0.0
             reward_actual_r = closed_pnl / actual_risk if actual_risk > 0 else 0.0
+            entry_slippage_bps = None
+            setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
+            expected_entry = to_float(setup.get("entry"))
+            entry_fill_raw = decision.get("entry_fill_raw") if isinstance(decision.get("entry_fill_raw"), dict) else {}
+            fill_price = to_float(entry_fill_raw.get("avgPrice"))
+            direction = str(decision.get("direction") or "").strip().lower()
+            if expected_entry not in (None, 0.0) and fill_price not in (None, 0.0):
+                if direction == "short":
+                    entry_slippage_bps = (expected_entry - fill_price) / expected_entry * 1e4
+                else:
+                    entry_slippage_bps = (fill_price - expected_entry) / expected_entry * 1e4
             reward_payload = {
                 "decision_id": decision_id,
                 "symbol": decision.get("symbol"),
@@ -1827,6 +1922,7 @@ class RLExecutionService:
                 "closed_pnl": closed_pnl,
                 "reward_default_r": reward_default_r,
                 "reward_actual_r": reward_actual_r,
+                "entry_slippage_bps": entry_slippage_bps,
                 "source": source,
                 "exit_order_id": exit_order_id,
                 "received_at": now_iso(),
@@ -1846,8 +1942,14 @@ class RLExecutionService:
                 "received_at": decision.get("received_at"),
                 "completed_at": reward_payload["received_at"],
                 "action": decision.get("action"),
+                "tp_scale": decision.get("tp_scale"),
+                "tp_scale_max": decision.get("tp_scale_max"),
+                "selected_tp_index": decision.get("selected_tp_index"),
+                "selected_take_profit": decision.get("selected_take_profit"),
                 "policy_action": agent.get("policy_action"),
                 "policy_score": agent.get("score"),
+                "policy_tp_scale": agent.get("policy_tp_scale"),
+                "policy_tp_scale_score": agent.get("tp_scale_score"),
                 "explored": agent.get("explored"),
                 "risk_mode": decision.get("risk_mode"),
                 "default_risk_usdt": decision.get("default_risk_usdt"),
@@ -1873,7 +1975,12 @@ class RLExecutionService:
             if exit_order_id:
                 self.order_to_decision[str(exit_order_id)] = decision_id
                 self.claimed_closed_pnl_ids.add(str(exit_order_id))
-            self.agent.add_trade_history(payload, closed_pnl=closed_pnl, reward_default_r=reward_default_r)
+            self.agent.add_trade_history(
+                payload,
+                closed_pnl=closed_pnl,
+                reward_default_r=reward_default_r,
+                entry_slippage_bps=entry_slippage_bps,
+            )
             self.agent.learn(decision, reward_default_r)
             self.agent.save(MODEL_PATH)
             self._save_runtime_state_locked()

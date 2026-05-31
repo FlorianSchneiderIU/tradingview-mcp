@@ -141,6 +141,7 @@ from wolfe_wave import (
     WolfeWaveState,
     load_wolfe_wave_configs,
 )
+from market_context import MarketContextEnricher
 
 # --- Configuration ------------------------------------------------------------
 # Credentials are read inside Bot.__init__ so this module can be imported
@@ -788,8 +789,11 @@ class Bot:
         self._last_daily_heartbeat_key = ""
         self._last_protection_audit_ts = 0.0
         self._last_open_order_audit_ts = 0.0
-        self._oi_history: dict[str, deque[dict]] = {}
-        self._funding_history: dict[str, deque[dict]] = {}
+        self._market_context_enricher = MarketContextEnricher(
+            self._http,
+            fetch_market_snapshot=self._fetch_market_snapshot,
+            logger=log,
+        )
         self._rl_execution_url = RL_EXECUTION_URL
         self._rl_execution_timeout = max(0.1, RL_EXECUTION_TIMEOUT_SECONDS)
         self._rl_queue: queue.Queue[dict] | None = None
@@ -1785,96 +1789,11 @@ class Bot:
             return None
         return out
 
-    @staticmethod
-    def _zscore(value: float | None, history_values: list[float]) -> float | None:
-        if value is None or len(history_values) < 5:
-            return None
-        arr = np.asarray(history_values, dtype=np.float64)
-        if arr.size < 5:
-            return None
-        std = float(np.std(arr))
-        if std <= 0 or not math.isfinite(std):
-            return None
-        mean = float(np.mean(arr))
-        z = (value - mean) / std
-        return float(z) if math.isfinite(z) else None
-
     def _extract_response_list(self, resp: dict) -> list[dict]:
         items = resp.get("result", {}).get("list", []) if isinstance(resp, dict) else []
         if isinstance(items, list):
             return [item for item in items if isinstance(item, dict)]
         return []
-
-    def _build_regime_context(self, state: SymbolState, sig: dict) -> dict:
-        bars = state.snapshot()
-        if len(bars) < max(ATR_LEN + 5, VOL_WIN + 5, ATR_PCTILE_WIN + 5):
-            return {}
-        try:
-            c = np.array([b["close"] for b in bars], dtype=np.float64)
-            h = np.array([b["high"] for b in bars], dtype=np.float64)
-            l = np.array([b["low"] for b in bars], dtype=np.float64)
-            v = np.array([b["volume"] for b in bars], dtype=np.float64)
-            atr = ind_atr(h, l, c, ATR_LEN)
-            atr_last = float(atr[-1]) if len(atr) else float("nan")
-            atr_pctile = atr_pctile_last(atr, ATR_PCTILE_WIN)
-            vol_ratio = vol_ratio_last(v, VOL_WIN)
-
-            rets = np.diff(np.log(np.maximum(c, 1e-12)))
-            rv_20 = float(np.std(rets[-20:])) if len(rets) >= 20 else float("nan")
-            rv_96 = float(np.std(rets[-96:])) if len(rets) >= 96 else float("nan")
-            vol_window = v[-200:] if len(v) >= 200 else v
-            vol_pct = float(np.mean(vol_window <= v[-1])) if len(vol_window) else float("nan")
-
-            session = str(sig.get("session", "")).strip().lower()
-            entry_time = datetime.now(timezone.utc)
-            raw_time = sig.get("entry_time")
-            if raw_time:
-                try:
-                    text = str(raw_time).replace("Z", "+00:00")
-                    parsed = datetime.fromisoformat(text)
-                    entry_time = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-                    entry_time = entry_time.astimezone(timezone.utc)
-                except (TypeError, ValueError):
-                    pass
-
-            session_ranges = {
-                "asia": (0, 8),
-                "london": (7, 15),
-                "newyork": (13, 21),
-                "ny": (13, 21),
-            }
-            minutes_to_session_open = None
-            minutes_to_session_close = None
-            if session in session_ranges:
-                start_h, end_h = session_ranges[session]
-                now_min = entry_time.hour * 60 + entry_time.minute
-                start_min = start_h * 60
-                end_min = end_h * 60
-                if now_min < start_min:
-                    minutes_to_session_open = start_min - now_min
-                    minutes_to_session_close = end_min - now_min
-                elif now_min <= end_min:
-                    minutes_to_session_open = 0
-                    minutes_to_session_close = end_min - now_min
-                else:
-                    minutes_to_session_open = (24 * 60 - now_min) + start_min
-                    minutes_to_session_close = (24 * 60 - now_min) + end_min
-
-            out = {
-                "session_tag": session or "unspecified",
-                "minutes_to_session_open": minutes_to_session_open,
-                "minutes_to_session_close": minutes_to_session_close,
-                "atr": atr_last if math.isfinite(atr_last) else None,
-                "atr_pctile": atr_pctile if math.isfinite(atr_pctile) else None,
-                "volume_ratio": vol_ratio if math.isfinite(vol_ratio) else None,
-                "realized_vol_20": rv_20 if math.isfinite(rv_20) else None,
-                "realized_vol_96": rv_96 if math.isfinite(rv_96) else None,
-                "volume_percentile_200": vol_pct if math.isfinite(vol_pct) else None,
-            }
-            return out
-        except Exception as exc:
-            log.debug(f"[{state.symbol}] regime context build failed: {exc}")
-            return {}
 
     def _build_provenance_context(self, state: SymbolState, sig: dict) -> dict:
         return {
@@ -1905,229 +1824,13 @@ class Bot:
         }
 
     def _fetch_market_context(self, state: SymbolState, sig: dict) -> dict:
-        symbol = state.symbol
-        local_dt = datetime.now(timezone.utc)
-        context: dict[str, object] = {
-            "captured_at_utc": local_dt.isoformat(),
-            "captured_at_ms": int(local_dt.timestamp() * 1000),
-            "symbol": symbol,
-            "strategy": sig.get("strategy"),
-            "direction": sig.get("signal"),
-        }
-
-        try:
-            server_resp = self._http.get_server_time()
-            context["server_time"] = server_resp.get("result") if isinstance(server_resp, dict) else None
-        except Exception as exc:
-            log.debug(f"[{symbol}] server time fetch failed: {exc}")
-
-        ticker = self._fetch_market_snapshot(symbol)
-        context["ticker"] = ticker
-
-        mark = self._to_float(ticker.get("markPrice")) if ticker else None
-        index = self._to_float(ticker.get("indexPrice")) if ticker else None
-        basis_pct = ((mark - index) / index) if (mark is not None and index and index != 0) else None
-        context["basis"] = {
-            "mark_price": mark,
-            "index_price": index,
-            "basis_pct": basis_pct if basis_pct is None or math.isfinite(basis_pct) else None,
-        }
-
-        try:
-            ob_resp = self._http.get_orderbook(category="linear", symbol=symbol, limit=50)
-            ob = ob_resp.get("result", {}) if isinstance(ob_resp, dict) else {}
-            bids_raw = ob.get("b", []) if isinstance(ob, dict) else []
-            asks_raw = ob.get("a", []) if isinstance(ob, dict) else []
-            bids = [entry for entry in bids_raw if isinstance(entry, (list, tuple)) and len(entry) >= 2]
-            asks = [entry for entry in asks_raw if isinstance(entry, (list, tuple)) and len(entry) >= 2]
-            best_bid = self._to_float(bids[0][0]) if bids else None
-            best_ask = self._to_float(asks[0][0]) if asks else None
-            spread = (best_ask - best_bid) if (best_ask is not None and best_bid is not None) else None
-            mid = ((best_ask + best_bid) / 2.0) if (best_ask is not None and best_bid is not None) else None
-            spread_bps = (spread / mid * 1e4) if (spread is not None and mid not in (None, 0)) else None
-            bid_notional_top10 = 0.0
-            ask_notional_top10 = 0.0
-            for entry in bids[:10]:
-                p = self._to_float(entry[0])
-                q = self._to_float(entry[1])
-                if p is not None and q is not None:
-                    bid_notional_top10 += p * q
-            for entry in asks[:10]:
-                p = self._to_float(entry[0])
-                q = self._to_float(entry[1])
-                if p is not None and q is not None:
-                    ask_notional_top10 += p * q
-            denom = bid_notional_top10 + ask_notional_top10
-            imbalance = ((bid_notional_top10 - ask_notional_top10) / denom) if denom > 0 else None
-            context["orderbook"] = {
-                "best_bid": best_bid,
-                "best_ask": best_ask,
-                "spread": spread,
-                "spread_bps": spread_bps,
-                "bid_notional_top10": bid_notional_top10,
-                "ask_notional_top10": ask_notional_top10,
-                "imbalance_top10": imbalance,
-                "raw": ob,
-            }
-        except Exception as exc:
-            log.debug(f"[{symbol}] orderbook fetch failed: {exc}")
-
-        try:
-            trades_resp = self._http.get_public_trade_history(category="linear", symbol=symbol, limit=200)
-            trades = self._extract_response_list(trades_resp)
-            now_ms = int(local_dt.timestamp() * 1000)
-            buy_notional = 0.0
-            sell_notional = 0.0
-            buy_qty = 0.0
-            sell_qty = 0.0
-            count = 0
-            for trade in trades:
-                ts = int(self._to_float(trade.get("time")) or self._to_float(trade.get("T")) or 0)
-                if ts <= 0 or now_ms - ts > 60_000:
-                    continue
-                side = str(trade.get("side", "")).lower()
-                price = self._to_float(trade.get("price") or trade.get("p"))
-                qty = self._to_float(trade.get("size") or trade.get("v"))
-                if price is None or qty is None:
-                    continue
-                count += 1
-                if side == "buy":
-                    buy_notional += price * qty
-                    buy_qty += qty
-                elif side == "sell":
-                    sell_notional += price * qty
-                    sell_qty += qty
-            denom = buy_notional + sell_notional
-            imbalance = ((buy_notional - sell_notional) / denom) if denom > 0 else None
-            context["trade_flow_60s"] = {
-                "trade_count": count,
-                "buy_notional": buy_notional,
-                "sell_notional": sell_notional,
-                "buy_qty": buy_qty,
-                "sell_qty": sell_qty,
-                "notional_imbalance": imbalance,
-                "raw": trades[:100],
-            }
-        except Exception as exc:
-            log.debug(f"[{symbol}] public trade history fetch failed: {exc}")
-
-        oi_current = self._to_float(ticker.get("openInterest")) if ticker else None
-        oi_history: list[dict] = []
-        try:
-            oi_resp = self._http.get_open_interest(
-                category="linear",
-                symbol=symbol,
-                intervalTime="5min",
-                limit=24,
-            )
-            oi_rows = self._extract_response_list(oi_resp)
-            for row in oi_rows:
-                ts = int(self._to_float(row.get("timestamp")) or 0)
-                oi = self._to_float(row.get("openInterest"))
-                if ts > 0 and oi is not None:
-                    oi_history.append({"ts": ts, "open_interest": oi})
-            oi_history.sort(key=lambda item: item["ts"])
-        except Exception as exc:
-            log.debug(f"[{symbol}] open interest history fetch failed: {exc}")
-
-        if oi_current is None and oi_history:
-            oi_current = oi_history[-1]["open_interest"]
-
-        if symbol not in self._oi_history:
-            self._oi_history[symbol] = deque(maxlen=512)
-        for row in oi_history:
-            if not self._oi_history[symbol] or self._oi_history[symbol][-1].get("ts") != row.get("ts"):
-                self._oi_history[symbol].append(row)
-
-        oi_series = [self._to_float(item.get("open_interest")) for item in self._oi_history[symbol]]
-        oi_values = [x for x in oi_series if x is not None]
-        oi_delta_5m = None
-        oi_delta_15m = None
-        oi_delta_1h = None
-        if oi_current is not None and len(oi_values) >= 2:
-            oi_delta_5m = oi_current - oi_values[-2]
-        if oi_current is not None and len(oi_values) >= 4:
-            oi_delta_15m = oi_current - oi_values[-4]
-        if oi_current is not None and len(oi_values) >= 13:
-            oi_delta_1h = oi_current - oi_values[-13]
-
-        context["open_interest"] = {
-            "current": oi_current,
-            "delta_5m": oi_delta_5m,
-            "delta_15m": oi_delta_15m,
-            "delta_1h": oi_delta_1h,
-            "zscore": self._zscore(oi_current, oi_values[-100:]),
-            "history": list(self._oi_history[symbol])[-120:],
-        }
-
-        funding_current = self._to_float(ticker.get("fundingRate")) if ticker else None
-        funding_history: list[dict] = []
-        try:
-            funding_resp = self._http.get_funding_rate_history(category="linear", symbol=symbol, limit=50)
-            funding_rows = self._extract_response_list(funding_resp)
-            for row in funding_rows:
-                ts = int(self._to_float(row.get("fundingRateTimestamp")) or self._to_float(row.get("fundingRateTs")) or 0)
-                rate = self._to_float(row.get("fundingRate"))
-                if ts > 0 and rate is not None:
-                    funding_history.append({"ts": ts, "funding_rate": rate})
-            funding_history.sort(key=lambda item: item["ts"])
-        except Exception as exc:
-            log.debug(f"[{symbol}] funding history fetch failed: {exc}")
-
-        if symbol not in self._funding_history:
-            self._funding_history[symbol] = deque(maxlen=512)
-        for row in funding_history:
-            if not self._funding_history[symbol] or self._funding_history[symbol][-1].get("ts") != row.get("ts"):
-                self._funding_history[symbol].append(row)
-
-        funding_series = [self._to_float(item.get("funding_rate")) for item in self._funding_history[symbol]]
-        funding_values = [x for x in funding_series if x is not None]
-        if funding_current is None and funding_values:
-            funding_current = funding_values[-1]
-
-        next_funding_ms = int(self._to_float(ticker.get("nextFundingTime")) or 0) if ticker else 0
-        now_ms = int(local_dt.timestamp() * 1000)
-        mins_to_next_funding = ((next_funding_ms - now_ms) / 60000.0) if next_funding_ms > 0 else None
-        context["funding"] = {
-            "current": funding_current,
-            "next_funding_time_ms": next_funding_ms if next_funding_ms > 0 else None,
-            "minutes_to_next_funding": mins_to_next_funding,
-            "zscore": self._zscore(funding_current, funding_values[-100:]),
-            "history": list(self._funding_history[symbol])[-120:],
-        }
-
-        context["regime"] = self._build_regime_context(state, sig)
-        entry_f = self._to_float(sig.get("entry"))
-        sl_f = self._to_float(sig.get("sl"))
-        tp_f = self._to_float(sig.get("tp1", sig.get("target")))
-        tick = self._to_float(state.info.get("tick_size"))
-        stop_ticks = None
-        target_ticks = None
-        if entry_f is not None and sl_f is not None and tick and tick > 0:
-            stop_ticks = abs(entry_f - sl_f) / tick
-        if entry_f is not None and tp_f is not None and tick and tick > 0:
-            target_ticks = abs(tp_f - entry_f) / tick
-        context["execution_plan"] = {
-            "expected_entry": sig.get("entry"),
-            "expected_stop": sig.get("sl"),
-            "expected_target": sig.get("tp1", sig.get("target")),
-            "trail_dist": sig.get("trail_dist"),
-            "tick_size": state.info.get("tick_size"),
-            "stop_distance_ticks": stop_ticks,
-            "target_distance_ticks": target_ticks,
-            "qty_step": state.info.get("qty_step"),
-            "min_qty": state.info.get("min_qty"),
-        }
-        context["instrument_constraints"] = {
-            "qty_step": state.info.get("qty_step"),
-            "min_qty": state.info.get("min_qty"),
-            "tick_size": state.info.get("tick_size"),
-            "min_leverage": state.info.get("min_leverage_raw", state.info.get("min_leverage")),
-            "max_leverage": state.info.get("max_leverage_raw", state.info.get("max_leverage")),
-            "leverage_step": state.info.get("leverage_step_raw", state.info.get("leverage_step")),
-        }
-        context["provenance"] = self._build_provenance_context(state, sig)
-        return context
+        return self._market_context_enricher.build_context(
+            symbol=state.symbol,
+            sig=sig,
+            instrument_info=state.info,
+            provenance=self._build_provenance_context(state, sig),
+            recent_bars=state.snapshot(),
+        )
 
     def _attach_market_context(self, state: SymbolState, sig: dict) -> None:
         if isinstance(sig.get("market_context"), dict) and sig.get("market_context"):
