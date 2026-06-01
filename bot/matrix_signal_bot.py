@@ -93,6 +93,12 @@ ACTIVE_TRADES_STATE_PATH = os.environ.get(
     "ACTIVE_TRADES_STATE_PATH",
     os.path.join(LOG_DIR, "active_trades.json"),
 )
+RL_ENTRY_REFS_STATE_PATH = os.environ.get(
+    "RL_ENTRY_REFS_STATE_PATH",
+    os.path.join(LOG_DIR, "rl_entry_refs.json"),
+)
+RL_ENTRY_REFS_MAX_AGE_DAYS = float(os.environ.get("RL_ENTRY_REFS_MAX_AGE_DAYS", "14"))
+RL_ENTRY_REFS_MAX_ENTRIES = int(os.environ.get("RL_ENTRY_REFS_MAX_ENTRIES", "5000"))
 
 MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "").strip()
 MATRIX_ACCESS_TOKEN = os.environ.get("MATRIX_ACCESS_TOKEN", "").strip()
@@ -515,6 +521,78 @@ def _is_valid_signal(sig: dict) -> bool:
     )
 
 
+# --- Exit message parser ─────────────────────────────────────────────────────
+
+# Exit message patterns
+_EXIT_TP_RE = re.compile(
+    r"#([A-Z]{2,10}(?:USDT)?)\s+(LONG|SHORT)\s+TP\s+\d+",
+    re.IGNORECASE,
+)
+_EXIT_RATCHET_RE = re.compile(
+    r"Ratchet\s+armed\s+([A-Z]{2,10})\s+(LONG|SHORT|BUY|SELL)\s*[—-]\s*\[SL→BE\]",
+    re.IGNORECASE,
+)
+# Entry price pattern: "Entry: 1234.56" or "entry 1234.56"
+_ENTRY_PRICE_RE = re.compile(
+    r"[Ee]ntry\s*:?\s*([\d.]+)",
+)
+
+
+def parse_exit_message(text: str) -> Optional[dict]:
+    """
+    Try to extract an exit signal from a message string.
+    Returns dict with keys: action, symbol, direction, entry_price (optional), reason.
+    Actions:
+      - "set_sl_to_be": Set stop loss to breakeven for the specific subposition
+    Returns None if no exit signal detected.
+    Note: Trailing stops and stop hits are handled automatically by Bybit,
+    so we don't need to take action on those messages.
+    """
+    clean = _strip_html(text).strip()
+
+    # 1. TP hit message → set SL to BE
+    tp_m = _EXIT_TP_RE.search(clean)
+    if tp_m:
+        symbol = _normalise_symbol(tp_m.group(1))
+        direction = _normalise_direction(tp_m.group(2))
+        entry_price = None
+        entry_m = _ENTRY_PRICE_RE.search(clean)
+        if entry_m:
+            try:
+                entry_price = float(entry_m.group(1))
+            except (TypeError, ValueError):
+                pass
+        return {
+            "action": "set_sl_to_be",
+            "symbol": symbol,
+            "direction": direction,
+            "entry_price": entry_price,
+            "reason": "TP hit - setting SL to breakeven",
+        }
+
+    # 2. Ratchet armed message → set SL to BE
+    ratchet_m = _EXIT_RATCHET_RE.search(clean)
+    if ratchet_m:
+        symbol = _normalise_symbol(ratchet_m.group(1))
+        direction = _normalise_direction(ratchet_m.group(2))
+        entry_price = None
+        entry_m = _ENTRY_PRICE_RE.search(clean)
+        if entry_m:
+            try:
+                entry_price = float(entry_m.group(1))
+            except (TypeError, ValueError):
+                pass
+        return {
+            "action": "set_sl_to_be",
+            "symbol": symbol,
+            "direction": direction,
+            "entry_price": entry_price,
+            "reason": "Ratchet armed - setting SL to breakeven",
+        }
+
+    return None
+
+
 # --- Bybit helpers ------------------------------------------------------------
 
 def round_to_step(value: float, step: float) -> float:
@@ -890,6 +968,100 @@ class OrderExecutor:
             ),
         }
 
+    def set_stop_to_breakeven(self, symbol: str, entry_price: Optional[float] = None) -> dict:
+        """
+        Set stop loss to breakeven for one specific open subposition.
+        entry_price is required to avoid modifying other entries accidentally.
+        """
+        with self._lock:
+            return self._set_stop_to_breakeven_locked(symbol, entry_price)
+
+    def _set_stop_to_breakeven_locked(self, symbol: str, entry_price: Optional[float] = None) -> dict:
+        """Set SL to BE for open position(s)."""
+        if entry_price is None or entry_price <= 0:
+            return {
+                "ok": False,
+                "message": f"Entry price required for targeted SL->BE on {symbol}",
+            }
+
+        try:
+            positions = self._fetch_open_positions()
+        except Exception as exc:
+            log.warning("[%s] Could not fetch positions for SL→BE: %s", symbol, exc)
+            return {"ok": False, "message": f"Could not fetch positions: {exc}"}
+
+        symbol_upper = symbol.upper()
+        matching_positions = [
+            pos for pos in positions
+            if str(pos.get("symbol", "")).upper() == symbol_upper
+        ]
+
+        if not matching_positions:
+            log.info("[%s] No open positions for SL→BE", symbol)
+            return {"ok": True, "message": f"No open positions for {symbol}"}
+
+        info = self._get_info(symbol)
+        if not info:
+            return {"ok": False, "message": f"Unknown symbol: {symbol}"}
+
+        tick = info["tick_size"]
+        updated_summary = []
+
+        for pos in matching_positions:
+            pos_size = float(pos.get("size", 0) or 0)
+            if pos_size <= 0:
+                continue
+
+            pos_entry_price = float(pos.get("avgPrice", 0) or 0)
+            if pos_entry_price <= 0:
+                continue
+
+            # Allow small tolerance for floating point comparison (0.1% tolerance)
+            if abs(pos_entry_price - entry_price) / entry_price > 0.001:
+                log.debug(
+                    "[%s] Skipping subposition entry=%.8g (target=%.8g)",
+                    symbol, pos_entry_price, entry_price,
+                )
+                continue
+
+            be_sl = round_to_step(pos_entry_price, tick)
+            pos_idx = int(pos.get("positionIdx", 0) or 0)
+
+            modify_kwargs = dict(
+                category="linear",
+                symbol=symbol_upper,
+                stopLoss=str(be_sl),
+                slTriggerBy="LastPrice",
+                positionIdx=pos_idx,
+            )
+
+            try:
+                resp = self._http.set_trading_stop(**modify_kwargs)
+                ret_code = int(resp.get("retCode", 0) or 0)
+                if ret_code != 0:
+                    msg = resp.get("retMsg", "?")
+                    log.warning("[%s] SL→BE failed retCode=%s: %s", symbol, ret_code, msg)
+                    updated_summary.append(f"{symbol} [entry={pos_entry_price}] FAILED: {msg}")
+                else:
+                    log.info("[%s] SL set to BE (%.5g) | entry=%.8g positionIdx=%d", symbol, be_sl, pos_entry_price, pos_idx)
+                    updated_summary.append(f"{symbol} entry={pos_entry_price} SL→{be_sl}")
+            except Exception as exc:
+                log.error("[%s] set_trading_stop exception: %s", symbol, exc)
+                updated_summary.append(f"{symbol} [entry={pos_entry_price}] ERROR: {exc}")
+
+        if not updated_summary:
+            msg = f"No matching subposition found for {symbol}"
+            if entry_price:
+                msg += f" at entry={entry_price}"
+            log.info("[%s] %s", symbol, msg)
+            return {"ok": True, "message": msg}
+
+        return {
+            "ok": True,
+            "message": f"SL→BE updates: {', '.join(updated_summary)}",
+            "updated_count": len(updated_summary),
+        }
+
 
 # --- RL sidecar forwarding ----------------------------------------------------
 
@@ -898,6 +1070,8 @@ class MatrixRlSidecarClient:
 
     def __init__(self) -> None:
         self._url = MATRIX_RL_EXECUTION_URL
+        base_url = self._url.rsplit("/v1/signals", 1)[0] if "/v1/signals" in self._url else self._url.rstrip("/")
+        self._decision_url = f"{base_url}/v1/decisions" if base_url else ""
         self._timeout = max(0.1, MATRIX_RL_EXECUTION_TIMEOUT_SECONDS)
         self._queue: queue.Queue[dict] | None = None
         self._dispatch_thread: threading.Thread | None = None
@@ -965,6 +1139,7 @@ class MatrixRlSidecarClient:
         *,
         sig: dict,
         reason: str | None,
+        source_event_id: str | None,
     ) -> dict:
         probability = None
         threshold = None
@@ -979,7 +1154,7 @@ class MatrixRlSidecarClient:
         feature_columns = list(feature_payload.keys())
         return {
             "schema_version": "rl_signal_v1",
-            "event_id": uuid.uuid4().hex,
+            "event_id": str(source_event_id or uuid.uuid4().hex),
             "source": "matrix-bot",
             "sent_at": datetime.now(timezone.utc).isoformat(),
             "status": status,
@@ -1004,14 +1179,19 @@ class MatrixRlSidecarClient:
             "extra": {},
         }
 
-    def enqueue_signal(self, sig: dict, status: str, reason: str | None) -> dict:
+    def enqueue_signal(self, sig: dict, status: str, reason: str | None, source_event_id: str | None = None) -> dict:
         if not self._url or self._queue is None:
             return {
                 "enabled": False,
                 "queued": False,
                 "message": "MATRIX_RL_EXECUTION_URL is empty",
             }
-        payload = self._build_signal_payload(status, sig=sig, reason=reason)
+        payload = self._build_signal_payload(
+            status,
+            sig=sig,
+            reason=reason,
+            source_event_id=source_event_id,
+        )
         try:
             self._queue.put_nowait(payload)
         except queue.Full:
@@ -1030,7 +1210,35 @@ class MatrixRlSidecarClient:
             "enabled": True,
             "queued": True,
             "message": "RL sidecar signal queued",
+            "event_id": payload.get("event_id"),
         }
+
+    def fetch_decision_by_event_id(self, event_id: str) -> Optional[dict]:
+        if not self._decision_url or not event_id:
+            return None
+        try:
+            response = requests.get(
+                f"{self._decision_url}/{event_id}",
+                timeout=max(1.0, self._timeout),
+            )
+        except Exception as exc:
+            log.debug("[matrix-rl] Decision lookup failed for event=%s: %s", event_id, exc)
+            return None
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 300:
+            log.warning(
+                "[matrix-rl] Decision lookup HTTP %s for event=%s: %s",
+                response.status_code,
+                event_id,
+                response.text[:200],
+            )
+            return None
+        try:
+            payload = response.json()
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def _dispatch_worker(self) -> None:
         assert self._queue is not None
@@ -1095,6 +1303,204 @@ class MatrixSignalBot:
         self._client.user_id = None  # will be populated by whoami()
         self._processed_event_ids: set[str] = set()
         self._recent_signal_keys: dict[str, float] = {}
+        self._rl_entry_refs: dict[str, dict] = {}
+        self._rl_entry_refs_dirty = False
+        self._rl_entry_refs_last_save_at = 0.0
+        # Order executor for managing positions (entry, close, SL modifications)
+        self._order_executor = OrderExecutor(HTTP(testnet=False, demo=DEMO))
+        self._load_rl_entry_refs_state()
+
+    @staticmethod
+    def _normalise_rl_entry_ref(raw: object) -> Optional[dict]:
+        if not isinstance(raw, dict):
+            return None
+        event_id = str(raw.get("event_id") or "").strip()
+        if not event_id:
+            return None
+        entry_price_raw = raw.get("entry_price")
+        entry_price = None
+        if entry_price_raw is not None:
+            try:
+                entry_price = float(entry_price_raw)
+            except (TypeError, ValueError):
+                entry_price = None
+        return {
+            "event_id": event_id,
+            "decision_id": raw.get("decision_id"),
+            "order_id": raw.get("order_id"),
+            "order_link_id": raw.get("order_link_id"),
+            "execution_status": raw.get("execution_status"),
+            "symbol": str(raw.get("symbol") or "").upper() or None,
+            "direction": str(raw.get("direction") or "").lower() or None,
+            "entry_price": entry_price,
+            "updated_at": str(raw.get("updated_at") or ""),
+        }
+
+    @staticmethod
+    def _parse_ref_updated_at(value: object) -> Optional[datetime]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _prune_rl_entry_refs(self) -> bool:
+        if not self._rl_entry_refs:
+            return False
+
+        changed = False
+        now_utc = datetime.now(timezone.utc)
+        max_age_days = max(0.0, RL_ENTRY_REFS_MAX_AGE_DAYS)
+        max_entries = max(1, RL_ENTRY_REFS_MAX_ENTRIES)
+
+        if max_age_days > 0:
+            cutoff = now_utc.timestamp() - (max_age_days * 86400.0)
+            for event_id, ref in list(self._rl_entry_refs.items()):
+                updated_dt = self._parse_ref_updated_at(ref.get("updated_at"))
+                updated_ts = updated_dt.timestamp() if updated_dt else 0.0
+                if updated_ts <= 0 or updated_ts < cutoff:
+                    self._rl_entry_refs.pop(event_id, None)
+                    changed = True
+
+        if len(self._rl_entry_refs) > max_entries:
+            sorted_ids = sorted(
+                self._rl_entry_refs,
+                key=lambda key: (
+                    self._parse_ref_updated_at(self._rl_entry_refs.get(key, {}).get("updated_at"))
+                    or datetime.fromtimestamp(0, tz=timezone.utc)
+                ),
+                reverse=True,
+            )
+            keep = set(sorted_ids[:max_entries])
+            for event_id in list(self._rl_entry_refs.keys()):
+                if event_id not in keep:
+                    self._rl_entry_refs.pop(event_id, None)
+                    changed = True
+
+        return changed
+
+    def _save_rl_entry_refs_state(self, *, force: bool = False) -> None:
+        if self._prune_rl_entry_refs():
+            self._rl_entry_refs_dirty = True
+
+        if not self._rl_entry_refs_dirty and not force:
+            return
+        now = time.time()
+        if not force and (now - self._rl_entry_refs_last_save_at) < 1.0:
+            return
+
+        rows = sorted(
+            self._rl_entry_refs.values(),
+            key=lambda row: str(row.get("updated_at") or ""),
+            reverse=True,
+        )
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "entries": rows,
+        }
+
+        try:
+            tmp_path = f"{RL_ENTRY_REFS_STATE_PATH}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=True, indent=2)
+            os.replace(tmp_path, RL_ENTRY_REFS_STATE_PATH)
+            self._rl_entry_refs_dirty = False
+            self._rl_entry_refs_last_save_at = now
+        except Exception as exc:
+            log.warning("Failed saving RL entry ref state (%s): %s", RL_ENTRY_REFS_STATE_PATH, exc)
+
+    def _load_rl_entry_refs_state(self) -> None:
+        if not RL_ENTRY_REFS_STATE_PATH:
+            return
+        if not os.path.exists(RL_ENTRY_REFS_STATE_PATH):
+            return
+        try:
+            with open(RL_ENTRY_REFS_STATE_PATH, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception as exc:
+            log.warning("Failed loading RL entry ref state (%s): %s", RL_ENTRY_REFS_STATE_PATH, exc)
+            return
+
+        raw_entries = payload.get("entries") if isinstance(payload, dict) else None
+        if not isinstance(raw_entries, list):
+            return
+
+        restored: dict[str, dict] = {}
+        for raw in raw_entries:
+            item = self._normalise_rl_entry_ref(raw)
+            if item is None:
+                continue
+            restored[str(item["event_id"])] = item
+
+        if restored:
+            self._rl_entry_refs = restored
+            if self._prune_rl_entry_refs():
+                self._rl_entry_refs_dirty = True
+                self._save_rl_entry_refs_state(force=True)
+            log.info("Restored %d RL entry refs from %s", len(restored), RL_ENTRY_REFS_STATE_PATH)
+
+    def _remember_rl_entry_ref(self, ref: dict) -> None:
+        event_id = str(ref.get("event_id") or "")
+        if not event_id:
+            return
+        normalised = self._normalise_rl_entry_ref(ref)
+        if normalised is None:
+            return
+        self._rl_entry_refs[event_id] = normalised
+        self._rl_entry_refs_dirty = True
+        if self._prune_rl_entry_refs():
+            self._rl_entry_refs_dirty = True
+        self._save_rl_entry_refs_state()
+
+    def _find_recent_entry_ref(self, symbol: str, direction: Optional[str]) -> Optional[dict]:
+        symbol_u = str(symbol or "").upper()
+        dir_l = str(direction or "").lower() if direction else ""
+        matches = [
+            ref
+            for ref in self._rl_entry_refs.values()
+            if str(ref.get("symbol") or "").upper() == symbol_u
+            and (not dir_l or str(ref.get("direction") or "").lower() == dir_l)
+        ]
+        if not matches:
+            return None
+        return sorted(matches, key=lambda row: str(row.get("updated_at") or ""), reverse=True)[0]
+
+    async def _sync_rl_decision_ref(self, *, event_id: str, sig: dict) -> None:
+        for _ in range(15):
+            decision = await asyncio.get_event_loop().run_in_executor(
+                None,
+                self._rl_client.fetch_decision_by_event_id,
+                event_id,
+            )
+            if isinstance(decision, dict):
+                resolved_entry = decision.get("setup_entry")
+                if resolved_entry is None:
+                    resolved_entry = sig.get("entry")
+                ref = {
+                    "event_id": event_id,
+                    "decision_id": decision.get("decision_id"),
+                    "order_id": decision.get("order_id"),
+                    "order_link_id": decision.get("order_link_id"),
+                    "execution_status": decision.get("execution_status"),
+                    "symbol": sig.get("symbol"),
+                    "direction": sig.get("signal"),
+                    "entry_price": resolved_entry,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self._remember_rl_entry_ref(ref)
+                if str(decision.get("execution_status") or "").lower() in {
+                    "executed", "failed", "skipped", "queue_full"
+                }:
+                    return
+            await asyncio.sleep(2)
 
     @staticmethod
     def _signal_key(sig: dict) -> str:
@@ -1153,12 +1559,15 @@ class MatrixSignalBot:
         self._client.add_event_callback(self._on_message, RoomMessageText)
 
         # Long-poll sync loop
-        while True:
-            try:
-                await self._client.sync(timeout=30_000)
-            except Exception as exc:
-                log.warning("Sync error: %s — retrying in 5s", exc)
-                await asyncio.sleep(5)
+        try:
+            while True:
+                try:
+                    await self._client.sync(timeout=30_000)
+                except Exception as exc:
+                    log.warning("Sync error: %s — retrying in 5s", exc)
+                    await asyncio.sleep(5)
+        finally:
+            self._save_rl_entry_refs_state(force=True)
 
     async def _on_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:
         """Auto-join any room the bot is invited to."""
@@ -1193,63 +1602,118 @@ class MatrixSignalBot:
 
         log.debug("Message from %s: %s", event.sender, body[:200])
 
+        # 1. Try to parse as entry signal
         sig = parse_signal(body)
-        if sig is None:
-            return  # Not a signal message
+        if sig is not None:
+            # Add room metadata to signal for RL feature vector
+            sig["room_id"] = room.room_id
 
-        # Add room metadata to signal for RL feature vector
-        sig["room_id"] = room.room_id
-
-        log.info(
-            "Signal detected | symbol=%s dir=%s entry=%s sl=%s tp=%s strategy=%s | from=%s room=%s",
-            sig["symbol"], sig["signal"], sig.get("entry"),
-            sig.get("sl"), sig.get("tp1", "-"), sig.get("strategy"), event.sender, room.room_id,
-        )
-
-        claimed, wait_seconds = self._claim_signal(sig)
-        dispatch_result: dict
-        if not claimed:
-            reason = f"Duplicate signal ignored for {wait_seconds:.0f}s"
-            dispatch_result = self._rl_client.enqueue_signal(
-                sig,
-                status="rejected",
-                reason=reason,
+            log.info(
+                "Signal detected | symbol=%s dir=%s entry=%s sl=%s tp=%s strategy=%s | from=%s room=%s",
+                sig["symbol"], sig["signal"], sig.get("entry"),
+                sig.get("sl"), sig.get("tp1", "-"), sig.get("strategy"), event.sender, room.room_id,
             )
-            result = {
-                "forwarded": bool(dispatch_result.get("queued")),
-                "status": "rejected",
-                "message": reason,
-                "dispatch": dispatch_result,
-            }
-        else:
-            try:
-                dispatch_result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self._rl_client.enqueue_signal,
+
+            claimed, wait_seconds = self._claim_signal(sig)
+            dispatch_result: dict
+            if not claimed:
+                reason = f"Duplicate signal ignored for {wait_seconds:.0f}s"
+                dispatch_result = self._rl_client.enqueue_signal(
                     sig,
-                    "accepted",
-                    None,
+                    status="rejected",
+                    reason=reason,
+                    source_event_id=event.event_id,
                 )
                 result = {
                     "forwarded": bool(dispatch_result.get("queued")),
-                    "status": "accepted",
-                    "message": str(dispatch_result.get("message") or ""),
+                    "status": "rejected",
+                    "message": reason,
                     "dispatch": dispatch_result,
                 }
-            except Exception as exc:
-                log.exception("RL forward failed")
-                result = {
-                    "forwarded": False,
-                    "status": "accepted",
-                    "message": f"RL forward failed: {exc}",
-                    "dispatch": {"enabled": True, "queued": False, "message": str(exc)},
-                }
+            else:
+                try:
+                    dispatch_result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self._rl_client.enqueue_signal,
+                        sig,
+                        "accepted",
+                        None,
+                        event.event_id,
+                    )
+                    result = {
+                        "forwarded": bool(dispatch_result.get("queued")),
+                        "status": "accepted",
+                        "message": str(dispatch_result.get("message") or ""),
+                        "dispatch": dispatch_result,
+                    }
+                except Exception as exc:
+                    log.exception("RL forward failed")
+                    result = {
+                        "forwarded": False,
+                        "status": "accepted",
+                        "message": f"RL forward failed: {exc}",
+                        "dispatch": {"enabled": True, "queued": False, "message": str(exc)},
+                    }
 
-        reply = self._format_reply(sig, result)
-        log.info("Forward result: %s", result.get("message"))
+            reply = self._format_reply(sig, result)
+            log.info("Forward result: %s", result.get("message"))
 
-        if MATRIX_POST_REPLY:
-            await self._send_message(reply, room_id=room.room_id, reply_to=event.event_id)
+            if claimed and bool(dispatch_result.get("queued")):
+                asyncio.create_task(self._sync_rl_decision_ref(event_id=event.event_id, sig=sig))
+
+            if MATRIX_POST_REPLY:
+                await self._send_message(reply, room_id=room.room_id, reply_to=event.event_id)
+            return
+
+        # 2. Try to parse as exit signal (if not an entry signal)
+        exit_sig = parse_exit_message(body)
+        if exit_sig is not None:
+            action = exit_sig["action"]
+            symbol = exit_sig["symbol"]
+            direction = exit_sig.get("direction")
+            reason = exit_sig.get("reason", "Exit signal")
+            entry_price = exit_sig.get("entry_price")
+
+            if entry_price is None:
+                ref = self._find_recent_entry_ref(symbol, direction)
+                if ref and ref.get("entry_price"):
+                    entry_price = float(ref["entry_price"])
+                    log.info(
+                        "[%s] Exit matched via RL ref event=%s decision=%s order=%s link=%s entry=%s",
+                        symbol,
+                        ref.get("event_id"),
+                        ref.get("decision_id"),
+                        ref.get("order_id"),
+                        ref.get("order_link_id"),
+                        entry_price,
+                    )
+
+            log.info("Exit signal detected | action=%s symbol=%s entry_price=%s reason=%s | from=%s", action, symbol, entry_price, reason, event.sender)
+
+            if action == "set_sl_to_be":
+                if entry_price is None:
+                    reply_text = (
+                        f"⚠️ {reason}\n{symbol}\n"
+                        "Skipped: no entry reference found for a specific subposition"
+                    )
+                    if MATRIX_POST_REPLY:
+                        await self._send_message(reply_text, room_id=room.room_id, reply_to=event.event_id)
+                    return
+
+                # Set SL to breakeven for the specific subposition only.
+                exit_result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self._order_executor.set_stop_to_breakeven,
+                    symbol,
+                    entry_price,
+                )
+                message = exit_result.get("message", "")
+                log.info("[%s] SL→BE result: %s", symbol, message)
+                reply_text = f"✅ {reason}\n{symbol}\n{message}"
+
+            if MATRIX_POST_REPLY:
+                await self._send_message(reply_text, room_id=room.room_id, reply_to=event.event_id)
+            return
 
     def _format_reply(self, sig: dict, result: dict) -> str:
         symbol    = sig["symbol"]

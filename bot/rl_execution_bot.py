@@ -1098,15 +1098,19 @@ class RLExecutionService:
 
     @staticmethod
     def _decision_response(decision: dict[str, Any]) -> dict[str, Any]:
+        setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
         return {
             "decision_id": decision.get("decision_id"),
+            "event_id": decision.get("event_id"),
             "symbol": decision.get("symbol"),
             "strategy": decision.get("strategy"),
+            "direction": decision.get("direction"),
             "action": decision.get("action"),
             "tp_scale": decision.get("tp_scale"),
             "tp_scale_max": decision.get("tp_scale_max"),
             "selected_tp_index": decision.get("selected_tp_index"),
             "selected_take_profit": decision.get("selected_take_profit"),
+            "setup_entry": setup.get("entry"),
             "executed": decision.get("executed", False),
             "execution_status": decision.get("execution_status"),
             "skip_reason": decision.get("skip_reason"),
@@ -2025,6 +2029,167 @@ class RLExecutionService:
         with self.lock:
             return self._decision_response(self.decisions[decision_id])
 
+    def get_decision_by_event_id(self, event_id: str) -> dict[str, Any] | None:
+        event_key = str(event_id or "").strip()
+        if not event_key:
+            return None
+        with self.lock:
+            decision_id = self.event_to_decision.get(event_key)
+            if not decision_id:
+                return None
+            decision = self.decisions.get(decision_id)
+            if not decision:
+                return None
+            return self._decision_response(decision)
+
+    def get_decision_by_id(self, decision_id: str) -> dict[str, Any] | None:
+        decision_key = str(decision_id or "").strip()
+        if not decision_key:
+            return None
+        with self.lock:
+            decision = self.decisions.get(decision_key)
+            if not decision:
+                return None
+            return self._decision_response(decision)
+
+    def handle_bridge_close(self, payload: dict[str, Any]) -> dict[str, Any]:
+        decision_id = str(payload.get("decision_id") or "").strip()
+        event_id = str(payload.get("event_id") or "").strip()
+
+        if not decision_id and event_id:
+            with self.lock:
+                decision_id = str(self.event_to_decision.get(event_id) or "")
+        if not decision_id:
+            raise ValueError("decision_id or event_id is required")
+
+        with self.lock:
+            decision = self.decisions.get(decision_id)
+        if not decision:
+            raise ValueError(f"decision not found: {decision_id}")
+        if self.http is None:
+            raise RuntimeError("Bybit client unavailable")
+        if not decision.get("executed"):
+            raise ValueError(f"decision not executed yet: {decision_id}")
+
+        symbol = str(decision.get("symbol") or "").upper()
+        exit_side = str(decision.get("exit_side") or "")
+        qty = str(decision.get("qty") or "")
+        position_idx = int(to_float(decision.get("position_idx")) or 0)
+        if not symbol or not exit_side or not qty or position_idx <= 0:
+            raise ValueError(f"decision missing close metadata: {decision_id}")
+
+        close_resp = self.http.place_order(
+            category="linear",
+            symbol=symbol,
+            side=exit_side,
+            orderType="Market",
+            qty=qty,
+            reduceOnly=True,
+            positionIdx=position_idx,
+        )
+        ret_code = int(close_resp.get("retCode", -1))
+        if ret_code != 0:
+            raise RuntimeError(
+                f"bridge close failed retCode={ret_code} retMsg={close_resp.get('retMsg')}"
+            )
+
+        close_order_id = str(close_resp.get("result", {}).get("orderId") or "")
+
+        cancel_results: list[dict[str, Any]] = []
+        try:
+            open_orders = self.http.get_open_orders(
+                category="linear",
+                symbol=symbol,
+                openOnly=0,
+            ).get("result", {}).get("list", [])
+        except Exception as exc:
+            open_orders = []
+            cancel_results.append({"warning": f"open-order fetch failed: {exc}"})
+
+        tp_price = to_float(decision.get("selected_take_profit"))
+        if tp_price is None:
+            setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
+            tp_price = to_float(setup.get("take_profit"))
+        sl_price = None
+        setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
+        sl_price = to_float(setup.get("stop_loss"))
+
+        for order in open_orders:
+            try:
+                o_pos_idx = int(to_float(order.get("positionIdx")) or 0)
+                o_qty = to_float(order.get("qty"))
+                d_qty = to_float(decision.get("qty_float") or decision.get("qty"))
+                if o_pos_idx != position_idx or o_qty is None or d_qty is None:
+                    continue
+                if abs(o_qty - d_qty) > max(abs(d_qty) * 1e-6, 1e-12):
+                    continue
+
+                stop_type = str(order.get("stopOrderType") or "")
+                trigger = to_float(order.get("triggerPrice"))
+                matches_sl = (
+                    stop_type == "PartialStopLoss"
+                    and sl_price is not None
+                    and trigger is not None
+                    and abs(trigger - sl_price) <= max(abs(sl_price) * 1e-8, 1e-8)
+                )
+                matches_tp = (
+                    stop_type == "PartialTakeProfit"
+                    and tp_price is not None
+                    and trigger is not None
+                    and abs(trigger - tp_price) <= max(abs(tp_price) * 1e-8, 1e-8)
+                )
+                if not (matches_sl or matches_tp):
+                    continue
+
+                order_id = str(order.get("orderId") or "")
+                if not order_id:
+                    continue
+                try:
+                    cancel_resp = self.http.cancel_order(
+                        category="linear",
+                        symbol=symbol,
+                        orderId=order_id,
+                    )
+                    cancel_results.append(
+                        {
+                            "order_id": order_id,
+                            "retCode": cancel_resp.get("retCode"),
+                            "retMsg": cancel_resp.get("retMsg"),
+                        }
+                    )
+                except Exception as exc:
+                    cancel_results.append({"order_id": order_id, "error": str(exc)})
+            except Exception:
+                continue
+
+        with self.lock:
+            if close_order_id:
+                self.order_to_decision[close_order_id] = decision_id
+
+        log.info(
+            "[%s] bridge close accepted decision=%s qty=%s side=%s positionIdx=%s orderId=%s",
+            symbol,
+            decision_id,
+            qty,
+            exit_side,
+            position_idx,
+            close_order_id or "-",
+        )
+
+        with self.lock:
+            response = self._decision_response(self.decisions[decision_id])
+        response["bridge_close"] = {
+            "decision_id": decision_id,
+            "event_id": decision.get("event_id"),
+            "symbol": symbol,
+            "qty": qty,
+            "side": exit_side,
+            "position_idx": position_idx,
+            "close_order_id": close_order_id,
+            "cancel_results": cancel_results,
+        }
+        return response
+
 
 class RequestHandler(BaseHTTPRequestHandler):
     service: RLExecutionService
@@ -2051,8 +2216,20 @@ class RequestHandler(BaseHTTPRequestHandler):
         return json.loads(raw.decode("utf-8"))
 
     def do_GET(self) -> None:
-        if self.path.rstrip("/") in {"", "/health"}:
+        path = self.path.split("?", 1)[0]
+        trimmed = path.rstrip("/")
+        if trimmed in {"", "/health"}:
             self._send_json(HTTPStatus.OK, self.service.status())
+            return
+        if trimmed.startswith("/v1/decisions/"):
+            key = trimmed[len("/v1/decisions/"):].strip()
+            payload = self.service.get_decision_by_event_id(key)
+            if payload is None:
+                payload = self.service.get_decision_by_id(key)
+            if payload is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "decision not found"})
+                return
+            self._send_json(HTTPStatus.OK, payload)
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -2062,6 +2239,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             if self.path.rstrip("/") == "/v1/signals":
                 response = self.service.handle_signal(payload)
                 self._send_json(HTTPStatus.ACCEPTED, response)
+                return
+            if self.path.rstrip("/") == "/v1/bridge-close":
+                response = self.service.handle_bridge_close(payload)
+                self._send_json(HTTPStatus.OK, response)
                 return
             if self.path.rstrip("/") == "/v1/rewards":
                 response = self.service.handle_manual_reward(payload)
