@@ -1,0 +1,9 @@
+﻿Started: 2026-06-03T09:36:06.3611278+02:00
+Repo: C:\Users\flori\Repositories\tradingview-mcp
+OutputDir: scripts\pyharmonics_top100_lower_tf_abcd_xabcd_5y_20260603_093606
+CacheDir: scripts\data_pyharmonics_top100_lower_tf_abcd_xabcd_5y
+Limit: 100
+Workers: 2
+MaxConfigs: 240
+
+python scripts\run_pyharmonics_top100_lowpass.py --limit 100 --days 1825 --exec-tf 5m --min-history-days 365 --min-bars 80000 --validation-days 365 --oos-days 365 --workers 2 --max-configs 240 --pattern-tfs 5m,15m --families ABCD,XABCD --pattern-modes formed,forming --peak-spacings 6,10,16,24 --fib-tolerances 0.02,0.03,0.05 --forming-percents 0.75,0.85,0.95 --collapse-formed-forming-percents --pattern-lookback-bars 1200 --pattern-step-bars 240 --search-limit-to 10 --confirm-bars 3,6,10,16 --entry-window-bars 6,12,24,48 --prz-buffers 0.05,0.10,0.20 --candle-filters none,any_reversal,engulfing,pinbar,reclaim,strong_close,outside_reversal --stop-buffers 0.2,0.5,0.8 --rrs 1.5,2.0,2.5 --max-hold-bars 36,72,144,288 --trend-filters none,counter_ema --max-fee-to-price-risk 0.18 --min-entry-risk-pct 0.0015 --lowpass-radius 1.80 --lowpass-min-neighbors 7 --min-validation 30 --min-lowpass-score 0.50 --min-oos-net-r 2.0 --min-validation-net-r 1.0 --min-all-net-r 10.0 --min-avg-r 0.02 --max-all-dd-r 18.0 --progress-every-configs 20 --cache-dir scripts\data_pyharmonics_top100_lower_tf_abcd_xabcd_5y --output-dir scripts\pyharmonics_top100_lower_tf_abcd_xabcd_5y_20260603_093606

@@ -3,13 +3,15 @@
 Reinforcement-learning execution sidecar for the trading bot.
 
 The normal bot remains the primary execution path.  This service receives every
-accepted and rejected signal over REST, chooses one continuous action a in
-[0, 1], and optionally opens the same setup on a separate Bybit demo account
-with risk a * RL_DEFAULT_RISK_USDT.
+accepted and rejected signal over REST, chooses one continuous signed action a
+in [-1, 1], and optionally opens the same setup on a separate Bybit demo
+account with risk abs(a) * RL_DEFAULT_RISK_USDT. Negative actions reverse the
+setup direction when RL_ALLOW_REVERSE_ACTIONS is enabled.
 """
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import os
@@ -102,11 +104,14 @@ TELEGRAM_CHAT_ID = os.environ.get("RL_TELEGRAM_CHAT_ID", os.environ.get("TELEGRA
 DEFAULT_RISK_USDT = env_float("RL_DEFAULT_RISK_USDT", 100.0)
 MIN_ACTION_TO_TRADE = env_float("RL_MIN_ACTION_TO_TRADE", 0.05)
 INITIAL_ACTION = env_float("RL_INITIAL_ACTION", 0.10)
+ALLOW_REVERSE_ACTIONS = env_bool("RL_ALLOW_REVERSE_ACTIONS", True)
+INITIAL_SIDE_CONFIDENCE = min(0.999, max(0.01, env_float("RL_INITIAL_SIDE_CONFIDENCE", 0.95)))
 EXPLORATION_RATE = env_float("RL_EXPLORATION_RATE", 0.02)
 EXPLORATION_MAX_ACTION = env_float("RL_EXPLORATION_MAX_ACTION", 0.25)
 TP_SCALE_MAX = max(1, env_int("RL_TP_SCALE_MAX", 10))
 INITIAL_TP_SCALE = env_float("RL_INITIAL_TP_SCALE", 3.0)
 LEARNING_RATE = env_float("RL_LEARNING_RATE", 0.03)
+SIDE_LEARNING_RATE = env_float("RL_SIDE_LEARNING_RATE", LEARNING_RATE * 0.5)
 WEIGHT_DECAY = env_float("RL_WEIGHT_DECAY", 0.0001)
 
 TAKER_FEE_RATE = env_float("RL_TAKER_FEE_RATE", env_float("TAKER_FEE_RATE", 0.00055))
@@ -170,6 +175,11 @@ def logit(probability: float) -> float:
     return math.log(p / (1.0 - p))
 
 
+def atanh_clamped(value: float) -> float:
+    x = clamp(value, -0.999, 0.999)
+    return 0.5 * math.log((1.0 + x) / (1.0 - x))
+
+
 def sigmoid(value: float) -> float:
     if value >= 0:
         z = math.exp(-value)
@@ -197,6 +207,15 @@ def ceil_to_step(value: float, step: float) -> float:
         return value
     precision = max(0, round(-math.log10(step)))
     return round(math.ceil(value / step) * step, precision)
+
+
+def opposite_direction(direction: str) -> str:
+    text = str(direction or "").strip().lower()
+    if text == "long":
+        return "short"
+    if text == "short":
+        return "long"
+    return text
 
 
 def qty_to_str(value: float, step: float = 0.0) -> str:
@@ -329,9 +348,16 @@ class ContextualRiskAgent:
         self.weights: dict[str, float] = {"__bias__": logit(INITIAL_ACTION)}
         initial_tp_fraction = clamp(INITIAL_TP_SCALE / max(float(TP_SCALE_MAX), 1.0), 1e-4, 1.0 - 1e-4)
         self.tp_weights: dict[str, float] = {"__bias__": logit(initial_tp_fraction)}
+        self.side_weights: dict[str, float] = {"__bias__": atanh_clamped(INITIAL_SIDE_CONFIDENCE)}
+        self.weights_by_status: dict[str, dict[str, float]] = {}
+        self.tp_weights_by_status: dict[str, dict[str, float]] = {}
+        self.side_weights_by_status: dict[str, dict[str, float]] = {}
         self.stats: dict[str, dict[str, float]] = {}
         self.trade_history: dict[str, deque[dict[str, Any]]] = {}
+        self.signal_history: dict[str, deque[dict[str, Any]]] = {}
         self.reward_baseline = 0.0
+        self.reward_baselines_by_status: dict[str, float] = {}
+        self.reward_updates_by_status: dict[str, int] = {}
         self.reward_updates = 0
         self.lock = threading.Lock()
 
@@ -343,10 +369,35 @@ class ContextualRiskAgent:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
+            migrated_schema = False
             if isinstance(data.get("weights"), dict):
                 agent.weights = {str(k): float(v) for k, v in data["weights"].items()}
             if isinstance(data.get("tp_weights"), dict):
                 agent.tp_weights = {str(k): float(v) for k, v in data["tp_weights"].items()}
+            if isinstance(data.get("side_weights"), dict):
+                agent.side_weights = {str(k): float(v) for k, v in data["side_weights"].items()}
+            else:
+                migrated_schema = True
+            if isinstance(data.get("weights_by_status"), dict):
+                agent.weights_by_status = {
+                    str(status): {str(k): float(v) for k, v in weights.items()}
+                    for status, weights in data["weights_by_status"].items()
+                    if isinstance(weights, dict)
+                }
+            if isinstance(data.get("tp_weights_by_status"), dict):
+                agent.tp_weights_by_status = {
+                    str(status): {str(k): float(v) for k, v in weights.items()}
+                    for status, weights in data["tp_weights_by_status"].items()
+                    if isinstance(weights, dict)
+                }
+            if isinstance(data.get("side_weights_by_status"), dict):
+                agent.side_weights_by_status = {
+                    str(status): {str(k): float(v) for k, v in weights.items()}
+                    for status, weights in data["side_weights_by_status"].items()
+                    if isinstance(weights, dict)
+                }
+            else:
+                migrated_schema = True
             if isinstance(data.get("stats"), dict):
                 agent.stats = {
                     str(k): {
@@ -379,12 +430,53 @@ class ContextualRiskAgent:
                         )
                     if bucket:
                         agent.trade_history[str(key)] = bucket
+            if isinstance(data.get("signal_history"), dict):
+                agent.signal_history = {}
+                for key, rows in data["signal_history"].items():
+                    if not isinstance(rows, list):
+                        continue
+                    bucket = deque(maxlen=ROLLING_HISTORY_MAXLEN)
+                    for row in rows[-ROLLING_HISTORY_MAXLEN:]:
+                        if not isinstance(row, dict):
+                            continue
+                        status = str(row.get("status") or "").strip().lower()
+                        if status not in {"accepted", "rejected"}:
+                            continue
+                        bucket.append(
+                            {
+                                "status": status,
+                                "accepted": 1.0 if status == "accepted" else 0.0,
+                                "direction": str(row.get("direction") or "").strip().lower(),
+                                "session_tag": str(row.get("session_tag") or "").strip().lower(),
+                            }
+                        )
+                    if bucket:
+                        agent.signal_history[str(key)] = bucket
             agent.reward_baseline = float(data.get("reward_baseline", 0.0) or 0.0)
+            if isinstance(data.get("reward_baselines_by_status"), dict):
+                agent.reward_baselines_by_status = {
+                    str(k): float(v)
+                    for k, v in data["reward_baselines_by_status"].items()
+                }
+            if isinstance(data.get("reward_updates_by_status"), dict):
+                agent.reward_updates_by_status = {
+                    str(k): int(v)
+                    for k, v in data["reward_updates_by_status"].items()
+                }
             agent.reward_updates = int(data.get("reward_updates", 0) or 0)
+            if migrated_schema:
+                agent.save(path)
+                log.info("Migrated RL agent state schema with signed-action side weights at %s", path)
+            status_weight_count = sum(len(weights) for weights in agent.weights_by_status.values())
+            status_tp_weight_count = sum(len(weights) for weights in agent.tp_weights_by_status.values())
+            status_side_weight_count = sum(len(weights) for weights in agent.side_weights_by_status.values())
             log.info(
-                "Loaded RL agent state from %s  weights=%d updates=%d baseline=%.4f",
+                "Loaded RL agent state from %s  global_weights=%d status_weights=%d status_tp_weights=%d status_side_weights=%d updates=%d baseline=%.4f",
                 path,
                 len(agent.weights),
+                status_weight_count,
+                status_tp_weight_count,
+                status_side_weight_count,
                 agent.reward_updates,
                 agent.reward_baseline,
             )
@@ -400,13 +492,24 @@ class ContextualRiskAgent:
                 {
                     "weights": self.weights,
                     "tp_weights": self.tp_weights,
+                    "side_weights": self.side_weights,
+                    "weights_by_status": self.weights_by_status,
+                    "tp_weights_by_status": self.tp_weights_by_status,
+                    "side_weights_by_status": self.side_weights_by_status,
                     "stats": self.stats,
                     "trade_history": {
                         key: list(bucket)[-ROLLING_HISTORY_MAXLEN:]
                         for key, bucket in self.trade_history.items()
                         if bucket
                     },
+                    "signal_history": {
+                        key: list(bucket)[-ROLLING_HISTORY_MAXLEN:]
+                        for key, bucket in self.signal_history.items()
+                        if bucket
+                    },
                     "reward_baseline": self.reward_baseline,
+                    "reward_baselines_by_status": self.reward_baselines_by_status,
+                    "reward_updates_by_status": self.reward_updates_by_status,
                     "reward_updates": self.reward_updates,
                     "saved_at": now_iso(),
                 },
@@ -434,6 +537,45 @@ class ContextualRiskAgent:
         except ValueError:
             return None
 
+    @staticmethod
+    def _status_key(raw: Any) -> str:
+        status = str(raw or "").strip().lower()
+        return status if status in {"accepted", "rejected"} else "unknown"
+
+    @staticmethod
+    def _ml_edge_bucket(edge: Any) -> str:
+        value = to_float(edge)
+        if value is None:
+            return "unknown"
+        if value <= -0.15:
+            return "deep_below"
+        if value <= -0.07:
+            return "below"
+        if value < 0.0:
+            return "slightly_below"
+        if value < 0.05:
+            return "slightly_above"
+        if value < 0.12:
+            return "above"
+        return "far_above"
+
+    @staticmethod
+    def _acceptance_rate_bucket(rate: Any) -> str:
+        value = to_float(rate)
+        if value is None:
+            return "unknown"
+        if value < 0.10:
+            return "very_low"
+        if value < 0.25:
+            return "low"
+        if value < 0.45:
+            return "medium_low"
+        if value < 0.65:
+            return "medium"
+        if value < 0.85:
+            return "high"
+        return "very_high"
+
     def _update_stat(self, name: str, value: float) -> None:
         stat = self.stats.setdefault(name, {"n": 0.0, "mean": 0.0, "m2": 0.0})
         n = stat["n"] + 1.0
@@ -453,6 +595,145 @@ class ContextualRiskAgent:
             return clamp(value, -6.0, 6.0)
         return math.tanh(value / 10.0)
 
+    def _policy_weights_unlocked(self, status_key: str) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+        if status_key not in {"accepted", "rejected"}:
+            return self.weights, self.tp_weights, self.side_weights
+        weights = self.weights_by_status.get(status_key)
+        if weights is None:
+            weights = dict(self.weights)
+            self.weights_by_status[status_key] = weights
+        tp_weights = self.tp_weights_by_status.get(status_key)
+        if tp_weights is None:
+            tp_weights = dict(self.tp_weights)
+            self.tp_weights_by_status[status_key] = tp_weights
+        side_weights = self.side_weights_by_status.get(status_key)
+        if side_weights is None:
+            side_weights = dict(self.side_weights)
+            self.side_weights_by_status[status_key] = side_weights
+        return weights, tp_weights, side_weights
+
+    @staticmethod
+    def _policy_projection(
+        vector: dict[str, float],
+        weights: dict[str, float],
+        tp_weights: dict[str, float],
+        side_weights: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        score = sum(float(weights.get(k, 0.0) or 0.0) * float(v or 0.0) for k, v in vector.items())
+        tp_scale_score = sum(float(tp_weights.get(k, 0.0) or 0.0) * float(v or 0.0) for k, v in vector.items())
+        risk_action = sigmoid(score)
+        policy_tp_fraction = sigmoid(tp_scale_score)
+        side_score = None
+        side = 1.0
+        if ALLOW_REVERSE_ACTIONS and side_weights is not None:
+            side_score = sum(float(side_weights.get(k, 0.0) or 0.0) * float(v or 0.0) for k, v in vector.items())
+            side = math.tanh(side_score)
+        return {
+            "action": risk_action * side,
+            "risk_action": risk_action,
+            "score": score,
+            "tp_scale": int(round(policy_tp_fraction * float(TP_SCALE_MAX))),
+            "tp_scale_score": tp_scale_score,
+            "side": side,
+            "side_score": side_score,
+        }
+
+    @staticmethod
+    def _feature_vector_hash(vector: dict[str, float]) -> str:
+        items: list[list[Any]] = []
+        for key, value in sorted(vector.items()):
+            number = to_float(value)
+            if number is None:
+                continue
+            items.append([str(key), round(number, 8)])
+        raw = json.dumps(items, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _top_contributors(
+        vector: dict[str, float],
+        weights: dict[str, float],
+        *,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for key, value in vector.items():
+            x = to_float(value)
+            weight = to_float(weights.get(str(key), 0.0))
+            if x is None or weight is None:
+                continue
+            contribution = x * weight
+            if contribution == 0.0:
+                continue
+            rows.append(
+                {
+                    "feature": str(key),
+                    "value": x,
+                    "weight": weight,
+                    "contribution": contribution,
+                }
+            )
+        rows.sort(key=lambda row: abs(float(row.get("contribution", 0.0))), reverse=True)
+        return rows[:limit]
+
+    def _shadow_policies_unlocked(
+        self,
+        vector: dict[str, float],
+        *,
+        policy_action: float,
+        policy_risk_action: float,
+        policy_tp_scale: int,
+    ) -> dict[str, dict[str, Any]]:
+        shadows: dict[str, dict[str, Any]] = {
+            "global": self._policy_projection(vector, self.weights, self.tp_weights, self.side_weights),
+            "accepted_head": self._policy_projection(
+                vector,
+                self.weights_by_status.get("accepted", self.weights),
+                self.tp_weights_by_status.get("accepted", self.tp_weights),
+                self.side_weights_by_status.get("accepted", self.side_weights),
+            ),
+            "rejected_head": self._policy_projection(
+                vector,
+                self.weights_by_status.get("rejected", self.weights),
+                self.tp_weights_by_status.get("rejected", self.tp_weights),
+                self.side_weights_by_status.get("rejected", self.side_weights),
+            ),
+            "fixed_risk": {
+                "action": clamp(INITIAL_ACTION, 0.0, 1.0),
+                "risk_action": clamp(INITIAL_ACTION, 0.0, 1.0),
+                "side": 1.0,
+                "score": None,
+                "tp_scale": int(round(clamp(INITIAL_TP_SCALE, 0.0, float(TP_SCALE_MAX)))),
+                "tp_scale_score": None,
+            },
+            "conservative": {
+                "action": clamp(policy_action * 0.50, -1.0, 1.0),
+                "risk_action": clamp(policy_risk_action * 0.50, 0.0, 1.0),
+                "side": -1.0 if policy_action < 0 else 1.0,
+                "score": None,
+                "tp_scale": max(0, min(TP_SCALE_MAX, int(round(policy_tp_scale * 0.75)))),
+                "tp_scale_score": None,
+            },
+            "aggressive": {
+                "action": clamp(policy_action * 1.50, -1.0, 1.0),
+                "risk_action": clamp(policy_risk_action * 1.50, 0.0, 1.0),
+                "side": -1.0 if policy_action < 0 else 1.0,
+                "score": None,
+                "tp_scale": max(0, min(TP_SCALE_MAX, int(round(policy_tp_scale * 1.25)))),
+                "tp_scale_score": None,
+            },
+        }
+        if ALLOW_REVERSE_ACTIONS:
+            shadows["fixed_reverse"] = {
+                "action": -clamp(INITIAL_ACTION, 0.0, 1.0),
+                "risk_action": clamp(INITIAL_ACTION, 0.0, 1.0),
+                "side": -1.0,
+                "score": None,
+                "tp_scale": int(round(clamp(INITIAL_TP_SCALE, 0.0, float(TP_SCALE_MAX)))),
+                "tp_scale_score": None,
+            }
+        return shadows
+
     @staticmethod
     def _scope_key(*parts: Any) -> str:
         cleaned = [ContextualRiskAgent._sanitize_name(part).lower() for part in parts if str(part or "").strip()]
@@ -471,6 +752,117 @@ class ContextualRiskAgent:
             if history:
                 out.append((key, history))
         return out
+
+    def _signal_history_keys(self, payload: dict[str, Any]) -> list[str]:
+        raw_keys = [
+            self._scope_key(payload.get("strategy"), payload.get("symbol"), payload.get("room_id")),
+            self._scope_key(payload.get("strategy"), payload.get("symbol")),
+            self._scope_key(payload.get("strategy"), payload.get("room_id")),
+            self._scope_key(payload.get("strategy")),
+            self._scope_key(payload.get("symbol")),
+            self._scope_key(payload.get("room_id")),
+            "global",
+        ]
+        keys: list[str] = []
+        for key in raw_keys:
+            if key not in keys:
+                keys.append(key)
+        return keys
+
+    def _signal_history_candidates(self, payload: dict[str, Any]) -> list[tuple[str, deque[dict[str, Any]]]]:
+        out: list[tuple[str, deque[dict[str, Any]]]] = []
+        for key in self._signal_history_keys(payload):
+            history = self.signal_history.get(key)
+            if history:
+                out.append((key, history))
+        return out
+
+    @staticmethod
+    def _acceptance_stats(history: deque[dict[str, Any]], window: int, payload: dict[str, Any]) -> dict[str, float]:
+        items = list(history)[-window:] if window > 0 else list(history)
+        if not items:
+            return {
+                "signal_count": 0.0,
+                "accepted_count": 0.0,
+                "rejected_count": 0.0,
+                "acceptance_rate": 0.5,
+            }
+
+        def payload_context() -> tuple[str, str]:
+            direction = str((payload or {}).get("direction") or "").strip().lower()
+            market = payload.get("market_context") if isinstance((payload or {}).get("market_context"), dict) else {}
+            regime = market.get("regime") if isinstance(market.get("regime"), dict) else {}
+            session_tag = str(regime.get("session_tag") or "").strip().lower()
+            return direction, session_tag
+
+        def select_conditioned_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            direction, session_tag = payload_context()
+            if not direction and not session_tag:
+                return rows
+
+            min_required = min(3, len(rows))
+            direction_rows = [
+                row for row in rows
+                if not direction or str(row.get("direction") or "").strip().lower() == direction
+            ]
+            session_rows = [
+                row for row in rows
+                if not session_tag or str(row.get("session_tag") or "").strip().lower() == session_tag
+            ]
+            both_rows = [
+                row for row in rows
+                if (
+                    (not direction or str(row.get("direction") or "").strip().lower() == direction)
+                    and (not session_tag or str(row.get("session_tag") or "").strip().lower() == session_tag)
+                )
+            ]
+
+            for candidate in (both_rows, direction_rows, session_rows):
+                if len(candidate) >= min_required and candidate:
+                    return candidate
+            return rows
+
+        items = select_conditioned_rows(items)
+        signal_count = float(len(items))
+        accepted_count = sum(float(row.get("accepted", 0.0) or 0.0) for row in items)
+        rejected_count = max(0.0, signal_count - accepted_count)
+        # Beta(1, 1) smoothing keeps early history from collapsing to 0 or 1.
+        acceptance_rate = (accepted_count + 1.0) / (signal_count + 2.0)
+        return {
+            "signal_count": signal_count,
+            "accepted_count": accepted_count,
+            "rejected_count": rejected_count,
+            "acceptance_rate": acceptance_rate,
+        }
+
+    def _rolling_acceptance_features(self, payload: dict[str, Any]) -> dict[str, float]:
+        candidates = self._signal_history_candidates(payload)
+        if not candidates:
+            return {}
+        scope_key, history = candidates[0]
+        for candidate_key, candidate_history in candidates:
+            if len(candidate_history) >= 3:
+                scope_key, history = candidate_key, candidate_history
+                break
+        features: dict[str, float] = {}
+        scope_code = {
+            self._scope_key(payload.get("strategy"), payload.get("symbol"), payload.get("room_id")): 6.0,
+            self._scope_key(payload.get("strategy"), payload.get("symbol")): 5.0,
+            self._scope_key(payload.get("strategy"), payload.get("room_id")): 4.0,
+            self._scope_key(payload.get("strategy")): 3.0,
+            self._scope_key(payload.get("symbol")): 2.0,
+            self._scope_key(payload.get("room_id")): 1.0,
+            "global": 0.5,
+        }.get(scope_key, 0.0)
+        if scope_code:
+            features["signal.acceptance_scope_code"] = scope_code
+        for window in ROLLING_WINDOWS:
+            stats = self._acceptance_stats(history, window, payload)
+            features[f"signal.rolling_acceptance_rate_{window}"] = stats["acceptance_rate"]
+            features[f"signal.rolling_signal_count_{window}"] = stats["signal_count"]
+            features[f"signal.rolling_accepted_count_{window}"] = stats["accepted_count"]
+            features[f"signal.rolling_rejected_count_{window}"] = stats["rejected_count"]
+        return features
 
     @staticmethod
     def _rolling_stats(history: deque[dict[str, Any]], window: int, payload: dict[str, Any]) -> dict[str, float]:
@@ -660,6 +1052,8 @@ class ContextualRiskAgent:
 
         for name, value in self._rolling_perf_features(payload).items():
             add_number(name, value)
+        for name, value in self._rolling_acceptance_features(payload).items():
+            add_number(name, value)
 
         setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
         entry = to_float(setup.get("entry"))
@@ -707,6 +1101,30 @@ class ContextualRiskAgent:
             vector[key] = self._normalise(key, value)
             self._update_stat(key, value)
 
+        status_key = self._status_key(payload.get("status"))
+        strategy_key = self._sanitize_name(payload.get("strategy")).lower()
+        symbol_key = self._sanitize_name(payload.get("symbol")).lower()
+        direction_key = self._sanitize_name(payload.get("direction")).lower()
+        edge_bucket = self._ml_edge_bucket(numeric.get("ml_edge_vs_threshold"))
+        acceptance_rate = (
+            numeric.get("signal.rolling_acceptance_rate_20")
+            if "signal.rolling_acceptance_rate_20" in numeric
+            else numeric.get("signal.rolling_acceptance_rate_50")
+        )
+        acceptance_bucket = self._acceptance_rate_bucket(acceptance_rate)
+        vector[f"c:source_quality.ml_edge:{edge_bucket}"] = 1.0
+        vector[f"c:source_quality.acceptance_rate:{acceptance_bucket}"] = 1.0
+        vector[f"c:source_quality.status_edge:{status_key}:{edge_bucket}"] = 1.0
+        vector[f"c:source_quality.status_acceptance:{status_key}:{acceptance_bucket}"] = 1.0
+        vector[f"c:source_quality.status_edge_acceptance:{status_key}:{edge_bucket}:{acceptance_bucket}"] = 1.0
+        if symbol_key != "unknown" and direction_key != "unknown":
+            vector[f"c:source_quality.status_symbol_direction:{status_key}:{symbol_key}:{direction_key}"] = 1.0
+        if strategy_key != "unknown" and symbol_key != "unknown" and direction_key != "unknown":
+            vector[
+                f"c:source_quality.status_strategy_symbol_direction:"
+                f"{status_key}:{strategy_key}:{symbol_key}:{direction_key}"
+            ] = 1.0
+
         for field in ("symbol", "strategy", "direction", "status", "room_id"):
             value = payload.get(field)
             if value:
@@ -730,26 +1148,52 @@ class ContextualRiskAgent:
     def decide(self, payload: dict[str, Any]) -> tuple[float, dict[str, Any]]:
         with self.lock:
             vector = self.build_vector(payload)
-            score = sum(self.weights.get(k, 0.0) * v for k, v in vector.items())
-            policy_action = sigmoid(score)
-            tp_scale_score = sum(self.tp_weights.get(k, 0.0) * v for k, v in vector.items())
-            policy_tp_fraction = sigmoid(tp_scale_score)
-            policy_tp_scale = int(round(policy_tp_fraction * float(TP_SCALE_MAX)))
+            policy_status = self._status_key(payload.get("status"))
+            policy_weights, policy_tp_weights, policy_side_weights = self._policy_weights_unlocked(policy_status)
+            projection = self._policy_projection(vector, policy_weights, policy_tp_weights, policy_side_weights)
+            score = float(projection["score"])
+            policy_action = float(projection["action"])
+            policy_risk_action = float(projection["risk_action"])
+            policy_side = float(projection["side"])
+            side_score = projection.get("side_score")
+            tp_scale_score = float(projection["tp_scale_score"])
+            policy_tp_scale = int(projection["tp_scale"])
             action = policy_action
+            risk_action = policy_risk_action
             tp_scale = policy_tp_scale
             explored = False
             if random.random() < EXPLORATION_RATE:
                 explored = True
-                action = random.uniform(0.0, clamp(EXPLORATION_MAX_ACTION, 0.0, 1.0))
+                risk_action = random.uniform(0.0, clamp(EXPLORATION_MAX_ACTION, 0.0, 1.0))
+                sign = -1.0 if ALLOW_REVERSE_ACTIONS and random.random() < 0.5 else 1.0
+                action = risk_action * sign
                 tp_scale = random.randint(0, TP_SCALE_MAX)
-            action = clamp(action, 0.0, 1.0)
+            action = clamp(action, -1.0, 1.0) if ALLOW_REVERSE_ACTIONS else clamp(action, 0.0, 1.0)
+            risk_action = abs(action)
+            self._add_signal_history_unlocked(payload)
+            shadow_policies = self._shadow_policies_unlocked(
+                vector,
+                policy_action=policy_action,
+                policy_risk_action=policy_risk_action,
+                policy_tp_scale=policy_tp_scale,
+            )
             return action, {
                 "policy_action": policy_action,
+                "policy_risk_action": policy_risk_action,
+                "risk_action": risk_action,
                 "score": score,
+                "policy_status": policy_status,
+                "policy_side": policy_side,
+                "side_score": side_score,
                 "explored": explored,
                 "policy_tp_scale": policy_tp_scale,
                 "tp_scale": tp_scale,
                 "tp_scale_score": tp_scale_score,
+                "feature_hash": self._feature_vector_hash(vector),
+                "top_contributors": self._top_contributors(vector, policy_weights),
+                "tp_top_contributors": self._top_contributors(vector, policy_tp_weights),
+                "side_top_contributors": self._top_contributors(vector, policy_side_weights),
+                "shadow_policies": shadow_policies,
                 "feature_vector": vector,
             }
 
@@ -760,25 +1204,62 @@ class ContextualRiskAgent:
         if not vector or action is None:
             return
         with self.lock:
-            old_baseline = self.reward_baseline
+            payload = decision.get("payload") if isinstance(decision.get("payload"), dict) else {}
+            status_key = self._status_key(decision.get("source_status") or payload.get("status"))
+            policy_weights, policy_tp_weights, policy_side_weights = self._policy_weights_unlocked(status_key)
+            old_global_baseline = self.reward_baseline
+            old_status_baseline = self.reward_baselines_by_status.get(status_key, old_global_baseline)
             self.reward_updates += 1
             baseline_alpha = min(0.20, 2.0 / (self.reward_updates + 10.0))
             self.reward_baseline = (1.0 - baseline_alpha) * self.reward_baseline + baseline_alpha * reward
-            advantage = clamp(reward - old_baseline, -5.0, 5.0)
-            gradient_scale = LEARNING_RATE * advantage * max(0.05, action * (1.0 - action))
+            status_updates = self.reward_updates_by_status.get(status_key, 0) + 1
+            self.reward_updates_by_status[status_key] = status_updates
+            status_alpha = min(0.25, 2.0 / (status_updates + 8.0))
+            self.reward_baselines_by_status[status_key] = (
+                (1.0 - status_alpha) * old_status_baseline + status_alpha * reward
+            )
+            advantage = clamp(reward - old_status_baseline, -5.0, 5.0)
+            risk_action = abs(action)
+            gradient_scale = LEARNING_RATE * advantage * max(0.05, risk_action * (1.0 - risk_action))
             tp_scale = to_float(decision.get("tp_scale"))
             tp_fraction = clamp((tp_scale or 0.0) / float(TP_SCALE_MAX), 0.0, 1.0)
             gradient_scale_tp = LEARNING_RATE * advantage * max(0.05, tp_fraction * (1.0 - tp_fraction))
+            side = -1.0 if action < 0 else 1.0
+            policy_side = to_float(agent_data.get("policy_side"))
+            side_derivative = 1.0 - (policy_side * policy_side) if policy_side is not None else 1.0
+            gradient_scale_side = SIDE_LEARNING_RATE * advantage * side * max(0.05, side_derivative)
             for key, value in vector.items():
                 x = to_float(value)
                 if x is None:
                     continue
-                old_weight = self.weights.get(str(key), 0.0)
+                old_weight = policy_weights.get(str(key), 0.0)
                 decayed = old_weight * (1.0 - WEIGHT_DECAY)
-                self.weights[str(key)] = clamp(decayed + gradient_scale * x, -12.0, 12.0)
-                old_tp_weight = self.tp_weights.get(str(key), 0.0)
+                policy_weights[str(key)] = clamp(decayed + gradient_scale * x, -12.0, 12.0)
+                old_tp_weight = policy_tp_weights.get(str(key), 0.0)
                 decayed_tp = old_tp_weight * (1.0 - WEIGHT_DECAY)
-                self.tp_weights[str(key)] = clamp(decayed_tp + gradient_scale_tp * x, -12.0, 12.0)
+                policy_tp_weights[str(key)] = clamp(decayed_tp + gradient_scale_tp * x, -12.0, 12.0)
+                old_side_weight = policy_side_weights.get(str(key), 0.0)
+                decayed_side = old_side_weight * (1.0 - WEIGHT_DECAY)
+                policy_side_weights[str(key)] = clamp(decayed_side + gradient_scale_side * x, -12.0, 12.0)
+
+    def _add_signal_history_unlocked(self, payload: dict[str, Any]) -> None:
+        status = str(payload.get("status") or "").strip().lower()
+        if status not in {"accepted", "rejected"}:
+            return
+        market = payload.get("market_context") if isinstance(payload.get("market_context"), dict) else {}
+        regime = market.get("regime") if isinstance(market.get("regime"), dict) else {}
+        summary = {
+            "status": status,
+            "accepted": 1.0 if status == "accepted" else 0.0,
+            "direction": str(payload.get("direction") or "").strip().lower(),
+            "session_tag": str(regime.get("session_tag") or "").strip().lower(),
+        }
+        for key in self._signal_history_keys(payload):
+            bucket = self.signal_history.get(key)
+            if bucket is None:
+                bucket = deque(maxlen=ROLLING_HISTORY_MAXLEN)
+                self.signal_history[key] = bucket
+            bucket.append(summary)
 
     def add_trade_history(
         self,
@@ -831,7 +1312,13 @@ class ContextualRiskAgent:
                 if reward is None or action is None:
                     continue
                 _action, agent_info = self.decide(payload)
-                decision = {"action": action, "agent": agent_info}
+                decision = {
+                    "action": action,
+                    "tp_scale": row.get("tp_scale", agent_info.get("tp_scale")),
+                    "source_status": row.get("source_status", payload.get("status")),
+                    "payload": payload,
+                    "agent": agent_info,
+                }
                 self.learn(decision, reward)
                 updates += 1
         return updates
@@ -857,6 +1344,7 @@ class RLExecutionService:
         self.last_daily_heartbeat_key = ""
         self._load_runtime_state()
         self._load_heartbeat_state()
+        self._bootstrap_signal_history_from_decisions()
         threading.Thread(target=self._execution_worker, daemon=True, name="rl-execution-worker").start()
         self._requeue_pending_executions()
 
@@ -876,6 +1364,33 @@ class RLExecutionService:
             if updates:
                 self.agent.save(MODEL_PATH)
             log.info("Optional RL pretrain complete  path=%s updates=%d", PRETRAIN_PATH, updates)
+
+    def _bootstrap_signal_history_from_decisions(self) -> None:
+        if any(self.agent.signal_history.values()) or not self.decisions:
+            return
+        payloads: list[tuple[str, dict[str, Any]]] = []
+        for decision in self.decisions.values():
+            payload = decision.get("payload") if isinstance(decision.get("payload"), dict) else {}
+            if str(payload.get("status") or "").strip().lower() not in {"accepted", "rejected"}:
+                continue
+            ts = str(decision.get("received_at") or payload.get("sent_at") or "")
+            payloads.append((ts, payload))
+        if not payloads:
+            return
+        payloads.sort(key=lambda item: item[0])
+        with self.agent.lock:
+            for _ts, payload in payloads:
+                self.agent._add_signal_history_unlocked(payload)
+            rows = sum(len(bucket) for bucket in self.agent.signal_history.values())
+            scopes = len(self.agent.signal_history)
+        self.agent.save(MODEL_PATH)
+        log.info(
+            "Bootstrapped RL signal acceptance history from persisted decisions  "
+            "signals=%d scope_rows=%d scopes=%d",
+            len(payloads),
+            rows,
+            scopes,
+        )
 
     def _requeue_pending_executions(self) -> None:
         pending: list[str] = []
@@ -1017,6 +1532,19 @@ class RLExecutionService:
                 "execution_queue_depth": self.execution_queue.qsize(),
                 "agent_updates": self.agent.reward_updates,
                 "agent_reward_baseline": self.agent.reward_baseline,
+                "agent_status_updates": self.agent.reward_updates_by_status,
+                "agent_status_weight_counts": {
+                    status: len(weights)
+                    for status, weights in self.agent.weights_by_status.items()
+                },
+                "agent_status_tp_weight_counts": {
+                    status: len(weights)
+                    for status, weights in self.agent.tp_weights_by_status.items()
+                },
+                "agent_status_side_weight_counts": {
+                    status: len(weights)
+                    for status, weights in self.agent.side_weights_by_status.items()
+                },
             }
 
     @staticmethod
@@ -1049,6 +1577,9 @@ class RLExecutionService:
         decision_id = uuid.uuid4().hex
         setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
         exit_request = self._exit_request_metadata(setup)
+        source_direction = str(payload.get("direction") or "").strip().lower()
+        risk_action = abs(float(action))
+        effective_direction = opposite_direction(source_direction) if action < 0 else source_direction
         decision: dict[str, Any] = {
             "decision_id": decision_id,
             "event_id": event_id,
@@ -1058,7 +1589,11 @@ class RLExecutionService:
             "symbol": str(payload.get("symbol") or "").upper(),
             "strategy": payload.get("strategy"),
             "direction": payload.get("direction"),
+            "source_direction": source_direction,
+            "effective_direction": effective_direction,
+            "reversed_trade": bool(action < 0),
             "action": action,
+            "risk_action": risk_action,
             "tp_scale": int(agent_info.get("tp_scale") or 0),
             "tp_scale_max": TP_SCALE_MAX,
             "risk_mode": "fixed_usdt",
@@ -1086,12 +1621,14 @@ class RLExecutionService:
             self._save_runtime_state_locked()
         append_jsonl(DECISIONS_PATH, decision)
         log.info(
-            "[%s] RL signal queued status=%s strategy=%s direction=%s action=%.3f decision=%s",
+            "[%s] RL signal queued status=%s strategy=%s direction=%s effective=%s action=%+.3f risk=%.3f decision=%s",
             decision.get("symbol") or "-",
             decision.get("source_status") or "-",
             decision.get("strategy") or "-",
-            decision.get("direction") or "-",
+            decision.get("source_direction") or "-",
+            decision.get("effective_direction") or "-",
             action,
+            risk_action,
             decision_id,
         )
         return self._decision_response(decision)
@@ -1105,11 +1642,17 @@ class RLExecutionService:
             "symbol": decision.get("symbol"),
             "strategy": decision.get("strategy"),
             "direction": decision.get("direction"),
+            "source_direction": decision.get("source_direction"),
+            "effective_direction": decision.get("effective_direction"),
+            "reversed_trade": decision.get("reversed_trade"),
             "action": decision.get("action"),
+            "risk_action": decision.get("risk_action"),
             "tp_scale": decision.get("tp_scale"),
             "tp_scale_max": decision.get("tp_scale_max"),
             "selected_tp_index": decision.get("selected_tp_index"),
             "selected_take_profit": decision.get("selected_take_profit"),
+            "effective_stop_loss": decision.get("effective_stop_loss"),
+            "effective_take_profit": decision.get("effective_take_profit"),
             "setup_entry": setup.get("entry"),
             "executed": decision.get("executed", False),
             "execution_status": decision.get("execution_status"),
@@ -1231,9 +1774,11 @@ class RLExecutionService:
 
     def _maybe_execute(self, decision: dict[str, Any]) -> None:
         action = float(decision["action"])
+        risk_action = abs(action)
         tp_scale = int(to_float(decision.get("tp_scale")) or 0)
         symbol = str(decision.get("symbol") or "").upper()
-        direction = str(decision.get("direction") or "").lower()
+        source_direction = str(decision.get("direction") or "").lower()
+        direction = source_direction
         setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
         entry = to_float(setup.get("entry"))
         stop = to_float(setup.get("stop_loss"))
@@ -1259,9 +1804,43 @@ class RLExecutionService:
         exit_request = self._exit_request_metadata(setup)
         source_requests_trailing = bool(exit_request["source_requests_trailing"])
         decision.update(exit_request)
+        decision["risk_action"] = risk_action
+        decision["source_direction"] = source_direction
+        decision["reversed_trade"] = False
 
-        if action < MIN_ACTION_TO_TRADE:
-            decision["skip_reason"] = f"action {action:.4f} below RL_MIN_ACTION_TO_TRADE={MIN_ACTION_TO_TRADE:.4f}"
+        if action < 0:
+            if not ALLOW_REVERSE_ACTIONS:
+                decision["skip_reason"] = "negative action produced while RL_ALLOW_REVERSE_ACTIONS is false"
+                return
+            if source_direction not in {"long", "short"}:
+                decision["skip_reason"] = "cannot reverse missing source direction"
+                return
+            if target is None or stop is None:
+                decision["skip_reason"] = "cannot reverse without source stop and take-profit"
+                return
+            direction = opposite_direction(source_direction)
+            source_stop = stop
+            source_target = target
+            stop = source_target
+            target = source_stop
+            decision["reversed_trade"] = True
+            decision["source_stop_loss"] = source_stop
+            decision["source_take_profit"] = source_target
+            decision["source_selected_take_profit"] = source_target
+            decision["effective_direction"] = direction
+            decision["effective_stop_loss"] = stop
+            decision["effective_take_profit"] = target
+            decision["selected_take_profit"] = target
+            decision["reverse_mapping"] = "entry unchanged; stop=source_take_profit; take_profit=source_stop_loss"
+        else:
+            decision["source_stop_loss"] = stop
+            decision["source_take_profit"] = target
+            decision["effective_direction"] = direction
+            decision["effective_stop_loss"] = stop
+            decision["effective_take_profit"] = target
+
+        if risk_action < MIN_ACTION_TO_TRADE:
+            decision["skip_reason"] = f"risk action {risk_action:.4f} below RL_MIN_ACTION_TO_TRADE={MIN_ACTION_TO_TRADE:.4f}"
             return
         if not TRADING_ENABLED:
             decision["skip_reason"] = "RL_TRADING_ENABLED is false"
@@ -1314,7 +1893,7 @@ class RLExecutionService:
         if default_risk_usdt <= 0:
             decision["skip_reason"] = f"invalid RL_DEFAULT_RISK_USDT={default_risk_usdt}"
             return
-        risk_budget = default_risk_usdt * action
+        risk_budget = default_risk_usdt * risk_action
         if risk_budget <= 0:
             decision["skip_reason"] = f"risk budget is zero for action={action:.4f}"
             return
@@ -1406,6 +1985,9 @@ class RLExecutionService:
             "risk_mode": "fixed_usdt",
             "default_risk_usdt": default_risk_usdt,
             "risk_budget_usdt": risk_budget,
+            "risk_action": risk_action,
+            "effective_direction": direction,
+            "reversed_trade": bool(decision.get("reversed_trade")),
             "expected_sl_loss_usdt": expected_sl_loss,
             "expected_price_sl_loss_usdt": expected_price_sl_loss,
             "expected_fee_loss_usdt": expected_fee_loss,
@@ -1429,10 +2011,14 @@ class RLExecutionService:
         selected_take_profit = decision.get("selected_take_profit")
         available_tp_count = decision.get("available_tp_count")
         log.info(
-            "[%s] RL order accepted decision=%s action=%.3f qty=%s risk~%.2f default_risk=%.2f tp_scale=%s/%s selected_tp=%s/%s@%s orderId=%s",
+            "[%s] RL order accepted decision=%s action=%+.3f risk_action=%.3f source=%s effective=%s reversed=%s qty=%s risk~%.2f default_risk=%.2f tp_scale=%s/%s selected_tp=%s/%s@%s orderId=%s",
             symbol,
             decision_id,
             action,
+            risk_action,
+            source_direction or "-",
+            direction or "-",
+            bool(decision.get("reversed_trade")),
             qty_to_str(qty, q_step),
             expected_sl_loss,
             default_risk_usdt,
@@ -1618,10 +2204,264 @@ class RLExecutionService:
     def _fmt_r(value: float) -> str:
         return f"{value:+.3f}R"
 
+    @staticmethod
+    def _avg(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _source_status_from(*rows: dict[str, Any]) -> str:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            status = ContextualRiskAgent._status_key(row.get("source_status") or row.get("status"))
+            if status != "unknown":
+                return status
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            status = ContextualRiskAgent._status_key(payload.get("status"))
+            if status != "unknown":
+                return status
+        return "unknown"
+
+    @staticmethod
+    def _strategy_symbol_key(*rows: dict[str, Any]) -> str:
+        strategy = "unknown"
+        symbol = "unknown"
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if strategy == "unknown" and row.get("strategy"):
+                strategy = str(row.get("strategy"))
+            if symbol == "unknown" and row.get("symbol"):
+                symbol = str(row.get("symbol")).upper()
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if strategy == "unknown" and payload.get("strategy"):
+                strategy = str(payload.get("strategy"))
+            if symbol == "unknown" and payload.get("symbol"):
+                symbol = str(payload.get("symbol")).upper()
+        return f"{strategy}/{symbol}"
+
+    @staticmethod
+    def _example_reward_r(row: dict[str, Any]) -> float | None:
+        reward = row.get("reward") if isinstance(row.get("reward"), dict) else {}
+        value = to_float(reward.get("reward_default_r"))
+        if value is None:
+            value = to_float(row.get("reward_default_r"))
+        return value
+
+    @staticmethod
+    def _example_slippage(row: dict[str, Any]) -> float | None:
+        reward = row.get("reward") if isinstance(row.get("reward"), dict) else {}
+        value = to_float(reward.get("entry_slippage_bps"))
+        if value is None:
+            value = to_float(row.get("entry_slippage_bps"))
+        return value
+
+    @staticmethod
+    def _example_session(row: dict[str, Any]) -> str:
+        market = row.get("market_context") if isinstance(row.get("market_context"), dict) else {}
+        regime = market.get("regime") if isinstance(market.get("regime"), dict) else {}
+        session = str(regime.get("session_tag") or "").strip().lower()
+        return session or "unknown"
+
+    @classmethod
+    def _example_pocket_key(cls, row: dict[str, Any]) -> str:
+        status = cls._source_status_from(row)
+        strategy = str(row.get("strategy") or "unknown")
+        symbol = str(row.get("symbol") or "unknown").upper()
+        return f"{status}/{strategy}/{symbol}"
+
+    def _status_diagnostics(
+        self,
+        latest_day_decisions: dict[str, dict[str, Any]],
+        rewards: list[dict[str, Any]],
+        decision_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        diagnostics: dict[str, dict[str, Any]] = {}
+
+        def bucket_for(status: str) -> dict[str, Any]:
+            return diagnostics.setdefault(
+                status,
+                {
+                    "decisions": 0,
+                    "executed": 0,
+                    "closed": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "pnl": 0.0,
+                    "r": 0.0,
+                    "actions": [],
+                    "tp_scales": [],
+                    "pairs": {},
+                    "updates": 0,
+                    "baseline": 0.0,
+                    "weight_count": 0,
+                    "tp_weight_count": 0,
+                    "side_weight_count": 0,
+                },
+            )
+
+        for status in ("accepted", "rejected"):
+            bucket_for(status)
+
+        for decision in latest_day_decisions.values():
+            status = self._source_status_from(decision)
+            bucket = bucket_for(status)
+            bucket["decisions"] += 1
+            if decision.get("executed"):
+                bucket["executed"] += 1
+            action = to_float(decision.get("action"))
+            if action is not None:
+                bucket["actions"].append(action)
+            tp_scale = to_float(decision.get("tp_scale"))
+            if tp_scale is not None:
+                bucket["tp_scales"].append(tp_scale)
+
+        for reward in rewards:
+            decision = decision_lookup.get(str(reward.get("decision_id") or ""), {})
+            status = self._source_status_from(reward, decision)
+            bucket = bucket_for(status)
+            bucket["closed"] += 1
+            pnl = to_float(reward.get("closed_pnl")) or 0.0
+            reward_r = to_float(reward.get("reward_default_r")) or 0.0
+            bucket["pnl"] += pnl
+            bucket["r"] += reward_r
+            if pnl > 0:
+                bucket["wins"] += 1
+            elif pnl < 0:
+                bucket["losses"] += 1
+            pair_key = self._strategy_symbol_key(reward, decision)
+            pair = bucket["pairs"].setdefault(pair_key, {"closed": 0, "r": 0.0, "pnl": 0.0})
+            pair["closed"] += 1
+            pair["r"] += reward_r
+            pair["pnl"] += pnl
+
+        with self.lock:
+            for status, bucket in diagnostics.items():
+                bucket["updates"] = int(self.agent.reward_updates_by_status.get(status, 0))
+                bucket["baseline"] = float(self.agent.reward_baselines_by_status.get(status, 0.0))
+                bucket["weight_count"] = len(self.agent.weights_by_status.get(status, {}))
+                bucket["tp_weight_count"] = len(self.agent.tp_weights_by_status.get(status, {}))
+                bucket["side_weight_count"] = len(self.agent.side_weights_by_status.get(status, {}))
+
+        output: dict[str, Any] = {}
+        for status, bucket in diagnostics.items():
+            pairs = [
+                {"pair": key, **value}
+                for key, value in bucket["pairs"].items()
+                if int(value.get("closed", 0)) > 0
+            ]
+            pairs.sort(key=lambda row: float(row.get("r", 0.0)), reverse=True)
+            closed = int(bucket["closed"])
+            output[status] = {
+                "decisions": int(bucket["decisions"]),
+                "executed": int(bucket["executed"]),
+                "closed": closed,
+                "wins": int(bucket["wins"]),
+                "losses": int(bucket["losses"]),
+                "winrate": (float(bucket["wins"]) / closed) if closed else 0.0,
+                "pnl": float(bucket["pnl"]),
+                "r": float(bucket["r"]),
+                "avg_r": (float(bucket["r"]) / closed) if closed else 0.0,
+                "avg_action": self._avg(bucket["actions"]),
+                "avg_tp_scale": self._avg(bucket["tp_scales"]),
+                "updates": int(bucket["updates"]),
+                "baseline": float(bucket["baseline"]),
+                "weight_count": int(bucket["weight_count"]),
+                "tp_weight_count": int(bucket["tp_weight_count"]),
+                "side_weight_count": int(bucket["side_weight_count"]),
+                "best_pairs": pairs[:3],
+                "worst_pairs": list(reversed(pairs[-3:])) if pairs else [],
+            }
+        return output
+
+    def _safety_telemetry_from_examples(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
+        rows = [(row, self._example_reward_r(row)) for row in examples if isinstance(row, dict)]
+        rows = [(row, reward) for row, reward in rows if reward is not None]
+        recent = rows[-80:]
+
+        loss_streaks: dict[str, int] = {}
+        for row, reward in rows:
+            key = self._example_pocket_key(row)
+            if reward is not None and reward < 0:
+                loss_streaks[key] = loss_streaks.get(key, 0) + 1
+            else:
+                loss_streaks[key] = 0
+        active_loss_streaks = [
+            {"pocket": key, "loss_streak": streak}
+            for key, streak in loss_streaks.items()
+            if streak > 0
+        ]
+        active_loss_streaks.sort(key=lambda row: int(row["loss_streak"]), reverse=True)
+
+        slippage_values = [
+            self._example_slippage(row)
+            for row, _reward in recent[-20:]
+        ]
+        slippage_values = [value for value in slippage_values if value is not None]
+        abs_slippage_avg = self._avg([abs(value) for value in slippage_values])
+        slippage_avg = self._avg(slippage_values)
+
+        pockets: dict[str, list[float]] = {}
+        for row, reward in recent:
+            if reward is None:
+                continue
+            pockets.setdefault(self._example_pocket_key(row), []).append(float(reward))
+        degraded = []
+        for key, values in pockets.items():
+            if len(values) < 3:
+                continue
+            total_r = sum(values)
+            avg_r = total_r / len(values)
+            losses = sum(1 for value in values if value < 0)
+            if total_r <= -0.50 or losses >= 3:
+                degraded.append(
+                    {
+                        "pocket": key,
+                        "closed": len(values),
+                        "r": total_r,
+                        "avg_r": avg_r,
+                        "losses": losses,
+                    }
+                )
+        degraded.sort(key=lambda row: float(row["r"]))
+
+        session_values: dict[str, list[float]] = {}
+        for row, reward in rows[-120:]:
+            if reward is None:
+                continue
+            session_values.setdefault(self._example_session(row), []).append(float(reward))
+        session_decay = []
+        for session, values in session_values.items():
+            if len(values) < 8:
+                continue
+            split = len(values) // 2
+            previous = values[:split]
+            latest = values[split:]
+            delta = self._avg(latest) - self._avg(previous)
+            session_decay.append(
+                {
+                    "session": session,
+                    "count": len(values),
+                    "recent_avg_r": self._avg(latest),
+                    "previous_avg_r": self._avg(previous),
+                    "delta_r": delta,
+                }
+            )
+        session_decay.sort(key=lambda row: float(row["delta_r"]))
+
+        return {
+            "loss_streaks": active_loss_streaks[:5],
+            "recent_slippage_bps_avg": slippage_avg,
+            "recent_slippage_bps_abs_avg": abs_slippage_avg,
+            "degraded_pockets": degraded[:5],
+            "session_decay": session_decay[:5],
+        }
+
     def _heartbeat_summary_for_day(self, day_key: str) -> dict[str, Any]:
         decisions = []
         rewards = []
-        for row in self._iter_jsonl(DECISIONS_PATH):
+        all_decision_rows = self._iter_jsonl(DECISIONS_PATH)
+        for row in all_decision_rows:
             ts = self._parse_iso(row.get("received_at"))
             if ts is not None and ts.strftime("%Y-%m-%d") == day_key:
                 decisions.append(row)
@@ -1635,6 +2475,11 @@ class RLExecutionService:
             decision_id = str(row.get("decision_id") or "")
             if decision_id:
                 latest[decision_id] = row
+        latest_all: dict[str, dict[str, Any]] = {}
+        for row in all_decision_rows:
+            decision_id = str(row.get("decision_id") or "")
+            if decision_id:
+                latest_all[decision_id] = row
         total_decisions = len(latest)
         executed = sum(1 for row in latest.values() if row.get("executed"))
         skipped = sum(1 for row in latest.values() if row.get("skip_reason") and not row.get("executed"))
@@ -1691,6 +2536,7 @@ class RLExecutionService:
             "agent_updates": agent_updates,
             "reward_baseline": baseline,
             "by_strategy": by_strategy,
+            "status_diagnostics": self._status_diagnostics(latest, rewards, latest_all),
         }
 
     def _training_status_summary(self) -> dict[str, Any]:
@@ -1713,7 +2559,14 @@ class RLExecutionService:
                 break
 
         with self.lock:
-            weight_count = len(self.agent.weights)
+            weight_count = (
+                len(self.agent.weights)
+                + len(self.agent.tp_weights)
+                + len(self.agent.side_weights)
+                + sum(len(weights) for weights in self.agent.weights_by_status.values())
+                + sum(len(weights) for weights in self.agent.tp_weights_by_status.values())
+                + sum(len(weights) for weights in self.agent.side_weights_by_status.values())
+            )
             stat_count = len(self.agent.stats)
             reward_updates = self.agent.reward_updates
             baseline = self.agent.reward_baseline
@@ -1739,6 +2592,7 @@ class RLExecutionService:
             "weight_count": weight_count,
             "stat_count": stat_count,
             "last_reward_at": last_reward_at,
+            "safety": self._safety_telemetry_from_examples(examples),
         }
 
     def _send_daily_heartbeat(self, summary: dict[str, Any]) -> None:
@@ -1756,6 +2610,66 @@ class RLExecutionService:
             f"Recent reward avg: <code>{self._fmt_r(float(training['recent_reward_avg']))}</code>  Prev avg: <code>{self._fmt_r(float(training['previous_reward_avg']))}</code>  Delta: <code>{self._fmt_r(float(training['reward_delta']))}</code>",
             f"Weights/stats: <code>{training['weight_count']}/{training['stat_count']}</code>  Last reward: <code>{escape(training['last_reward_at'].isoformat() if training['last_reward_at'] else '-')}</code>",
         ]
+        status_diagnostics = summary.get("status_diagnostics") if isinstance(summary.get("status_diagnostics"), dict) else {}
+        if status_diagnostics:
+            lines.append("<b>Status heads</b>")
+            for status in ("accepted", "rejected"):
+                bucket = status_diagnostics.get(status)
+                if not isinstance(bucket, dict):
+                    continue
+                lines.append(
+                    f"{escape(status)}: <code>sig/exe/closed "
+                    f"{int(bucket.get('decisions', 0))}/{int(bucket.get('executed', 0))}/{int(bucket.get('closed', 0))}, "
+                    f"R {self._fmt_r(float(bucket.get('r', 0.0)))}, "
+                    f"avg {self._fmt_r(float(bucket.get('avg_r', 0.0)))}, "
+                    f"W/L {int(bucket.get('wins', 0))}/{int(bucket.get('losses', 0))}, "
+                    f"a {float(bucket.get('avg_action', 0.0)):.3f}, "
+                    f"tp {float(bucket.get('avg_tp_scale', 0.0)):.1f}, "
+                    f"upd {int(bucket.get('updates', 0))}, "
+                    f"base {float(bucket.get('baseline', 0.0)):+.3f}R</code>"
+                )
+                best_pairs = bucket.get("best_pairs") if isinstance(bucket.get("best_pairs"), list) else []
+                worst_pairs = bucket.get("worst_pairs") if isinstance(bucket.get("worst_pairs"), list) else []
+                if best_pairs:
+                    best_text = ", ".join(
+                        f"{pair.get('pair')} {self._fmt_r(float(pair.get('r', 0.0)))}"
+                        for pair in best_pairs[:2]
+                    )
+                    lines.append(f"best {escape(status)}: <code>{escape(best_text)}</code>")
+                if worst_pairs:
+                    worst_text = ", ".join(
+                        f"{pair.get('pair')} {self._fmt_r(float(pair.get('r', 0.0)))}"
+                        for pair in worst_pairs[:2]
+                    )
+                    lines.append(f"worst {escape(status)}: <code>{escape(worst_text)}</code>")
+        safety = training.get("safety") if isinstance(training.get("safety"), dict) else {}
+        if safety:
+            lines.append("<b>Safety telemetry</b>")
+            loss_streaks = safety.get("loss_streaks") if isinstance(safety.get("loss_streaks"), list) else []
+            top_streak = loss_streaks[0] if loss_streaks else None
+            degraded = safety.get("degraded_pockets") if isinstance(safety.get("degraded_pockets"), list) else []
+            decay = safety.get("session_decay") if isinstance(safety.get("session_decay"), list) else []
+            lines.append(
+                f"Slippage 20: <code>{float(safety.get('recent_slippage_bps_avg', 0.0)):+.2f} bps "
+                f"abs {float(safety.get('recent_slippage_bps_abs_avg', 0.0)):.2f} bps</code>"
+            )
+            if top_streak:
+                lines.append(
+                    f"Loss streak: <code>{escape(str(top_streak.get('pocket')))} "
+                    f"x{int(top_streak.get('loss_streak', 0))}</code>"
+                )
+            if degraded:
+                row = degraded[0]
+                lines.append(
+                    f"Weak pocket: <code>{escape(str(row.get('pocket')))} "
+                    f"{int(row.get('closed', 0))} closed, {self._fmt_r(float(row.get('r', 0.0)))}</code>"
+                )
+            if decay:
+                row = decay[0]
+                lines.append(
+                    f"Session decay: <code>{escape(str(row.get('session')))} "
+                    f"{self._fmt_r(float(row.get('delta_r', 0.0)))}</code>"
+                )
         by_strategy = summary.get("by_strategy") if isinstance(summary.get("by_strategy"), dict) else {}
         if by_strategy:
             top = sorted(
@@ -1912,17 +2826,31 @@ class RLExecutionService:
             expected_entry = to_float(setup.get("entry"))
             entry_fill_raw = decision.get("entry_fill_raw") if isinstance(decision.get("entry_fill_raw"), dict) else {}
             fill_price = to_float(entry_fill_raw.get("avgPrice"))
-            direction = str(decision.get("direction") or "").strip().lower()
+            direction = str(decision.get("effective_direction") or decision.get("direction") or "").strip().lower()
             if expected_entry not in (None, 0.0) and fill_price not in (None, 0.0):
                 if direction == "short":
                     entry_slippage_bps = (expected_entry - fill_price) / expected_entry * 1e4
                 else:
                     entry_slippage_bps = (fill_price - expected_entry) / expected_entry * 1e4
+            payload = decision.get("payload") if isinstance(decision.get("payload"), dict) else {}
+            agent = decision.get("agent") if isinstance(decision.get("agent"), dict) else {}
             reward_payload = {
                 "decision_id": decision_id,
                 "symbol": decision.get("symbol"),
                 "strategy": decision.get("strategy"),
+                "direction": decision.get("direction"),
+                "source_direction": decision.get("source_direction"),
+                "effective_direction": decision.get("effective_direction"),
+                "reversed_trade": decision.get("reversed_trade"),
+                "source_status": decision.get("source_status"),
                 "action": decision.get("action"),
+                "risk_action": decision.get("risk_action"),
+                "tp_scale": decision.get("tp_scale"),
+                "policy_action": agent.get("policy_action"),
+                "policy_risk_action": agent.get("policy_risk_action"),
+                "policy_side": agent.get("policy_side"),
+                "policy_status": agent.get("policy_status"),
+                "feature_hash": agent.get("feature_hash"),
                 "closed_pnl": closed_pnl,
                 "reward_default_r": reward_default_r,
                 "reward_actual_r": reward_actual_r,
@@ -1932,8 +2860,6 @@ class RLExecutionService:
                 "received_at": now_iso(),
                 "raw": raw,
             }
-            payload = decision.get("payload") if isinstance(decision.get("payload"), dict) else {}
-            agent = decision.get("agent") if isinstance(decision.get("agent"), dict) else {}
             training_example = {
                 "schema_version": "rl_training_example_v1",
                 "decision_id": decision_id,
@@ -1941,20 +2867,35 @@ class RLExecutionService:
                 "symbol": decision.get("symbol"),
                 "strategy": decision.get("strategy"),
                 "direction": decision.get("direction"),
+                "source_direction": decision.get("source_direction"),
+                "effective_direction": decision.get("effective_direction"),
+                "reversed_trade": decision.get("reversed_trade"),
                 "source_status": decision.get("source_status"),
                 "source_reason": decision.get("source_reason"),
                 "received_at": decision.get("received_at"),
                 "completed_at": reward_payload["received_at"],
                 "action": decision.get("action"),
+                "risk_action": decision.get("risk_action"),
                 "tp_scale": decision.get("tp_scale"),
                 "tp_scale_max": decision.get("tp_scale_max"),
                 "selected_tp_index": decision.get("selected_tp_index"),
                 "selected_take_profit": decision.get("selected_take_profit"),
+                "effective_stop_loss": decision.get("effective_stop_loss"),
+                "effective_take_profit": decision.get("effective_take_profit"),
                 "policy_action": agent.get("policy_action"),
+                "policy_risk_action": agent.get("policy_risk_action"),
+                "policy_side": agent.get("policy_side"),
+                "policy_side_score": agent.get("side_score"),
                 "policy_score": agent.get("score"),
+                "policy_status": agent.get("policy_status"),
                 "policy_tp_scale": agent.get("policy_tp_scale"),
                 "policy_tp_scale_score": agent.get("tp_scale_score"),
                 "explored": agent.get("explored"),
+                "feature_hash": agent.get("feature_hash"),
+                "top_contributors": agent.get("top_contributors"),
+                "tp_top_contributors": agent.get("tp_top_contributors"),
+                "side_top_contributors": agent.get("side_top_contributors"),
+                "shadow_policies": agent.get("shadow_policies"),
                 "risk_mode": decision.get("risk_mode"),
                 "default_risk_usdt": decision.get("default_risk_usdt"),
                 "risk_budget_usdt": decision.get("risk_budget_usdt"),
@@ -1979,8 +2920,11 @@ class RLExecutionService:
             if exit_order_id:
                 self.order_to_decision[str(exit_order_id)] = decision_id
                 self.claimed_closed_pnl_ids.add(str(exit_order_id))
+            history_payload = dict(payload)
+            if decision.get("effective_direction"):
+                history_payload["direction"] = decision.get("effective_direction")
             self.agent.add_trade_history(
-                payload,
+                history_payload,
                 closed_pnl=closed_pnl,
                 reward_default_r=reward_default_r,
                 entry_slippage_bps=entry_slippage_bps,
@@ -2271,13 +3215,14 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     log.info(
         "RL execution sidecar listening on %s:%d  trading_enabled=%s demo=%s "
-        "default_risk=%.2f USDT min_action=%.3f",
+        "default_risk=%.2f USDT min_action=%.3f reverse_actions=%s",
         HOST,
         PORT,
         TRADING_ENABLED,
         BYBIT_DEMO,
         DEFAULT_RISK_USDT,
         MIN_ACTION_TO_TRADE,
+        ALLOW_REVERSE_ACTIONS,
     )
     server.serve_forever()
 

@@ -1,0 +1,17 @@
+﻿Started: 2026-06-05T10:53:33.6463692+02:00
+Repo: C:\Users\flori\Repositories\tradingview-mcp
+OutputDir: scripts\pyharmonics_abc_overnight_dryrun_monitorfix_20260605
+ChunkDir: scripts\pyharmonics_abc_overnight_dryrun_monitorfix_20260605\chunks
+EventCacheSymbolDir: scripts\pyharmonics_abc_overnight_dryrun_monitorfix_20260605\per_symbol
+MergedDataset: scripts\pyharmonics_abc_overnight_dryrun_monitorfix_20260605\abc_dataset.csv
+SelectorPrefix: scripts\pyharmonics_abc_overnight_dryrun_monitorfix_20260605\abc_selector
+DataDir: scripts\data_pyharmonics_top100_fast_15m_abcd_xabcd_5y
+TopSymbolsPath: scripts\pyharmonics_top100_fast_15m_abcd_xabcd_5y_20260603_100738\top_symbols.csv
+Limit: 1
+Workers: 1
+Selected: 1
+SelectorFeatureSets: no_symbol
+RequestedPython: 
+Resume: False
+
+Python: C:\Python314\python.exe

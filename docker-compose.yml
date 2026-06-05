@@ -114,6 +114,7 @@ services:
       RL_DECISIONS_PATH: /app/rl/decisions.jsonl
       RL_REWARDS_PATH: /app/rl/rewards.jsonl
       RL_TRAINING_EXAMPLES_PATH: /app/rl/training_examples.jsonl
+      RL_ALLOW_REVERSE_ACTIONS: "true"
     volumes:
       - ./bot/logs/rl:/app/rl
     logging:
@@ -200,6 +201,7 @@ services:
       RL_DECISIONS_PATH: /app/rl_matrix/decisions.jsonl
       RL_REWARDS_PATH: /app/rl_matrix/rewards.jsonl
       RL_TRAINING_EXAMPLES_PATH: /app/rl_matrix/training_examples.jsonl
+      RL_ALLOW_REVERSE_ACTIONS: "false"
     volumes:
       - ./bot/logs/rl_matrix:/app/rl_matrix
     logging:
@@ -209,6 +211,28 @@ services:
         max-file: "3"
 
   # ── One-off DT training service ─────────────────────────────────────────────
+  # Read-only local dashboard for both RL sidecars.
+  rl-dashboard:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python scripts/rl_dashboard.py --host 0.0.0.0 --port 8765 --log-root /app/logs
+    container_name: rl-dashboard
+    restart: unless-stopped
+    environment:
+      RL_DASHBOARD_LOG_ROOT: /app/logs
+      RL_DASHBOARD_HOST: 0.0.0.0
+      RL_DASHBOARD_PORT: "8765"
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./bot/logs:/app/logs:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Run with: docker compose run --rm mm-train
   # Trains per-coin DT models and writes them to ./bot/models/
   mm-train:

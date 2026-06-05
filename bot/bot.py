@@ -80,6 +80,8 @@ Env variables
   WOLFE_WAVE_SYMBOLS  -- comma-separated Wolfe symbols (default validated Wolfe set)
   WOLFE_WAVE_CONFIG_PATH -- JSON config produced by scripts/backtest_wolfe_wave.py
   WOLFE_WAVE_WARMUP_BARS -- 5m candles retained for Wolfe detection (default 20000)
+  RL_ONLY_STRATEGIES  -- comma-separated strategy names to forward to the RL
+                         sidecar without normal-bot execution/restriction gates
   LOG_DIR              -- directory for bot.log
   ACTIVE_TRADES_STATE_PATH -- optional JSON path for persisted open-trade metadata
   TRADE_LEDGER_PATH    -- optional JSONL path for signal/fill/risk events
@@ -187,6 +189,11 @@ HEARTBEAT_STATE_PATH = os.environ.get("HEARTBEAT_STATE_PATH", os.path.join(LOG_D
 RL_EXECUTION_URL = os.environ.get("RL_EXECUTION_URL", "").strip()
 RL_EXECUTION_TIMEOUT_SECONDS = float(os.environ.get("RL_EXECUTION_TIMEOUT_SECONDS", "1.0"))
 RL_EXECUTION_QUEUE_SIZE = int(os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"))
+RL_ONLY_STRATEGIES = {
+    chunk.strip().lower()
+    for chunk in os.environ.get("RL_ONLY_STRATEGIES", "").split(",")
+    if chunk.strip()
+}
 PROTECTION_AUDIT_SECONDS = int(os.environ.get("PROTECTION_AUDIT_SECONDS", "300"))
 OPEN_ORDER_AUDIT_SECONDS = int(os.environ.get("OPEN_ORDER_AUDIT_SECONDS", "300"))
 DAILY_HEARTBEAT_UTC_HOUR = int(os.environ.get("DAILY_HEARTBEAT_UTC_HOUR", "0"))
@@ -805,6 +812,11 @@ class Bot:
                 daemon=True,
             ).start()
             log.info(f"RL execution sidecar enabled  url={self._rl_execution_url}")
+            if RL_ONLY_STRATEGIES:
+                log.info(
+                    "RL-only strategies enabled: "
+                    f"{','.join(sorted(RL_ONLY_STRATEGIES))}"
+                )
         else:
             log.info("RL execution sidecar disabled; RL_EXECUTION_URL is empty")
         self._load_risk_state()
@@ -1038,6 +1050,8 @@ class Bot:
             and MAX_CONSECUTIVE_LOSSES_PER_SYMBOL <= 0
         ):
             warn("loss-count circuit breakers are disabled")
+        if RL_ONLY_STRATEGIES and not RL_EXECUTION_URL:
+            error("RL_ONLY_STRATEGIES is set but RL_EXECUTION_URL is empty")
 
         if DEMO and PUBLIC_WS_DEMO:
             warn("BYBIT_PUBLIC_WS_DEMO=true in demo mode can 404 for linear public kline streams")
@@ -1193,6 +1207,59 @@ class Bot:
             return "ENTRY FILLED"
         return None
 
+    def _is_partial_take_profit_exit(self, order: dict, active_trade: dict, event: object) -> bool:
+        if str(event or "").upper() != "TAKE PROFIT FILLED":
+            return False
+        descriptor = " ".join(
+            str(order.get(key) or "")
+            for key in ("stopOrderType", "createType", "orderLinkId", "parentOrderLinkId")
+        ).lower()
+        if "partialtakeprofit" not in descriptor and "partial_takeprofit" not in descriptor:
+            return False
+        if str(active_trade.get("exit_style") or "").lower() == "fixed_tp":
+            return False
+        partial_qty = self._to_float(active_trade.get("tp1_partial_qty"))
+        if partial_qty is None or partial_qty <= 0:
+            return False
+        total_qty = self._to_float(active_trade.get("qty"))
+        fill_qty = self._to_float(self._fill_qty(order))
+        if total_qty is not None and fill_qty is not None and fill_qty >= total_qty * 0.98:
+            return False
+        return True
+
+    def _trade_id_from_active_trade(self, active_trade: dict) -> object:
+        return (
+            active_trade.get("trade_id")
+            or active_trade.get("order_link_id")
+            or active_trade.get("entry_order_id")
+            or active_trade.get("opened_at")
+        )
+
+    def _mark_partial_exit_from_private(
+        self,
+        symbol: str,
+        *,
+        order_id: str,
+        price: object,
+        qty: object,
+        closed_pnl: object,
+        fill_time_ms: object,
+    ) -> None:
+        state = self._states.get(symbol)
+        if state is None:
+            return
+        with self._pos_lock:
+            if not state.active_trade:
+                return
+            state.active_trade["tp1_filled_at"] = int(self._to_float(fill_time_ms) or self._now_ms())
+            if order_id:
+                state.active_trade["tp1_order_id"] = order_id
+            state.active_trade["tp1_fill_price"] = price
+            state.active_trade["tp1_filled_qty"] = qty
+            state.active_trade["tp1_closed_pnl"] = closed_pnl
+            state.active_trade["exit_phase"] = "runner"
+            self._save_active_trade_state_locked()
+
     @staticmethod
     def _fill_price(order: dict) -> object:
         for key in ("avgPrice", "execPrice", "price", "triggerPrice"):
@@ -1290,6 +1357,11 @@ class Bot:
                     direction = "long" if side == "Sell" else "short" if side == "Buy" else None
                 strategy = active_trade.get("strategy") or (manual_exit or {}).get("strategy")
                 exit_reason = (manual_exit or {}).get("reason") if is_exit else None
+                partial_exit = bool(
+                    is_exit
+                    and not manual_exit
+                    and self._is_partial_take_profit_exit(order, active_trade, event)
+                )
 
                 price = self._fill_price(order)
                 qty = self._fill_qty(order)
@@ -1350,6 +1422,9 @@ class Bot:
                     qty=qty,
                     order_id=order_id or None,
                     order_link_id=order.get("orderLinkId"),
+                    trade_id=self._trade_id_from_active_trade(active_trade),
+                    entry_order_id=active_trade.get("entry_order_id"),
+                    entry_order_link_id=active_trade.get("order_link_id"),
                     stop_order_type=stop_type or None,
                     order_type=order.get("orderType"),
                     closed_pnl=order.get("closedPnl"),
@@ -1363,11 +1438,23 @@ class Bot:
                     time_in_trade_ms=time_in_trade_ms,
                     order_raw=order,
                     exit_reason=exit_reason,
+                    exit_is_partial=partial_exit,
+                    exit_part="tp1_partial" if partial_exit else ("final" if is_exit else None),
                     create_type=order.get("createType"),
                     trigger_by=order.get("triggerBy"),
                 )
                 if is_exit:
-                    self._release_position_slot_from_private(symbol, clear_active_trade=True)
+                    if partial_exit:
+                        self._mark_partial_exit_from_private(
+                            symbol,
+                            order_id=order_id,
+                            price=price,
+                            qty=qty,
+                            closed_pnl=order.get("closedPnl"),
+                            fill_time_ms=order.get("updatedTime"),
+                        )
+                    else:
+                        self._release_position_slot_from_private(symbol, clear_active_trade=True)
                     if order_id:
                         self._manual_exit_orders.pop(order_id, None)
         except Exception:
@@ -1552,6 +1639,11 @@ class Bot:
         features = dict(feature_snapshot) if isinstance(feature_snapshot, dict) else {}
         probability = self._signal_probability(sig)
         threshold = sig.get("threshold", sig.get("dt_threshold"))
+        strategy = sig.get("strategy")
+        strategy_key = str(strategy or "").strip().lower()
+        exit_style = sig.get("exit_style")
+        if not exit_style and strategy_key.startswith("million_moves"):
+            exit_style = "trailing"
         features.update({
             "ml_probability": probability,
             "ml_threshold": threshold,
@@ -1566,7 +1658,7 @@ class Bot:
             "status": status,
             "reason": reason,
             "symbol": symbol,
-            "strategy": sig.get("strategy"),
+            "strategy": strategy,
             "direction": sig.get("signal", sig.get("direction")),
             "setup": {
                 "entry": sig.get("entry", sig.get("entry_price")),
@@ -1574,7 +1666,7 @@ class Bot:
                 "stop_loss": sig.get("sl", sig.get("stop_price")),
                 "take_profit": sig.get("tp1", sig.get("target", sig.get("target_price"))),
                 "trail_dist": sig.get("trail_dist"),
-                "exit_style": sig.get("exit_style"),
+                "exit_style": exit_style,
                 "entry_time": sig.get("entry_time"),
                 "atr": sig.get("atr"),
                 "stop_distance_pct": sig.get("stop_distance_pct"),
@@ -2335,6 +2427,9 @@ class Bot:
             qty=qty,
             order_id=order_id or None,
             order_link_id=order.get("orderLinkId") or order.get("parentOrderLinkId"),
+            trade_id=self._trade_id_from_active_trade(active_trade),
+            entry_order_id=active_trade.get("entry_order_id"),
+            entry_order_link_id=active_trade.get("order_link_id"),
             stop_order_type=stop_type or None,
             order_type=order.get("orderType"),
             closed_pnl=order.get("closedPnl"),
@@ -2348,6 +2443,8 @@ class Bot:
             time_in_trade_ms=time_in_trade_ms,
             order_raw=order,
             exit_reason="rest_position_sync_fallback",
+            exit_is_partial=False,
+            exit_part="final",
             create_type=order.get("createType"),
             trigger_by=order.get("triggerBy"),
         )
@@ -2983,6 +3080,8 @@ class Bot:
     def _ledger_stats_for_day(self, day_key: str) -> dict[str, object]:
         stats = self._blank_perf_stats()
         strategies: dict[str, dict[str, object]] = {}
+        recent_partial_exits: dict[tuple[str, str], tuple[str, int, str]] = {}
+        exit_groups: dict[str, dict[str, object]] = {}
 
         def strategy_stats(strategy: object) -> dict[str, object]:
             key = self._strategy_key(strategy)
@@ -2996,8 +3095,10 @@ class Bot:
             elif status == "rejected":
                 target["rejected"] = int(target["rejected"]) + 1
 
-        def update_exit(target: dict[str, object], pnl: float) -> None:
+        def add_exit_pnl(target: dict[str, object], pnl: float) -> None:
             target["pnl"] = float(target["pnl"]) + pnl
+
+        def update_closed_result(target: dict[str, object], pnl: float) -> None:
             target["closed"] = int(target["closed"]) + 1
             if pnl > 0:
                 target["wins"] = int(target["wins"]) + 1
@@ -3005,6 +3106,72 @@ class Bot:
                 target["losses"] = int(target["losses"]) + 1
             else:
                 target["breakeven"] = int(target["breakeven"]) + 1
+
+        def event_fill_time_ms(event: dict) -> int:
+            try:
+                return int(float(event.get("fill_time_ms") or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        def is_partial_tp(event: dict) -> bool:
+            descriptor = " ".join(
+                str(event.get(key) or "")
+                for key in ("stop_order_type", "create_type", "order_link_id")
+            ).lower()
+            return (
+                "take profit" in str(event.get("event") or "").lower()
+                and (
+                    "partialtakeprofit" in descriptor
+                    or "partial_takeprofit" in descriptor
+                )
+            )
+
+        def resolve_fill_strategy(event: dict) -> object:
+            strategy = event.get("strategy")
+            if str(strategy or "").strip():
+                return strategy
+            descriptor = " ".join(
+                str(event.get(key) or "")
+                for key in ("event", "stop_order_type", "create_type", "order_link_id")
+            ).lower()
+            if "trailing" not in descriptor:
+                return strategy
+            key = (
+                str(event.get("symbol") or "").upper(),
+                str(event.get("direction") or "").lower(),
+            )
+            previous = recent_partial_exits.get(key)
+            event_ms = event_fill_time_ms(event)
+            if previous and event_ms and 0 <= event_ms - previous[1] <= 6 * 60 * 60 * 1000:
+                return previous[0]
+            return strategy
+
+        def fill_group_key(event: dict, strategy: object) -> str:
+            trade_id = str(event.get("trade_id") or "").strip()
+            if trade_id:
+                return f"trade:{trade_id}"
+            symbol = str(event.get("symbol") or "").upper()
+            direction = str(event.get("direction") or "").lower()
+            event_ms = event_fill_time_ms(event)
+            key = (symbol, direction)
+            if is_partial_tp(event):
+                return (
+                    f"legacy-partial:{symbol}:{direction}:"
+                    f"{self._strategy_key(strategy)}:{event.get('order_id') or event_ms}"
+                )
+            descriptor = " ".join(
+                str(event.get(part) or "")
+                for part in ("event", "stop_order_type", "create_type", "order_link_id")
+            ).lower()
+            previous = recent_partial_exits.get(key)
+            if (
+                previous
+                and "trailing" in descriptor
+                and event_ms
+                and 0 <= event_ms - previous[1] <= 6 * 60 * 60 * 1000
+            ):
+                return previous[2]
+            return f"fill:{event.get('order_id') or event.get('ts') or id(event)}"
 
         if not os.path.exists(TRADE_LEDGER_PATH):
             stats["strategies"] = strategies
@@ -3031,10 +3198,39 @@ class Bot:
                         pnl = self._numeric_float(event.get("closed_pnl"))
                         if pnl is None:
                             continue
-                        update_exit(stats, pnl)
-                        update_exit(strategy_stats(event.get("strategy")), pnl)
+                        strategy = resolve_fill_strategy(event)
+                        partial_tp = is_partial_tp(event)
+                        group_key = fill_group_key(event, strategy)
+                        group = exit_groups.setdefault(
+                            group_key,
+                            {
+                                "strategy": strategy,
+                                "pnl": 0.0,
+                                "has_partial": False,
+                                "has_final": False,
+                            },
+                        )
+                        if str(strategy or "").strip():
+                            group["strategy"] = strategy
+                        group["pnl"] = float(group.get("pnl") or 0.0) + pnl
+                        group["has_partial"] = bool(group.get("has_partial")) or partial_tp
+                        group["has_final"] = bool(group.get("has_final")) or not partial_tp
+                        add_exit_pnl(stats, pnl)
+                        add_exit_pnl(strategy_stats(strategy), pnl)
+                        if partial_tp and str(strategy or "").strip():
+                            recent_partial_exits[(
+                                str(event.get("symbol") or "").upper(),
+                                str(event.get("direction") or "").lower(),
+                            )] = (str(strategy), event_fill_time_ms(event), group_key)
         except Exception as exc:
             log.warning(f"[heartbeat] Could not read ledger {TRADE_LEDGER_PATH}: {exc}")
+        for group in exit_groups.values():
+            if bool(group.get("has_partial")) and not bool(group.get("has_final")):
+                continue
+            pnl = float(group.get("pnl") or 0.0)
+            strategy = group.get("strategy")
+            update_closed_result(stats, pnl)
+            update_closed_result(strategy_stats(strategy), pnl)
         stats["strategies"] = strategies
         return stats
 
@@ -3496,6 +3692,22 @@ class Bot:
 
     def _submit_signal(self, state: SymbolState, sig: dict) -> None:
         self._attach_market_context(state, sig)
+        strategy_name = str(sig.get("strategy", "")).strip().lower()
+        if self._is_rl_only_strategy(strategy_name):
+            sig["execution_route"] = "rl_sidecar_only"
+            log.info(
+                f"[{state.symbol}] {sig['signal'].upper()} {sig.get('strategy', 'strategy')} "
+                "signal routed to RL sidecar only"
+            )
+            self._record_signal_event(
+                "accepted",
+                symbol=state.symbol,
+                sig=sig,
+                reason="routed to RL sidecar only",
+                extra={"execution_route": "rl_sidecar_only"},
+            )
+            return
+
         reject_reason: str | None = None
         stop_distance_reason = self._stop_distance_reject_reason(sig)
         if stop_distance_reason:
@@ -3592,6 +3804,17 @@ class Bot:
                 reason=f"Trade failed: {exc}",
             )
             self._telegram.send_signal("rejected", symbol=state.symbol, sig=sig, reason=f"Trade failed: {exc}")
+
+    @staticmethod
+    def _is_rl_only_strategy(strategy_name: str) -> bool:
+        if not strategy_name or not RL_ONLY_STRATEGIES:
+            return False
+        if "*" in RL_ONLY_STRATEGIES or strategy_name in RL_ONLY_STRATEGIES:
+            return True
+        return any(
+            item.endswith("*") and strategy_name.startswith(item[:-1])
+            for item in RL_ONLY_STRATEGIES
+        )
 
     def _set_order_leverage(
         self,
@@ -3801,6 +4024,7 @@ class Bot:
         log.info(f"[{sym}] Market order accepted  orderId={order_id} orderLinkId={order_link_id}")
         with self._pos_lock:
             state.active_trade = {
+                "trade_id": order_link_id,
                 "strategy": strategy,
                 "direction": sig["signal"],
                 "order_link_id": order_link_id,

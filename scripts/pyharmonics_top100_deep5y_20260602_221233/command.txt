@@ -1,0 +1,9 @@
+﻿Started: 2026-06-02T22:12:33.0617222+02:00
+Repo: C:\Users\flori\Repositories\tradingview-mcp
+OutputDir: scripts\pyharmonics_top100_deep5y_20260602_221233
+CacheDir: scripts\data_pyharmonics_top100_deep5y
+Limit: 100
+Workers: 4
+MaxConfigs: 360
+
+python scripts\run_pyharmonics_top100_lowpass.py --limit 100 --days 1825 --exec-tf 15m --min-history-days 365 --min-bars 25000 --validation-days 365 --oos-days 365 --workers 4 --max-configs 360 --pattern-tfs 1h,4h --families ABC,ABCD,XABCD --pattern-modes formed,forming --peak-spacings 10,20,28 --fib-tolerances 0.02,0.03,0.05 --forming-percents 0.70,0.80,0.90 --pattern-lookback-bars 800 --pattern-step-bars 200 --search-limit-to 8 --confirm-bars 10,20,30 --entry-window-bars 24,48 --prz-buffers 0.10,0.25 --candle-filters none,any_reversal,engulfing,pinbar,reclaim,strong_close --stop-buffers 0.2,0.5,0.8 --rrs 1.25,1.5,2.0 --max-hold-bars 48,96,192 --trend-filters none,with_ema,counter_ema --lowpass-radius 1.60 --lowpass-min-neighbors 7 --min-validation 12 --min-lowpass-score 0.0 --min-oos-net-r 1.0 --min-validation-net-r 0.0 --min-all-net-r 5.0 --min-avg-r 0.0 --cache-dir scripts\data_pyharmonics_top100_deep5y --output-dir scripts\pyharmonics_top100_deep5y_20260602_221233

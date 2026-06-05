@@ -1,0 +1,430 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Join our channel for more free tools: https://t.me/IndicatorsforTV
+
+//@version=6
+// ══════════════════════════════════════════════════════════
+// Adapted from "CUSTOM RANGE VOLUME PROFILE PRO" by WillyAlgoTrader...
+// ══════════════════════════════════════════════════════════
+
+indicator(
+     title              = "POC Volume Profile",
+     shorttitle         = "POC",
+     overlay            = true,
+     max_labels_count   = 500,
+     max_lines_count    = 100,
+     max_boxes_count    = 100,
+     max_bars_back      = 4900,
+     calc_bars_count    = 5000   
+)
+
+// ══════════════════════════════════════
+// CONSTANTS
+// ══════════════════════════════════════
+GRP_TIME   = "📅 Date Range"
+GRP_AUTO   = "🔄 Auto Range Mode"
+GRP_MAIN   = "⚙️ Main Settings"
+GRP_VISUAL = "🎨 Visual Settings"
+GRP_DASH   = "📊 Dashboard"
+GRP_COLORS = "🎨 Colors"
+
+TRANSPARENT = color.new(#000000, 100)
+
+// ══════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════
+
+// --- Date Range (manual mode) ---
+startTimeInput = input.time(timestamp("2026-05-25T00:00:00"), "Start Date", group = GRP_TIME, tooltip = "Start date for volume profile calculation.")
+endTimeInput   = input.time(timestamp("2026-06-31T23:59:59"), "End Date",   group = GRP_TIME, tooltip = "End date for volume profile calculation.")
+
+// --- Auto Range Mode ---
+autoRangeInput     = input.bool(true, "Enable Auto Range Mode", group = GRP_AUTO,
+     tooltip = "ON: Profile range is determined by pivot highs/lows instead of the date range.\nOFF: Manual date range is used.")
+
+pivotLenInput      = input.int(5, "Pivot Length", minval = 1, maxval = 50, group = GRP_AUTO,
+     tooltip = "Number of bars used on each side for pivot high/low detection.")
+
+showPivotHighInput = input.bool(true, "Show Pivot High Markers (🟢)", group = GRP_AUTO,
+     tooltip = "Mark pivot highs above bars with a green circle.")
+showPivotLowInput  = input.bool(true, "Show Pivot Low Markers (🔴)",  group = GRP_AUTO,
+     tooltip = "Mark pivot lows below bars with a red circle.")
+
+nthPivotInput      = input.int(5, "Nearest Nth Pivot", minval = 1, maxval = 100, group = GRP_AUTO,
+     tooltip = "Select the starting pivot.\n• Only High enabled → only pivot highs are ranked, Nth high is used as start.\n• Only Low enabled → only pivot lows are ranked, Nth low is used as start.\n• Both enabled → pivot highs and lows are combined into one list and ranked together; whichever is Nth becomes the start.\nDefault: 3")
+
+// --- Main Settings ---
+binCountInput  = input.int(40, "Profile Bins", minval = 10, maxval = 100, step = 5, group = GRP_MAIN,
+     tooltip = "Number of price levels. Higher value = more detail, lower value = smoother profile.")
+vaPercentInput = input.float(68.0, "Value Area %", minval = 1.0, maxval = 100.0, step = 1.0, group = GRP_MAIN,
+     tooltip = "Percentage of total volume that defines the Value Area. Default: 68")
+
+VA_PERCENT = vaPercentInput / 100.0
+
+// --- Visual Settings ---
+showProfileInput = input.bool(true,  "Show Volume Profile", group = GRP_VISUAL)
+showDeltaInput   = input.bool(true,  "Show Delta Profile",  group = GRP_VISUAL)
+showPocInput     = input.bool(true,  "Show POC Line",       group = GRP_VISUAL)
+showPocFillInput = input.bool(true,  "Show POC Zone Fill",  group = GRP_VISUAL)
+showVaInput      = input.bool(true,  "Show Value Area",     group = GRP_VISUAL)
+showVwapInput    = input.bool(false, "Show VWAP",           group = GRP_VISUAL)
+showLabelsInput  = input.bool(true,  "Show Range Label",    group = GRP_VISUAL)
+
+themeInput    = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = GRP_VISUAL)
+showDashInput = input.bool(true, "Show Dashboard", group = GRP_DASH)
+dashPosInput  = input.string("Top Right", "Dashboard Position",
+     options = ["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group = GRP_DASH)
+
+// --- Colors ---
+bullColorInput = input.color(#2979FF, "Buy Volume (Blue)",    inline = "colors",  group = GRP_COLORS)
+bearColorInput = input.color(#FF9100, "Sell Volume (Red)",    inline = "colors",  group = GRP_COLORS)
+baseColorInput = input.color(#90CAF9, "Base Volume",          inline = "colors2", group = GRP_COLORS)
+pocColorInput  = input.color(#FF1744, "POC Line (Red)",       inline = "colors2", group = GRP_COLORS)
+vaHighColor    = input.color(#2979FF, "VAH Line (Blue)",      inline = "colors3", group = GRP_COLORS)
+vaLowColor     = input.color(#FF9100, "VAL Line (Orange)",    inline = "colors3", group = GRP_COLORS)
+vwapColorInput = input.color(#AB47BC, "VWAP",                 inline = "colors4", group = GRP_COLORS)
+
+// ══════════════════════════════════════
+// THEME
+// ══════════════════════════════════════
+isDark = switch themeInput
+    "Dark"  => true
+    "Light" => false
+    => color.r(chart.bg_color) < 128
+
+TEXT_COLOR    = isDark ? #E0E0E0 : #1A1A1A
+TEXT_MUTED    = isDark ? color.new(#9E9E9E, 0) : color.new(#757575, 0)
+TABLE_BG      = isDark ? color.new(#131722, 5) : color.new(#FFFFFF, 5)
+TABLE_BORDER  = isDark ? color.new(#2A2E39, 0) : color.new(#D0D0D0, 0)
+TABLE_ROW_ALT = isDark ? color.new(#1C2030, 0) : color.new(#F0F4F8, 0)
+HEADER_BG     = color.new(#2962FF, 0)
+POC_FILL      = color.new(pocColorInput, 85)
+
+// ══════════════════════════════════════
+// FUNCTIONS
+// ══════════════════════════════════════
+safeDiv(float num, float den, float fallback = 0.0) =>
+    den != 0 and not na(num) and not na(den) ? num / den : fallback
+
+getDashPos(string s) =>
+    switch s
+        "Top Left"     => position.top_left
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.top_right
+
+distributeVolume(float cOpen, float cClose, float cHigh, float cLow, float cVol, float bottom, float step, int bins, array<float> volArr, array<float> buyArr, array<float> sellArr) =>
+    float candleTop   = math.max(cHigh, cLow)
+    float candleBot   = math.min(cHigh, cLow)
+    float candleRange = candleTop - candleBot
+    bool isBullCandle = cClose >= cOpen
+    if candleRange > 0 and cVol > 0
+        for k = 0 to bins - 1
+            float binLow  = bottom + k * step
+            float binHigh = binLow + step
+            float overlap = math.max(0.0, math.min(candleTop, binHigh) - math.max(candleBot, binLow))
+            if overlap > 0
+                float portion  = overlap / candleRange
+                float allocVol = cVol * portion
+                volArr.set(k, volArr.get(k) + allocVol)
+                if isBullCandle
+                    buyArr.set(k, buyArr.get(k) + allocVol)
+                else
+                    sellArr.set(k, sellArr.get(k) + allocVol)
+
+calcValueArea(array<float> volArr, float totalVol, int pocBin, float bottom, float step, int bins) =>
+    float target      = totalVol * VA_PERCENT
+    float accumulated = volArr.get(pocBin)
+    int   upperBin    = pocBin
+    int   lowerBin    = pocBin
+    int   safety      = 0
+    while accumulated < target and safety < bins
+        safety += 1
+        float upVol   = upperBin + 1 < bins ? volArr.get(upperBin + 1) : 0.0
+        float downVol = lowerBin - 1 >= 0   ? volArr.get(lowerBin - 1) : 0.0
+        if upVol >= downVol and upperBin + 1 < bins
+            upperBin    += 1
+            accumulated += upVol
+        else if lowerBin - 1 >= 0
+            lowerBin    -= 1
+            accumulated += downVol
+        else if upperBin + 1 < bins
+            upperBin    += 1
+            accumulated += upVol
+        else
+            break
+    float vaHigh = bottom + (upperBin + 1) * step
+    float vaLow  = bottom + lowerBin * step
+    [vaHigh, vaLow]
+
+// ══════════════════════════════════════
+// PIVOT DETECTION
+// ══════════════════════════════════════
+int   pLen = pivotLenInput
+
+float ph = ta.pivothigh(high, pLen, pLen)
+float pl = ta.pivotlow (low,  pLen, pLen)
+
+// Pivot high/low circle markers (when Auto Range is enabled)
+if autoRangeInput and showPivotHighInput and not na(ph)
+    label.new(bar_index[pLen], ph, "●",
+         style     = label.style_none,
+         textcolor = color.new(#00E676, 0),
+         size      = size.tiny,
+         yloc      = yloc.abovebar)
+
+if autoRangeInput and showPivotLowInput and not na(pl)
+    label.new(bar_index[pLen], pl, "●",
+         style     = label.style_none,
+         textcolor = color.new(#FF1744, 0),
+         size      = size.tiny,
+         yloc      = yloc.belowbar)
+
+// ══════════════════════════════════════
+// AUTO RANGE: Nth PIVOT SELECTION
+// ══════════════════════════════════════
+var array<int>   phBars   = array.new<int>()
+var array<float> phPrices = array.new<float>()
+var array<int>   plBars   = array.new<int>()
+var array<float> plPrices = array.new<float>()
+
+// Accumulate pivot lists as bars progress
+if not na(ph)
+    phBars.push(bar_index[pLen])
+    phPrices.push(ph)
+
+if not na(pl)
+    plBars.push(bar_index[pLen])
+    plPrices.push(pl)
+
+// ══════════════════════════════════════
+// RANGE TRACKING LOGIC
+// ══════════════════════════════════════
+var int   startIdx  = na
+var int   endIdx    = na
+var float rangeHigh = na
+var float rangeLow  = na
+
+if autoRangeInput
+    if barstate.islast
+        int nth = nthPivotInput
+
+        // Determine which pivot types to include based on toggle state
+        bool useHigh = showPivotHighInput or not showPivotLowInput
+        bool useLow  = showPivotLowInput  or not showPivotHighInput
+
+        // Build combined pivot list
+        array<int> combinedBars = array.new<int>()
+
+        if useHigh
+            int sz = phBars.size()
+            for i = 0 to sz - 1
+                combinedBars.push(phBars.get(i))
+
+        if useLow
+            int sz = plBars.size()
+            for i = 0 to sz - 1
+                combinedBars.push(plBars.get(i))
+
+        // Insertion sort: descending by bar_index (nearest pivot first)
+        int csz = combinedBars.size()
+        if csz > 1
+            for i = 1 to csz - 1
+                int key = combinedBars.get(i)
+                int j   = i - 1
+                while j >= 0 and combinedBars.get(j) < key
+                    combinedBars.set(j + 1, combinedBars.get(j))
+                    j -= 1
+                combinedBars.set(j + 1, key)
+
+        // Select Nth element (1-indexed → 0-indexed: nth - 1)
+        int autoStart = na
+        if csz >= nth
+            autoStart := combinedBars.get(nth - 1)
+
+        if not na(autoStart)
+            startIdx  := autoStart
+            endIdx    := bar_index
+
+            // Calculate rangeHigh / rangeLow from autoStart to last bar
+            float rH = low[bar_index - autoStart]
+            float rL = high[bar_index - autoStart]
+            int   span = bar_index - autoStart
+            if span > 0 and span < 4900
+                for i = 0 to span
+                    float h = nz(high[i],  close[i])
+                    float l = nz(low[i],   close[i])
+                    rH := math.max(rH, h)
+                    rL := math.min(rL, l)
+            rangeHigh := rH
+            rangeLow  := rL
+
+else
+    // Manual date range (original logic — unchanged)
+    bool inRange = time >= startTimeInput and time <= endTimeInput
+    if inRange
+        if na(startIdx)
+            startIdx := bar_index
+        endIdx    := bar_index
+        rangeHigh := na(rangeHigh) ? high : math.max(rangeHigh, high)
+        rangeLow  := na(rangeLow)  ? low  : math.min(rangeLow,  low)
+
+// ══════════════════════════════════════
+// SINGLE PROFILE DRAWING (ON LAST BAR)
+// ══════════════════════════════════════
+var float lastPocPrice = na
+var float lastVaHigh   = na
+var float lastVaLow    = na
+var float lastVwap     = na
+var float lastTotalVol = na
+var float lastDelta    = na
+
+if barstate.islast and not na(startIdx)
+    int finalEnd = na(endIdx) ? bar_index : endIdx
+    int barSpan  = finalEnd - startIdx
+
+    if barSpan > 0 and barSpan < 4900
+        int   bins = binCountInput
+        float step = (rangeHigh - rangeLow) / bins
+
+        array<float> volBins  = array.new<float>(bins, 0.0)
+        array<float> buyBins  = array.new<float>(bins, 0.0)
+        array<float> sellBins = array.new<float>(bins, 0.0)
+
+        float sumPV = 0.0
+        float sumV  = 0.0
+
+        for i = (bar_index - finalEnd) to (bar_index - startIdx)
+            float cVol = nz(volume[i], 0.0)
+            float cC   = nz(close[i],  0.0)
+            float cH   = na(high[i])  ? cC : high[i]
+            float cL   = na(low[i])   ? cC : low[i]
+            float cO   = na(open[i])  ? cC : open[i]
+
+            distributeVolume(cO, cC, cH, cL, cVol, rangeLow, step, bins, volBins, buyBins, sellBins)
+
+            float typPrice = (cH + cL + cC) / 3.0
+            sumPV += typPrice * cVol
+            sumV  += cVol
+
+        float totalVol = volBins.sum()
+        float maxVol   = volBins.max()
+
+        int pocBin = 0
+        if maxVol > 0
+            for k = 0 to bins - 1
+                if volBins.get(k) == maxVol
+                    pocBin := k
+                    break
+
+        float pocPrice = rangeLow + pocBin * step + step / 2.0
+
+        float vaH = rangeHigh
+        float vaL = rangeLow
+        if totalVol > 0
+            [calcVaH, calcVaL] = calcValueArea(volBins, totalVol, pocBin, rangeLow, step, bins)
+            vaH := calcVaH
+            vaL := calcVaL
+
+        float rangeVwap = safeDiv(sumPV, sumV, pocPrice)
+
+        lastPocPrice := pocPrice
+        lastVaHigh   := vaH
+        lastVaLow    := vaL
+        lastVwap     := rangeVwap
+        lastTotalVol := totalVol
+        float totalBuy  = buyBins.sum()
+        float totalSell = sellBins.sum()
+        lastDelta := safeDiv(totalBuy - totalSell, totalVol, 0.0) * 100.0
+
+        int drawSpan     = math.max(int(barSpan * 0.35), 2)
+        int labelOffset  = finalEnd + 25
+        int transValue   = 60
+        int vaTransValue = 10
+
+        for k = 0 to bins - 1
+            float binL = rangeLow + k * step
+            float binH = binL + step
+
+            float volRatio = safeDiv(volBins.get(k), maxVol, 0.0)
+            int profWidth  = math.max(int(volRatio * drawSpan), 0)
+
+            float buyV        = buyBins.get(k)
+            float sellV       = sellBins.get(k)
+            float totalBinVol = buyV + sellV
+
+            float buyRatio = safeDiv(buyV, totalBinVol, 0.0)
+            int buyWidth   = math.max(int(profWidth * buyRatio), 0)
+            int sellWidth  = math.max(profWidth - buyWidth, 0)
+
+            bool inVA = binL >= vaL and binH <= vaH
+
+            if showProfileInput
+                if showDeltaInput
+                    if buyWidth > 0
+                        box.new(startIdx, binH, startIdx + buyWidth, binL, na, 0, bgcolor = color.new(bullColorInput, inVA ? vaTransValue : transValue))
+                    if sellWidth > 0
+                        box.new(startIdx + buyWidth, binH, startIdx + buyWidth + sellWidth, binL, na, 0, bgcolor = color.new(bearColorInput, inVA ? vaTransValue : transValue))
+                else
+                    if profWidth > 0
+                        box.new(startIdx, binH, startIdx + profWidth, binL, na, 0, bgcolor = color.new(baseColorInput, inVA ? vaTransValue : transValue))
+
+            if volRatio >= 0.99 and showPocInput and showPocFillInput
+                box.new(startIdx, binH, finalEnd, binL, na, 0, bgcolor = POC_FILL)
+
+        if showPocInput
+            line.new(startIdx, pocPrice, labelOffset, pocPrice, color = pocColorInput, width = 2, style = line.style_solid)
+            label.new(labelOffset, pocPrice, "POC: " + str.tostring(pocPrice, format.mintick), style = label.style_label_right, color = #2979FF, textcolor = color.white, size = size.small)
+
+        if showVaInput and totalVol > 0
+            line.new(startIdx, vaH, labelOffset, vaH, color = vaHighColor, style = line.style_dashed, width = 2)
+            label.new(labelOffset, vaH, "VAH: " + str.tostring(vaH, format.mintick), style = label.style_label_right, color = #2979FF, textcolor = color.white, size = size.small)
+
+            line.new(startIdx, vaL, labelOffset, vaL, color = vaLowColor, style = line.style_dashed, width = 2)
+            label.new(labelOffset, vaL, "VAL: " + str.tostring(vaL, format.mintick), style = label.style_label_right, color = #FF9100, textcolor = color.white, size = size.small)
+
+        if showVwapInput and totalVol > 0
+            line.new(startIdx, rangeVwap, finalEnd, rangeVwap, color = vwapColorInput, style = line.style_solid, width = 2)
+
+        if showLabelsInput
+            string deltaLblStr = str.tostring(lastDelta, "#.0") + "%"
+            string tipText = "Range: " + str.tostring(barSpan) + " Bars\nTotal Vol: " + str.tostring(totalVol, format.volume) + "\nDelta: " + deltaLblStr + "\nPOC: " + str.tostring(pocPrice, format.mintick) + "\nVWAP: " + str.tostring(rangeVwap, format.mintick)
+            label.new(finalEnd, rangeLow, "Vol: " + str.tostring(totalVol, format.volume), style = label.style_label_up, color = TRANSPARENT, textcolor = TEXT_COLOR, size = size.normal, tooltip = tipText)
+
+// ══════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════
+if showDashInput and barstate.islast and not na(startIdx)
+    var dashTable = table.new(getDashPos(dashPosInput), 2, 8, TABLE_BG, TABLE_BORDER, 1, TABLE_BORDER, 1)
+
+    table.cell(dashTable, 0, 0, "Range Profile Pro", text_color = #FFFFFF, bgcolor = HEADER_BG, text_size = size.small, text_halign = text.align_center)
+    table.merge_cells(dashTable, 0, 0, 1, 0)
+
+    string modeStr = autoRangeInput ? "Auto (Pivot)" : "Manual (Date)"
+    table.cell(dashTable, 0, 1, "Mode", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    table.cell(dashTable, 1, 1, modeStr, text_color = autoRangeInput ? color.new(#00E676, 0) : TEXT_COLOR, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+
+    string pocStr = na(lastPocPrice) ? "—" : str.tostring(lastPocPrice, format.mintick)
+    table.cell(dashTable, 0, 2, "POC", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_BG)
+    table.cell(dashTable, 1, 2, pocStr, text_color = pocColorInput, text_size = size.small, bgcolor = TABLE_BG)
+
+    string vaStr = na(lastVaHigh) ? "—" : str.tostring(lastVaLow, format.mintick) + " — " + str.tostring(lastVaHigh, format.mintick)
+    table.cell(dashTable, 0, 3, "VA 68%", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    table.cell(dashTable, 1, 3, vaStr, text_color = vaHighColor, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+
+    string vwapStr = na(lastVwap) ? "—" : str.tostring(lastVwap, format.mintick)
+    table.cell(dashTable, 0, 4, "VWAP", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_BG)
+    table.cell(dashTable, 1, 4, vwapStr, text_color = vwapColorInput, text_size = size.small, bgcolor = TABLE_BG)
+
+    string volStr = na(lastTotalVol) ? "—" : str.tostring(lastTotalVol, format.volume)
+    table.cell(dashTable, 0, 5, "Volume", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    table.cell(dashTable, 1, 5, volStr, text_color = TEXT_COLOR, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+
+    string deltaStr = na(lastDelta) ? "—" : str.tostring(lastDelta, "#.0") + "%"
+    color deltaColor = nz(lastDelta, 0.0) >= 0 ? bullColorInput : bearColorInput
+    table.cell(dashTable, 0, 6, "Delta", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_BG)
+    table.cell(dashTable, 1, 6, deltaStr, text_color = deltaColor, text_size = size.small, bgcolor = TABLE_BG)
+
+    table.cell(dashTable, 0, 7, "Bars", text_color = TEXT_MUTED, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+    table.cell(dashTable, 1, 7, str.tostring(na(endIdx) ? 0 : endIdx - startIdx), text_color = TEXT_COLOR, text_size = size.small, bgcolor = TABLE_ROW_ALT)
+
+

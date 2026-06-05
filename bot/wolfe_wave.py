@@ -16,6 +16,8 @@ from scripts.backtest_wolfe_wave import (
     WolfeConfig,
     bybit_symbol,
     ensure_ohlcv_frame,
+    fee_aware_stop_price,
+    fee_to_price_risk,
     find_wolfe_signals,
     normalize_timeframe,
 )
@@ -26,7 +28,10 @@ log = logging.getLogger("mm")
 
 WOLFE_WAVE_INTERVAL = "5m"
 WOLFE_WAVE_BYBIT_INTERVAL = "5"
-DEFAULT_WOLFE_WAVE_SYMBOLS = "BTCUSDT,ETHUSDT,LINKUSDT,LTCUSDT,SOLUSDT,UNIUSDT,XRPUSDT"
+DEFAULT_WOLFE_WAVE_SYMBOLS = (
+    "BTCUSDT,ETHUSDT,LINKUSDT,LTCUSDT,SOLUSDT,UNIUSDT,XRPUSDT,"
+    "1000PEPEUSDT,BNBUSDT,DOGEUSDT,STXUSDT"
+)
 DEFAULT_WOLFE_WAVE_CONFIG = WolfeConfig(
     exec_tf=WOLFE_WAVE_INTERVAL,
     pattern_tf="1h",
@@ -113,6 +118,7 @@ def load_wolfe_wave_configs(
             f"[wolfe] {normalized}: config loaded pattern_tf={cfg.pattern_tf} "
             f"pivots={cfg.pivot_method}/{cfg.pivot_source} min_score={cfg.min_score:.1f} "
             f"trend={cfg.trend_filter} regime={cfg.regime_filter} "
+            f"fee_aware_stop={cfg.fee_aware_stop} max_fee_risk={cfg.max_fee_to_price_risk:.1%} "
             f"directions={'L' if cfg.allow_longs else '-'}{'S' if cfg.allow_shorts else '-'}"
         )
     return out
@@ -152,13 +158,20 @@ class WolfeWaveEngine:
         target: float,
         risk: float,
         threshold: float,
+        target_rr_planned: float | None = None,
+        fee_risk: float | None = None,
+        entry_risk_pct: float | None = None,
+        stop_adjusted_for_fee: bool | None = None,
     ) -> dict:
+        planned_rr = float(signal.target_rr_planned if target_rr_planned is None else target_rr_planned)
         return {
             "strategy": "wolfe_wave",
             "signal": signal.direction,
             "entry": entry,
             "model_entry": float(signal.entry_price),
             "sl": stop,
+            "model_sl": float(signal.stop_price),
+            "structural_sl": float(signal.structural_stop_price),
             "tp1": target,
             "take_profit": target,
             "trail_dist": risk,
@@ -169,7 +182,10 @@ class WolfeWaveEngine:
             "pattern_tf": signal.pattern_tf,
             "pivot_method": signal.pivot_method,
             "trend_context": signal.trend_context,
-            "target_rr_planned": float(signal.target_rr_planned),
+            "target_rr_planned": planned_rr,
+            "fee_to_price_risk": None if fee_risk is None else float(fee_risk),
+            "entry_risk_pct": None if entry_risk_pct is None else float(entry_risk_pct),
+            "stop_adjusted_for_fee": bool(signal.stop_adjusted_for_fee if stop_adjusted_for_fee is None else stop_adjusted_for_fee),
             "score": float(signal.score),
             "p5_break_atr": float(signal.p5_break_atr),
             "symmetry_ratio": float(signal.symmetry_ratio),
@@ -179,6 +195,9 @@ class WolfeWaveEngine:
             "feature_columns": [
                 "score",
                 "target_rr_planned",
+                "fee_to_price_risk",
+                "entry_risk_pct",
+                "stop_adjusted_for_fee",
                 "p5_break_atr",
                 "symmetry_ratio",
                 "epa_slope_atr",
@@ -187,7 +206,10 @@ class WolfeWaveEngine:
             ],
             "feature_snapshot": {
                 "score": float(signal.score),
-                "target_rr_planned": float(signal.target_rr_planned),
+                "target_rr_planned": planned_rr,
+                "fee_to_price_risk": None if fee_risk is None else float(fee_risk),
+                "entry_risk_pct": None if entry_risk_pct is None else float(entry_risk_pct),
+                "stop_adjusted_for_fee": bool(signal.stop_adjusted_for_fee if stop_adjusted_for_fee is None else stop_adjusted_for_fee),
                 "p5_break_atr": float(signal.p5_break_atr),
                 "symmetry_ratio": float(signal.symmetry_ratio),
                 "epa_slope_atr": float(signal.epa_slope_atr),
@@ -230,7 +252,12 @@ class WolfeWaveEngine:
 
         direction = signal.direction
         entry = float(frame["close"].iloc[-1])
-        stop = float(signal.stop_price)
+        stop, live_stop_adjusted = fee_aware_stop_price(
+            direction=direction,
+            entry_price=entry,
+            structural_stop_price=float(signal.stop_price),
+            cfg=state.config,
+        )
         target = float(signal.target_price)
         risk = abs(entry - stop)
         if risk <= 0 or not math.isfinite(risk):
@@ -239,6 +266,13 @@ class WolfeWaveEngine:
             return None
         if direction == "short" and (entry >= stop or entry <= target):
             return None
+        live_rr = (target - entry) / risk if direction == "long" else (entry - target) / risk
+        if live_rr < state.config.min_rr or live_rr > state.config.max_rr:
+            return None
+        live_fee_risk = fee_to_price_risk(entry, stop, state.config)
+        if state.config.max_fee_to_price_risk > 0 and live_fee_risk > state.config.max_fee_to_price_risk:
+            return None
+        entry_risk_pct = risk / entry * 100.0 if entry > 0 else math.inf
 
         payload = self._signal_payload(
             signal,
@@ -247,6 +281,10 @@ class WolfeWaveEngine:
             target=target,
             risk=risk,
             threshold=state.config.min_score,
+            target_rr_planned=live_rr,
+            fee_risk=live_fee_risk,
+            entry_risk_pct=entry_risk_pct,
+            stop_adjusted_for_fee=bool(signal.stop_adjusted_for_fee or live_stop_adjusted),
         )
         if signal.score < state.config.min_score:
             payload["rejected"] = True

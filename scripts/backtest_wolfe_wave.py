@@ -134,6 +134,56 @@ def round_to_mintick(value: float, mintick: float) -> float:
     return round(round(float(value) / mintick) * mintick, 10)
 
 
+def round_stop_away_from_entry(direction: str, value: float, mintick: float) -> float:
+    if mintick <= 0:
+        return float(value)
+    scaled = float(value) / mintick
+    if direction == "long":
+        return round(math.floor(scaled) * mintick, 10)
+    return round(math.ceil(scaled) * mintick, 10)
+
+
+def round_trip_cost_rate(cfg: "WolfeConfig") -> float:
+    return max((2.0 * cfg.fee_bps_side + 2.0 * cfg.slippage_bps_side) / 10_000.0, 0.0)
+
+
+def fee_to_price_risk(entry_price: float, stop_price: float, cfg: "WolfeConfig") -> float:
+    risk = abs(float(entry_price) - float(stop_price))
+    if risk <= 0:
+        return math.inf
+    return round_trip_cost_rate(cfg) * float(entry_price) / risk
+
+
+def minimum_fee_valid_risk(entry_price: float, cfg: "WolfeConfig") -> float:
+    max_ratio = float(cfg.max_fee_to_price_risk)
+    if max_ratio <= 0:
+        return 0.0
+    return round_trip_cost_rate(cfg) * float(entry_price) / max_ratio
+
+
+def fee_aware_stop_price(
+    *,
+    direction: str,
+    entry_price: float,
+    structural_stop_price: float,
+    cfg: "WolfeConfig",
+) -> tuple[float, bool]:
+    stop = round_stop_away_from_entry(direction, structural_stop_price, cfg.mintick)
+    if not cfg.fee_aware_stop:
+        return stop, False
+    required_risk = minimum_fee_valid_risk(entry_price, cfg)
+    if required_risk <= 0:
+        return stop, False
+    current_risk = abs(float(entry_price) - stop)
+    if current_risk >= required_risk:
+        return stop, False
+    if direction == "long":
+        adjusted = float(entry_price) - required_risk
+    else:
+        adjusted = float(entry_price) + required_risk
+    return round_stop_away_from_entry(direction, adjusted, cfg.mintick), True
+
+
 def fetch_bybit_klines(
     symbol: str,
     interval: str,
@@ -357,6 +407,8 @@ class WolfeConfig:
     mintick: float = 0.1
     fee_bps_side: float = 5.5
     slippage_bps_side: float = 1.0
+    max_fee_to_price_risk: float = 0.25
+    fee_aware_stop: bool = True
     risk_fraction: float = 0.01
     min_entry_risk_pct: float = 0.05
     max_entry_risk_pct: float = 3.5
@@ -377,8 +429,12 @@ class WolfeSignal:
     entry_index: int
     entry_price: float
     stop_price: float
+    structural_stop_price: float
     target_price: float
     target_rr_planned: float
+    fee_to_price_risk: float
+    entry_risk_pct: float
+    stop_adjusted_for_fee: bool
     score: float
     p5_break_atr: float
     symmetry_ratio: float
@@ -408,8 +464,12 @@ class WolfeTrade:
     entry_price: float
     exit_price: float
     stop_price: float
+    structural_stop_price: float
     target_price: float
     target_rr_planned: float
+    fee_to_price_risk: float
+    entry_risk_pct: float
+    stop_adjusted_for_fee: bool
     r_multiple_gross: float
     r_multiple_net: float
     return_pct: float
@@ -875,18 +935,27 @@ def _find_entry(
         atr = max(float(row.get("atr", math.nan)), 1e-9)
         stop_buffer = max(cfg.stop_atr_buffer * atr, cfg.min_stop_atr * atr)
         if direction == "long":
-            stop = round_to_mintick(p5.price - stop_buffer, cfg.mintick)
+            structural_stop = p5.price - stop_buffer
         else:
-            stop = round_to_mintick(p5.price + stop_buffer, cfg.mintick)
+            structural_stop = p5.price + stop_buffer
         entry = round_to_mintick(close, cfg.mintick)
+        stop, stop_adjusted = fee_aware_stop_price(
+            direction=direction,
+            entry_price=entry,
+            structural_stop_price=structural_stop,
+            cfg=cfg,
+        )
         risk = abs(entry - stop)
         if risk <= 0:
             continue
         risk_atr = risk / atr
         risk_pct = risk / entry * 100.0 if entry > 0 else math.inf
+        fee_risk = fee_to_price_risk(entry, stop, cfg)
         if risk_atr > cfg.max_stop_atr:
             continue
         if risk_pct < cfg.min_entry_risk_pct or risk_pct > cfg.max_entry_risk_pct:
+            continue
+        if cfg.max_fee_to_price_risk > 0 and fee_risk > cfg.max_fee_to_price_risk:
             continue
         target = _target_from_epa(
             direction=direction,
@@ -919,8 +988,12 @@ def _find_entry(
             entry_index=int(entry_idx),
             entry_price=float(entry),
             stop_price=float(stop),
+            structural_stop_price=float(round_stop_away_from_entry(direction, structural_stop, cfg.mintick)),
             target_price=float(target_price),
             target_rr_planned=float(target_rr),
+            fee_to_price_risk=float(fee_risk),
+            entry_risk_pct=float(risk_pct),
+            stop_adjusted_for_fee=bool(stop_adjusted),
             score=float(score),
             p5_break_atr=float(valid["p5_break_atr"]),
             symmetry_ratio=float(valid["symmetry_ratio"]),
@@ -987,8 +1060,12 @@ def signal_rows(signals: list[WolfeSignal]) -> pd.DataFrame:
             "entry_index": sig.entry_index,
             "entry_price": sig.entry_price,
             "stop_price": sig.stop_price,
+            "structural_stop_price": sig.structural_stop_price,
             "target_price": sig.target_price,
             "target_rr_planned": sig.target_rr_planned,
+            "fee_to_price_risk": sig.fee_to_price_risk,
+            "entry_risk_pct": sig.entry_risk_pct,
+            "stop_adjusted_for_fee": sig.stop_adjusted_for_fee,
             "score": sig.score,
             "p5_break_atr": sig.p5_break_atr,
             "symmetry_ratio": sig.symmetry_ratio,
@@ -1014,7 +1091,7 @@ def signal_rows(signals: list[WolfeSignal]) -> pd.DataFrame:
 def _cost_r(entry_price: float, risk: float, cfg: WolfeConfig) -> float:
     if risk <= 0:
         return 0.0
-    return ((2.0 * cfg.fee_bps_side) + (2.0 * cfg.slippage_bps_side)) / 10_000.0 * entry_price / risk
+    return round_trip_cost_rate(cfg) * entry_price / risk
 
 
 def run_backtest(
@@ -1093,8 +1170,12 @@ def run_backtest(
                 entry_price=float(entry),
                 exit_price=float(exit_price),
                 stop_price=float(stop),
+                structural_stop_price=float(sig.structural_stop_price),
                 target_price=float(target),
                 target_rr_planned=float(sig.target_rr_planned),
+                fee_to_price_risk=float(sig.fee_to_price_risk),
+                entry_risk_pct=float(sig.entry_risk_pct),
+                stop_adjusted_for_fee=bool(sig.stop_adjusted_for_fee),
                 r_multiple_gross=float(gross_r),
                 r_multiple_net=float(net_r),
                 return_pct=float(cfg.risk_fraction * net_r),
@@ -1869,6 +1950,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refine-random-seed", type=int, default=725)
     parser.add_argument("--pattern-tfs", help="Comma-separated pattern timeframes to include in tuning/refinement.")
     parser.add_argument("--regime-filters", help="Comma-separated regime filters to include in tuning/refinement.")
+    parser.add_argument("--disable-fee-aware-stop", action="store_true")
+    parser.add_argument("--max-fee-to-price-risk", type=float)
     parser.add_argument("--disable-lowpass", action="store_true")
     parser.add_argument("--lowpass-radius", type=float, default=0.45)
     parser.add_argument("--lowpass-min-neighbors", type=int, default=9)
@@ -1962,10 +2045,15 @@ def main() -> None:
             cfg = WolfeConfig.from_mapping({**asdict(cfg), "mintick": fetch_bybit_mintick(args.symbol)})
         except Exception as exc:  # noqa: BLE001 - research can still run with config/default mintick.
             print(f"{args.symbol}: mintick lookup failed ({exc}); using mintick={cfg.mintick:g}", flush=True)
+    if args.disable_fee_aware_stop:
+        cfg = WolfeConfig.from_mapping({**asdict(cfg), "fee_aware_stop": False})
+    if args.max_fee_to_price_risk is not None:
+        cfg = WolfeConfig.from_mapping({**asdict(cfg), "max_fee_to_price_risk": float(args.max_fee_to_price_risk)})
     print(
         f"{args.symbol}: loaded {len(frame)} {args.interval} bars "
         f"{pd.Timestamp(frame['open_time'].iloc[0]).date()} -> {pd.Timestamp(frame['open_time'].iloc[-1]).date()} "
-        f"mintick={cfg.mintick:g}"
+        f"mintick={cfg.mintick:g} fee_aware_stop={cfg.fee_aware_stop} "
+        f"max_fee_to_price_risk={cfg.max_fee_to_price_risk:g}"
     )
 
     if args.tune:
