@@ -62,6 +62,27 @@ class SessionOrbModel:
     feature_columns: list[str]
     threshold: float
     configs: list[OrbConfig]
+    candidate_filter: str
+    min_entry_risk_atr: float
+
+
+def _min_entry_risk_atr_for_filter(name: str) -> float:
+    normalized = str(name or "").strip().lower()
+    if normalized in {"judas_fvg_risk25", "asia_ny_judas_fvg_risk25"}:
+        return 2.5
+    if normalized == "judas_fvg_risk2":
+        return 2.0
+    return 0.0
+
+
+def _session_orb_min_entry_risk_atr(candidate_filter: str) -> float:
+    raw = os.environ.get("SESSION_ORB_MIN_ENTRY_RISK_ATR", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            log.warning(f"[session_orb] invalid SESSION_ORB_MIN_ENTRY_RISK_ATR={raw!r}; using model filter")
+    return _min_entry_risk_atr_for_filter(candidate_filter)
 
 
 class SessionOrbState:
@@ -103,16 +124,22 @@ def load_session_orb_models(
             payload = joblib.load(path)
             configs = [OrbConfig(**cfg) for cfg in payload["selected_configs"]]
             threshold = float(threshold_override if threshold_override is not None else payload["threshold"])
+            model_config = payload.get("config") or {}
+            candidate_filter = str(model_config.get("candidate_filter") or "judas_fvg_risk2")
+            min_entry_risk_atr = _session_orb_min_entry_risk_atr(candidate_filter)
             out[symbol] = SessionOrbModel(
                 symbol=symbol,
                 model=payload["model"],
                 feature_columns=list(payload["feature_columns"]),
                 threshold=threshold,
                 configs=configs,
+                candidate_filter=candidate_filter,
+                min_entry_risk_atr=min_entry_risk_atr,
             )
             log.info(
                 f"[session_orb] {symbol}: model loaded threshold={threshold:.2f} "
-                f"features={len(payload['feature_columns'])} configs={len(configs)}"
+                f"features={len(payload['feature_columns'])} configs={len(configs)} "
+                f"candidate_filter={candidate_filter} min_entry_risk_atr={min_entry_risk_atr:.2f}"
             )
         except Exception as exc:
             log.error(f"[session_orb] {symbol}: failed to load model {path}: {exc}")
@@ -345,7 +372,10 @@ class SessionOrbEngine:
             candidates["ml_prob"] = state.model.model.predict_proba(
                 candidates[state.model.feature_columns].astype(float)
             )[:, 1]
-            row = candidates.sort_values("ml_prob", ascending=False).iloc[0]
+            eligible = candidates[
+                candidates["entry_risk_atr"].astype(float) >= float(state.model.min_entry_risk_atr)
+            ].copy()
+            row = (eligible if not eligible.empty else candidates).sort_values("ml_prob", ascending=False).iloc[0]
         except Exception as exc:
             log.warning(f"[session_orb] {state.symbol}: signal evaluation failed: {exc}")
             return None
@@ -376,10 +406,17 @@ class SessionOrbEngine:
             "exit_style": "fixed_tp",
             "prob": prob,
             "threshold": state.model.threshold,
+            "score": prob,
+            "selection_score": prob,
             "entry_time": entry_time.isoformat(),
+            "signal_time": entry_time.isoformat(),
             "session": str(row["session"]),
             "or_minutes": int(row["or_minutes"]),
             "variant": str(row["variant"]),
+            "rr": float(row["rr"]),
+            "max_hold_bars": int(row["max_hold_bars"]),
+            "candidate_filter": state.model.candidate_filter,
+            "min_entry_risk_atr": float(state.model.min_entry_risk_atr),
             "entry_risk_atr": float(row["entry_risk_atr"]),
             "sweep_depth_atr": float(row["sweep_depth_atr"]),
             "fvg_bottom": float(row["fvg_bottom"]),
@@ -387,6 +424,13 @@ class SessionOrbEngine:
             "feature_columns": list(state.model.feature_columns),
             "feature_snapshot": _feature_snapshot(row, state.model.feature_columns),
         }
+        if float(row["entry_risk_atr"]) < float(state.model.min_entry_risk_atr):
+            sig["rejected"] = True
+            sig["reject_reason"] = (
+                f"entry_risk_atr {float(row['entry_risk_atr']):.2f} below "
+                f"minimum {state.model.min_entry_risk_atr:.2f}"
+            )
+            return sig
         if prob < state.model.threshold:
             sig["rejected"] = True
             sig["reject_reason"] = f"ML probability {prob:.3f} below threshold {state.model.threshold:.2f}"

@@ -44,6 +44,10 @@ services:
       TURTLE_MODELS_DIR: /app/turtle_models
       TURTLE_LEADERBOARD_PATH: /app/turtle_leaderboard.csv
       SESSION_ORB_MODELS_DIR: /app/session_orb_models
+      ENABLE_GGSHOT_227: "true"
+      GGSHOT_227_SYMBOLS: BTCUSDT,BNBUSDT
+      GGSHOT_227_CONFIG_PATH: /app/configs/ggshot_227_configs.json
+      GGSHOT_227_WARMUP_BARS: "20000"
       LOG_DIR: /app/logs
     depends_on:
       - rl-exec-bot

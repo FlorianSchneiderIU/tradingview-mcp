@@ -23,6 +23,7 @@ from scripts.experiment_session_orb import (  # noqa: E402
     load_cached_symbol,
     metrics,
     parse_thresholds,
+    select_scored_trades,
     train_ml_ranker,
 )
 
@@ -567,16 +568,19 @@ def apply_candidate_filter(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     return out[mask].copy()
 
 
-def select_ranked_trades(scored: pd.DataFrame, *, threshold: float, split: pd.Timestamp) -> pd.DataFrame:
-    if scored.empty or "ml_prob" not in scored.columns:
-        return pd.DataFrame(columns=scored.columns)
-    selected_parts = []
-    eligible = scored[scored["ml_prob"] >= threshold].copy()
-    for _, group in eligible.groupby("session_id", sort=True):
-        selected_parts.append(group.sort_values("ml_prob", ascending=False).head(1))
-    selected = pd.concat(selected_parts, ignore_index=True) if selected_parts else pd.DataFrame(columns=scored.columns)
-    selected["sample"] = np.where(pd.to_datetime(selected["entry_time"], utc=True) < split, "train", "oos")
-    return selected
+def select_ranked_trades(
+    scored: pd.DataFrame,
+    *,
+    threshold: float,
+    split: pd.Timestamp,
+    selection_mode: str = "nonoverlap",
+) -> pd.DataFrame:
+    return select_scored_trades(
+        scored,
+        threshold=threshold,
+        split=split,
+        selection_mode=selection_mode,
+    )
 
 
 def main() -> None:
@@ -592,6 +596,7 @@ def main() -> None:
     parser.add_argument("--fee-bps-per-side", type=float, default=6.5)
     parser.add_argument("--top-train-variants", type=int, default=24)
     parser.add_argument("--thresholds", default="0.45,0.50,0.55,0.60,0.65,0.70")
+    parser.add_argument("--selection-mode", choices=["session_best", "signal_best", "nonoverlap", "all"], default="nonoverlap")
     parser.add_argument(
         "--ml-candidate-filter",
         choices=["none", "judas_fvg_risk2", "judas_fvg_risk25", "asia_ny_judas_fvg_risk25"],
@@ -648,13 +653,23 @@ def main() -> None:
     ml_candidates.to_csv(candidates_path, index=False)
     print(f"Wrote {candidates_path} ({len(ml_candidates)} rows after filter={args.ml_candidate_filter})", flush=True)
 
-    ml_table, scored, ml_cols = train_ml_ranker(ml_candidates, split=split, thresholds=parse_thresholds(args.thresholds))
+    ml_table, scored, ml_cols = train_ml_ranker(
+        ml_candidates,
+        split=split,
+        thresholds=parse_thresholds(args.thresholds),
+        selection_mode=args.selection_mode,
+    )
     ml_path = args.output_prefix.with_name(args.output_prefix.name + "_ml_thresholds.csv")
     scored_path = args.output_prefix.with_name(args.output_prefix.name + "_ml_scored_candidates.csv")
     selected_path = args.output_prefix.with_name(args.output_prefix.name + f"_ml_selected_t{args.selected_threshold:.2f}.csv")
     ml_table.to_csv(ml_path, index=False)
     scored.to_csv(scored_path, index=False)
-    selected = select_ranked_trades(scored, threshold=args.selected_threshold, split=split)
+    selected = select_ranked_trades(
+        scored,
+        threshold=args.selected_threshold,
+        split=split,
+        selection_mode=args.selection_mode,
+    )
     selected.to_csv(selected_path, index=False)
     print(f"Wrote {ml_path}", flush=True)
     print(f"Wrote {scored_path}", flush=True)

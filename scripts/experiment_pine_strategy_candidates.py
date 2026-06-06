@@ -316,7 +316,12 @@ def simulate_signals(
         risk_pct = risk / entry * 100.0 if entry > 0 else math.nan
         if not math.isfinite(risk_pct) or risk_pct < min_risk_pct:
             continue
-        target = entry + direction * risk * rr
+        explicit_target = signal.get("target")
+        target = float(explicit_target) if explicit_target is not None and math.isfinite(float(explicit_target)) else entry + direction * risk * rr
+        if direction > 0 and target <= entry:
+            continue
+        if direction < 0 and target >= entry:
+            continue
         last = min(n - 1, entry_idx + max_hold_bars)
         exit_idx = last
         exit_price = float(close[last])
@@ -764,6 +769,138 @@ def signals_demarker_exhaustion(frame: pd.DataFrame, ctx: dict[str, np.ndarray],
     return out
 
 
+def signals_ggshot_227(frame: pd.DataFrame, ctx: dict[str, np.ndarray], spec: CandidateSpec) -> list[dict[str, Any]]:
+    bb_period = int(spec.params.get("bb_period", 100))
+    bb_dev = float(spec.params.get("bb_dev", 1.5))
+    sensitivity = int(spec.params.get("sensitivity", 200))
+    filter_mode = str(spec.params.get("filter_mode", "none")).strip().lower()
+    tp_pct = float(spec.params.get("tp_pct", 1.1))
+    sl_pct = float(spec.params.get("sl_pct", 1.5))
+    rsi_len = int(spec.params.get("rsi_len", 7))
+    top_rsi = float(spec.params.get("top_rsi", 45.0))
+    bot_rsi = float(spec.params.get("bot_rsi", 10.0))
+    atr_len = int(spec.params.get("atr_len", 5))
+    atr_ma_len = int(spec.params.get("atr_ma_len", 5))
+    direction_mode = str(spec.params.get("direction", "both")).strip().lower()
+
+    open_ = frame["open"].to_numpy(dtype=float)
+    high = frame["high"].to_numpy(dtype=float)
+    low = frame["low"].to_numpy(dtype=float)
+    close = frame["close"].to_numpy(dtype=float)
+    n = len(frame)
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(bb_period, min_periods=bb_period).mean().to_numpy(dtype=float)
+    bb_std = close_series.rolling(bb_period, min_periods=bb_period).std(ddof=0).to_numpy(dtype=float)
+    bb_upper = bb_mid + bb_std * bb_dev
+    bb_lower = bb_mid - bb_std * bb_dev
+    atr_filter = rma(true_range(high, low, close), atr_len)
+    atr_ma = sma(atr_filter, atr_ma_len)
+    rsi_filter = rsi(close, rsi_len)
+    high_line = pd.Series(high).rolling(sensitivity, min_periods=sensitivity).max().to_numpy(dtype=float)
+    low_line = pd.Series(low).rolling(sensitivity, min_periods=sensitivity).min().to_numpy(dtype=float)
+    imba_trend_line = high_line - (high_line - low_line) * 0.5
+
+    trend_line = np.full(n, np.nan, dtype=float)
+    itrend = np.zeros(n, dtype=int)
+    out: list[dict[str, Any]] = []
+
+    def trend_filter_ok(idx: int) -> bool:
+        atr_ok = math.isfinite(atr_filter[idx]) and math.isfinite(atr_ma[idx]) and atr_filter[idx] >= atr_ma[idx]
+        rsi_ok = math.isfinite(rsi_filter[idx]) and (rsi_filter[idx] > top_rsi or rsi_filter[idx] < bot_rsi)
+        flat_atr = math.isfinite(atr_filter[idx]) and math.isfinite(atr_ma[idx]) and atr_filter[idx] <= atr_ma[idx]
+        flat_rsi = math.isfinite(rsi_filter[idx]) and bot_rsi < rsi_filter[idx] < top_rsi
+        if filter_mode in {"none", "no", "off"}:
+            return math.isfinite(rsi_filter[idx]) and rsi_filter[idx] > 0.0
+        if filter_mode == "atr":
+            return atr_ok
+        if filter_mode == "rsi":
+            return rsi_ok
+        if filter_mode == "atr_or_rsi":
+            return atr_ok or rsi_ok
+        if filter_mode == "atr_and_rsi":
+            return atr_ok and rsi_ok
+        if filter_mode == "flat_or":
+            return flat_atr or flat_rsi
+        if filter_mode == "flat_and":
+            return flat_atr and flat_rsi
+        return True
+
+    for i in range(n):
+        prev_line = trend_line[i - 1] if i > 0 else math.nan
+        prev_itrend = itrend[i - 1] if i > 0 else 0
+        tl = prev_line
+        if math.isfinite(bb_upper[i]) and close[i] > bb_upper[i]:
+            tl = float(low[i])
+            if math.isfinite(prev_line) and tl < prev_line:
+                tl = prev_line
+        elif math.isfinite(bb_lower[i]) and close[i] < bb_lower[i]:
+            tl = float(high[i])
+            if math.isfinite(prev_line) and tl > prev_line:
+                tl = prev_line
+        trend_line[i] = tl
+        itrend[i] = prev_itrend
+        if math.isfinite(tl) and math.isfinite(prev_line):
+            if tl > prev_line:
+                itrend[i] = 1
+            elif tl < prev_line:
+                itrend[i] = -1
+
+        if i == 0 or i + 1 >= n or not math.isfinite(imba_trend_line[i]) or not trend_filter_ok(i):
+            continue
+        long_final = prev_itrend == -1 and itrend[i] == 1
+        short_final = prev_itrend == 1 and itrend[i] == -1
+        entry_hint = float(open_[i + 1])
+        stop_offset = entry_hint * sl_pct / 100.0
+        if long_final and direction_mode in {"both", "long"}:
+            stop = float(imba_trend_line[i] - stop_offset)
+            target = float(entry_hint * (1.0 + tp_pct / 100.0))
+            out.append(
+                {
+                    "idx": i,
+                    "direction": 1,
+                    "stop": stop,
+                    "target": target,
+                    "features": {
+                        "bb_period": float(bb_period),
+                        "bb_dev": float(bb_dev),
+                        "sensitivity": float(sensitivity),
+                        "tp_pct": float(tp_pct),
+                        "sl_pct": float(sl_pct),
+                        "gg_filter_atr_ok": float(math.isfinite(atr_filter[i]) and math.isfinite(atr_ma[i]) and atr_filter[i] >= atr_ma[i]),
+                        "gg_filter_rsi_ok": float(math.isfinite(rsi_filter[i]) and (rsi_filter[i] > top_rsi or rsi_filter[i] < bot_rsi)),
+                        "gg_rsi": float(rsi_filter[i]) if math.isfinite(rsi_filter[i]) else math.nan,
+                        "bb_distance_pct": float((close[i] - bb_upper[i]) / close[i] * 100.0) if close[i] > 0 and math.isfinite(bb_upper[i]) else math.nan,
+                        "imba_gap_pct": float((entry_hint - imba_trend_line[i]) / entry_hint * 100.0) if entry_hint > 0 else math.nan,
+                    },
+                }
+            )
+        if short_final and direction_mode in {"both", "short"}:
+            stop = float(imba_trend_line[i] + stop_offset)
+            target = float(entry_hint * (1.0 - tp_pct / 100.0))
+            out.append(
+                {
+                    "idx": i,
+                    "direction": -1,
+                    "stop": stop,
+                    "target": target,
+                    "features": {
+                        "bb_period": float(bb_period),
+                        "bb_dev": float(bb_dev),
+                        "sensitivity": float(sensitivity),
+                        "tp_pct": float(tp_pct),
+                        "sl_pct": float(sl_pct),
+                        "gg_filter_atr_ok": float(math.isfinite(atr_filter[i]) and math.isfinite(atr_ma[i]) and atr_filter[i] >= atr_ma[i]),
+                        "gg_filter_rsi_ok": float(math.isfinite(rsi_filter[i]) and (rsi_filter[i] > top_rsi or rsi_filter[i] < bot_rsi)),
+                        "gg_rsi": float(rsi_filter[i]) if math.isfinite(rsi_filter[i]) else math.nan,
+                        "bb_distance_pct": float((bb_lower[i] - close[i]) / close[i] * 100.0) if close[i] > 0 and math.isfinite(bb_lower[i]) else math.nan,
+                        "imba_gap_pct": float((imba_trend_line[i] - entry_hint) / entry_hint * 100.0) if entry_hint > 0 else math.nan,
+                    },
+                }
+            )
+    out.sort(key=lambda x: x["idx"])
+    return out
+
+
 SIGNAL_BUILDERS = {
     "pivot_breakout": signals_pivot_breakout,
     "melona_trendline": signals_melona_trendline,
@@ -771,6 +908,7 @@ SIGNAL_BUILDERS = {
     "liquidity_sweep": signals_liquidity_sweep,
     "melona_pressure": signals_pressure,
     "demarker_exhaustion": signals_demarker_exhaustion,
+    "ggshot_227": signals_ggshot_227,
 }
 
 
@@ -789,6 +927,9 @@ def build_specs(args: argparse.Namespace) -> list[CandidateSpec]:
             add(CandidateSpec("liquidity_sweep", tf, {"swing": 5, "min_wick": 0.1, "min_rej": 5.0, "vol_mult": 1.2, "cooldown": 3, "sl_buf": 0.3, "rr": 1.5, "max_hold_bars": 144}))
             add(CandidateSpec("melona_pressure", tf, {"sl_atr": 0.2, "rr": 1.5, "max_hold_bars": 144}))
             add(CandidateSpec("demarker_exhaustion", tf, {"qual": 13, "length": 40, "sl_atr": 0.3, "rr": 1.5, "max_hold_bars": 144}))
+            hold_base = 288 if tf == "5m" else 96 if tf == "15m" else 48
+            add(CandidateSpec("ggshot_227", tf, {"bb_period": 100, "bb_dev": 1.5, "sensitivity": 200, "filter_mode": "none", "tp_pct": 1.1, "sl_pct": 1.5, "rr": 1.0, "max_hold_bars": hold_base}))
+            add(CandidateSpec("ggshot_227", tf, {"bb_period": 100, "bb_dev": 1.5, "sensitivity": 350, "filter_mode": "atr_or_rsi", "tp_pct": 1.1, "sl_pct": 1.5, "rr": 1.0, "max_hold_bars": hold_base}))
         return specs
 
     left_pairs = [(10, 10), (20, 20), (30, 20)]
@@ -797,6 +938,34 @@ def build_specs(args: argparse.Namespace) -> list[CandidateSpec]:
     rrs = [1.0, 1.5, 2.0] if args.grid_mode == "fast" else [1.0, 1.25, 1.5, 2.0, 3.0]
     for tf in timeframes:
         hold_base = 288 if tf == "5m" else 96 if tf == "15m" else 48
+        gg_bb_periods = [60, 100, 150, 200] if args.grid_mode == "fast" else [40, 60, 100, 150, 200, 300]
+        gg_bb_devs = [1.5, 2.5, 3.5] if args.grid_mode == "fast" else [0.8, 1.5, 2.0, 2.5, 3.0, 3.5]
+        gg_sensitivities = [200, 350] if args.grid_mode == "fast" else [100, 150, 200, 350]
+        gg_filters = ["none", "atr_or_rsi"] if args.grid_mode == "fast" else ["none", "atr", "rsi", "atr_or_rsi", "atr_and_rsi"]
+        gg_tps = [0.5, 1.1, 2.1] if args.grid_mode == "fast" else [0.5, 1.1, 2.1, 4.5]
+        gg_sls = [1.5] if args.grid_mode == "fast" else [1.0, 1.5, 2.0]
+        for bb_period in gg_bb_periods:
+            for bb_dev in gg_bb_devs:
+                for sensitivity in gg_sensitivities:
+                    for filter_mode in gg_filters:
+                        for tp_pct in gg_tps:
+                            for sl_pct in gg_sls:
+                                add(
+                                    CandidateSpec(
+                                        "ggshot_227",
+                                        tf,
+                                        {
+                                            "bb_period": bb_period,
+                                            "bb_dev": bb_dev,
+                                            "sensitivity": sensitivity,
+                                            "filter_mode": filter_mode,
+                                            "tp_pct": tp_pct,
+                                            "sl_pct": sl_pct,
+                                            "rr": 1.0,
+                                            "max_hold_bars": hold_base,
+                                        },
+                                    )
+                                )
         for left, right in left_pairs:
             for max_bars in line_bars:
                 for sl_atr in sl_atrs:
@@ -1095,7 +1264,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="2025-07-01")
     parser.add_argument("--end", default="2026-04-20")
     parser.add_argument("--grid-mode", choices=["smoke", "fast", "full"], default="fast")
-    parser.add_argument("--strategies", default="", help="Comma-separated subset: pivot_breakout,ha_supertrend,liquidity_sweep,melona_pressure,demarker_exhaustion,melona_trendline")
+    parser.add_argument("--strategies", default="", help="Comma-separated subset: pivot_breakout,ha_supertrend,liquidity_sweep,melona_pressure,demarker_exhaustion,melona_trendline,ggshot_227")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--fee-bps-per-side", type=float, default=6.5)
     parser.add_argument("--min-risk-pct", type=float, default=0.15)

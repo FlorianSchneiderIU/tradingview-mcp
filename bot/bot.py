@@ -76,10 +76,15 @@ Env variables
   SESSION_ORB_SYMBOLS  -- comma-separated symbols for Session ORB models
   SESSION_ORB_MODELS_DIR -- directory containing <symbol>_session_orb.joblib files
   SESSION_ORB_THRESHOLD -- fixed ML threshold override (default 0.50)
+  SESSION_ORB_MIN_ENTRY_RISK_ATR -- optional override for model candidate filter
   ENABLE_WOLFE_WAVE   -- enable Wolfe Wave strategy (default false)
   WOLFE_WAVE_SYMBOLS  -- comma-separated Wolfe symbols (default validated Wolfe set)
   WOLFE_WAVE_CONFIG_PATH -- JSON config produced by scripts/backtest_wolfe_wave.py
   WOLFE_WAVE_WARMUP_BARS -- 5m candles retained for Wolfe detection (default 20000)
+  ENABLE_GGSHOT_227   -- enable GGShot 227 strategy (default false)
+  GGSHOT_227_SYMBOLS  -- comma-separated GGShot symbols
+  GGSHOT_227_CONFIG_PATH -- JSON config produced from scripts/backtest_ggshot_227.py
+  GGSHOT_227_WARMUP_BARS -- 5m candles retained for GGShot detection (default 20000)
   RL_ONLY_STRATEGIES  -- comma-separated strategy names to forward to the RL
                          sidecar without normal-bot execution/restriction gates
   LOG_DIR              -- directory for bot.log
@@ -142,6 +147,13 @@ from wolfe_wave import (
     WolfeWaveEngine,
     WolfeWaveState,
     load_wolfe_wave_configs,
+)
+from ggshot_227 import (
+    DEFAULT_GGSHOT_227_SYMBOLS,
+    GGSHOT_227_INTERVAL,
+    GgShotEngine,
+    GgShotState,
+    load_ggshot_227_configs,
 )
 from market_context import MarketContextEnricher
 
@@ -229,6 +241,11 @@ ENABLE_WOLFE_WAVE = os.environ.get("ENABLE_WOLFE_WAVE", "false").lower() in ("1"
 WOLFE_WAVE_SYMBOLS = parse_symbol_list(os.environ.get("WOLFE_WAVE_SYMBOLS") or DEFAULT_WOLFE_WAVE_SYMBOLS)
 WOLFE_WAVE_CONFIG_PATH = os.environ.get("WOLFE_WAVE_CONFIG_PATH", "/app/configs/wolfe_wave_configs.json")
 WOLFE_WAVE_WARMUP_BARS = int(os.environ.get("WOLFE_WAVE_WARMUP_BARS", "20000"))
+
+ENABLE_GGSHOT_227 = os.environ.get("ENABLE_GGSHOT_227", "false").lower() in ("1", "true", "yes")
+GGSHOT_227_SYMBOLS = parse_symbol_list(os.environ.get("GGSHOT_227_SYMBOLS") or DEFAULT_GGSHOT_227_SYMBOLS)
+GGSHOT_227_CONFIG_PATH = os.environ.get("GGSHOT_227_CONFIG_PATH", "/app/configs/ggshot_227_configs.json")
+GGSHOT_227_WARMUP_BARS = int(os.environ.get("GGSHOT_227_WARMUP_BARS", "20000"))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ACCEPTED_SIGNALS_CHAT_ID = os.environ.get("TELEGRAM_ACCEPTED_SIGNALS_CHAT_ID", "").strip()
@@ -786,6 +803,9 @@ class Bot:
         self._wolfe_wave_engine: Optional[WolfeWaveEngine] = None
         self._wolfe_wave_states: dict[str, WolfeWaveState] = {}
         self._wolfe_wave_configs = {}
+        self._ggshot_engine: Optional[GgShotEngine] = None
+        self._ggshot_states: dict[str, GgShotState] = {}
+        self._ggshot_configs = {}
         self._private_ws = None
         self._notified_order_fill_ids: set[str] = set()
         self._manual_exit_orders: dict[str, dict] = {}
@@ -863,11 +883,26 @@ class Bot:
         else:
             log.info("Wolfe Wave disabled")
 
+        if ENABLE_GGSHOT_227:
+            self._ggshot_configs = load_ggshot_227_configs(
+                symbols=GGSHOT_227_SYMBOLS,
+                config_path=GGSHOT_227_CONFIG_PATH,
+            )
+            self._ggshot_engine = GgShotEngine()
+            log.info(
+                f"GGShot 227 enabled  symbols={len(self._ggshot_configs)}  "
+                f"warmup_5m={GGSHOT_227_WARMUP_BARS} config={GGSHOT_227_CONFIG_PATH}"
+            )
+        else:
+            log.info("GGShot 227 disabled")
+
         for sym in self._turtle_models:
             raw_configs.setdefault(sym, {"enable_mm": False, "sl": 2.0, "tp1": 1.0, "trail": 0.5, "use_dt": False})
         for sym in self._session_orb_models:
             raw_configs.setdefault(sym, {"enable_mm": False, "sl": 2.0, "tp1": 1.0, "trail": 0.5, "use_dt": False})
         for sym in self._wolfe_wave_configs:
+            raw_configs.setdefault(sym, {"enable_mm": False, "sl": 2.0, "tp1": 1.0, "trail": 0.5, "use_dt": False})
+        for sym in self._ggshot_configs:
             raw_configs.setdefault(sym, {"enable_mm": False, "sl": 2.0, "tp1": 1.0, "trail": 0.5, "use_dt": False})
 
         for sym, cfg in raw_configs.items():
@@ -926,6 +961,14 @@ class Bot:
                 self._wolfe_wave_states[sym] = wolfe_state
                 log.info(f"  {sym}: {len(wolfe_state.bars)} 5m bars loaded for Wolfe Wave")
 
+            if sym in self._ggshot_configs:
+                ggshot_state = GgShotState(sym, self._ggshot_configs[sym], GGSHOT_227_WARMUP_BARS)
+                log.info(f"  {sym}: fetching {GGSHOT_227_WARMUP_BARS} warmup 5m bars for GGShot 227 ...")
+                for bar in fetch_warmup_bars_interval(self._http, sym, interval=GGSHOT_227_INTERVAL, n=GGSHOT_227_WARMUP_BARS):
+                    ggshot_state.bars.append(bar)
+                self._ggshot_states[sym] = ggshot_state
+                log.info(f"  {sym}: {len(ggshot_state.bars)} 5m bars loaded for GGShot 227")
+
         self._load_dt_models()
         self._run_startup_config_linter(raw_configs)
         self._load_active_trade_state()
@@ -950,10 +993,12 @@ class Bot:
         turtle_symbols = set(self._turtle_states.keys())
         orb_symbols = set(self._session_orb_states.keys())
         wolfe_symbols = set(self._wolfe_wave_states.keys())
-        strategy5_symbols = sorted(turtle_symbols | orb_symbols | wolfe_symbols)
+        ggshot_symbols = set(self._ggshot_states.keys())
+        strategy5_symbols = sorted(turtle_symbols | orb_symbols | wolfe_symbols | ggshot_symbols)
         log.info(
             f"Subscribing to {len(strategy5_symbols)} kline.5 strategy streams "
-            f"(turtle={len(turtle_symbols)}, session_orb={len(orb_symbols)}, wolfe={len(wolfe_symbols)}) ..."
+            f"(turtle={len(turtle_symbols)}, session_orb={len(orb_symbols)}, "
+            f"wolfe={len(wolfe_symbols)}, ggshot={len(ggshot_symbols)}) ..."
         )
         for sym in strategy5_symbols:
             self._ws.kline_stream(interval=5, symbol=sym, callback=self._on_strategy5_kline)
@@ -1088,6 +1133,8 @@ class Bot:
             path_checks.append(("SESSION_ORB_MODELS_DIR", SESSION_ORB_MODELS_DIR, False))
         if ENABLE_WOLFE_WAVE:
             path_checks.append(("WOLFE_WAVE_CONFIG_PATH", WOLFE_WAVE_CONFIG_PATH, True))
+        if ENABLE_GGSHOT_227:
+            path_checks.append(("GGSHOT_227_CONFIG_PATH", GGSHOT_227_CONFIG_PATH, True))
         for label, path, must_be_file in path_checks:
             exists = os.path.isfile(path) if must_be_file else os.path.isdir(path)
             if not exists:
@@ -1110,11 +1157,14 @@ class Bot:
             warn("Session ORB is enabled but no Session ORB models were loaded")
         if ENABLE_WOLFE_WAVE and not self._wolfe_wave_configs:
             warn("Wolfe Wave is enabled but no Wolfe configs were loaded")
+        if ENABLE_GGSHOT_227 and not self._ggshot_configs:
+            warn("GGShot 227 is enabled but no GGShot configs were loaded")
         if (
             not any(state.mm_enabled for state in self._states.values())
             and not self._turtle_states
             and not self._session_orb_states
             and not self._wolfe_wave_states
+            and not self._ggshot_states
         ):
             error("no active strategy streams are configured")
 
@@ -1128,6 +1178,7 @@ class Bot:
             "Turtle models": len(self._turtle_models),
             "Session ORB models": len(self._session_orb_models),
             "Wolfe configs": len(self._wolfe_wave_configs),
+            "GGShot configs": len(self._ggshot_configs),
             "Fatal": self._summarize_items(errors),
             "Warnings detail": self._summarize_items(warnings),
         }
@@ -1210,6 +1261,12 @@ class Bot:
     def _is_partial_take_profit_exit(self, order: dict, active_trade: dict, event: object) -> bool:
         if str(event or "").upper() != "TAKE PROFIT FILLED":
             return False
+        if self._is_multi_tp_exit_style(active_trade.get("exit_style")):
+            total_qty = self._to_float(active_trade.get("qty"))
+            fill_qty = self._to_float(self._fill_qty(order))
+            if total_qty is None or fill_qty is None:
+                return True
+            return fill_qty < total_qty * 0.98
         descriptor = " ".join(
             str(order.get(key) or "")
             for key in ("stopOrderType", "createType", "orderLinkId", "parentOrderLinkId")
@@ -1248,6 +1305,7 @@ class Bot:
         state = self._states.get(symbol)
         if state is None:
             return
+        move_stop_to_be = False
         with self._pos_lock:
             if not state.active_trade:
                 return
@@ -1258,7 +1316,13 @@ class Bot:
             state.active_trade["tp1_filled_qty"] = qty
             state.active_trade["tp1_closed_pnl"] = closed_pnl
             state.active_trade["exit_phase"] = "runner"
+            move_stop_to_be = bool(
+                state.active_trade.get("move_sl_to_be_after_tp1")
+                and not state.active_trade.get("be_stop_moved_at")
+            )
             self._save_active_trade_state_locked()
+        if move_stop_to_be:
+            self._move_stop_to_breakeven_after_tp1(symbol)
 
     @staticmethod
     def _fill_price(order: dict) -> object:
@@ -1284,7 +1348,12 @@ class Bot:
         state = self._states.get(symbol)
         if state is None:
             return
+        tp_orders: list[dict] = []
         with self._pos_lock:
+            if clear_active_trade and state.active_trade:
+                raw_tp_orders = state.active_trade.get("tp_orders") or []
+                if isinstance(raw_tp_orders, list):
+                    tp_orders = [item for item in raw_tp_orders if isinstance(item, dict)]
             if state.in_position:
                 self._open_count = max(0, self._open_count - 1)
                 if symbol in CLUSTER_A:
@@ -1295,6 +1364,22 @@ class Bot:
             if clear_active_trade:
                 state.active_trade = None
                 self._save_active_trade_state_locked()
+        for order in tp_orders:
+            order_id = str(order.get("order_id") or "")
+            order_link_id = str(order.get("order_link_id") or "")
+            try:
+                kwargs = {"category": "linear", "symbol": symbol}
+                if order_id and order_id != "?":
+                    kwargs["orderId"] = order_id
+                elif order_link_id:
+                    kwargs["orderLinkId"] = order_link_id
+                else:
+                    continue
+                resp = self._http.cancel_order(**kwargs)
+                if resp.get("retCode", -1) not in (0, 110001):
+                    log.warning(f"[{symbol}] cancel stale GGShot TP order failed: {resp.get('retMsg', '?')}")
+            except Exception as exc:
+                log.warning(f"[{symbol}] cancel stale GGShot TP order failed: {exc}")
 
     def _sync_positions_after_delay(self, delay_seconds: float) -> None:
         time.sleep(max(0.0, delay_seconds))
@@ -1333,12 +1418,16 @@ class Bot:
                 )
                 event = self._classify_fill_event(order, is_exit=is_exit)
                 if manual_exit:
-                    event = "RISK FLATTEN EXIT FILLED"
+                    reason_text = str(manual_exit.get("reason") or "").lower()
+                    event = "TIMEOUT EXIT FILLED" if "timeout" in reason_text else "RISK FLATTEN EXIT FILLED"
+                state = self._states.get(symbol)
+                active_trade = dict(state.active_trade or {}) if state is not None else {}
+                if event is None and active_trade and self._is_multi_tp_reduce_only_fill(order, active_trade):
+                    is_exit = True
+                    event = "TAKE PROFIT FILLED"
                 if event is None:
                     continue
 
-                state = self._states.get(symbol)
-                active_trade = dict(state.active_trade or {}) if state is not None else {}
                 if is_exit and not active_trade:
                     fallback_at = self._rest_exit_fallback_notified_at.get(symbol, 0)
                     if fallback_at and self._now_ms() - fallback_at < 5 * 60 * 1000:
@@ -1773,6 +1862,8 @@ class Bot:
             return "ORB"
         if text.startswith("wolfe"):
             return "WW"
+        if text.startswith("ggshot"):
+            return "GG"
         if text.startswith("risk"):
             return "RISK"
         return Bot._compact_token(text, max_len=4)
@@ -1850,10 +1941,20 @@ class Bot:
             tp=sig.get("tp1", sig.get("target", sig.get("target_price"))),
             prob=sig.get("prob", sig.get("dt_prob")),
             threshold=sig.get("threshold", sig.get("dt_threshold")),
+            score=sig.get("score", sig.get("selection_score", sig.get("prob", sig.get("dt_prob")))),
             reason=reason,
             order_id=order_id,
             order_link_id=sig.get("order_link_id"),
-            signal_time=sig.get("entry_time"),
+            signal_time=sig.get("signal_time", sig.get("entry_time")),
+            entry_time=sig.get("entry_time", sig.get("signal_time")),
+            strategy_variant=sig.get("variant"),
+            session=sig.get("session"),
+            or_minutes=sig.get("or_minutes"),
+            rr=sig.get("rr"),
+            max_hold_bars=sig.get("max_hold_bars"),
+            candidate_filter=sig.get("candidate_filter"),
+            min_entry_risk_atr=sig.get("min_entry_risk_atr"),
+            entry_risk_atr=sig.get("entry_risk_atr"),
             feature_columns=sig.get("feature_columns"),
             feature_snapshot=sig.get("feature_snapshot"),
             market_snapshot=sig.get("market_snapshot"),
@@ -2499,6 +2600,26 @@ class Bot:
                 self._notify_rest_synced_exit(sym, active_trade, previous_position)
             except Exception:
                 log.exception(f"[{sym}] REST exit fallback notification failed")
+            raw_tp_orders = active_trade.get("tp_orders") or []
+            if isinstance(raw_tp_orders, list):
+                for order in raw_tp_orders:
+                    if not isinstance(order, dict):
+                        continue
+                    order_id = str(order.get("order_id") or "")
+                    order_link_id = str(order.get("order_link_id") or "")
+                    try:
+                        kwargs = {"category": "linear", "symbol": sym}
+                        if order_id and order_id != "?":
+                            kwargs["orderId"] = order_id
+                        elif order_link_id:
+                            kwargs["orderLinkId"] = order_link_id
+                        else:
+                            continue
+                        resp = self._http.cancel_order(**kwargs)
+                        if resp.get("retCode", -1) not in (0, 110001):
+                            log.warning(f"[{sym}] cancel stale GGShot TP order failed: {resp.get('retMsg', '?')}")
+                    except Exception as exc:
+                        log.warning(f"[{sym}] cancel stale GGShot TP order failed: {exc}")
 
     def _flatten_all_positions(self, reason: str) -> bool:
         """Cancel open orders and market-close all tracked Bybit linear positions."""
@@ -3464,8 +3585,14 @@ class Bot:
             turtle_state = self._turtle_states.get(sym)
             orb_state = self._session_orb_states.get(sym)
             wolfe_state = self._wolfe_wave_states.get(sym)
+            ggshot_state = self._ggshot_states.get(sym)
             trade_state = self._states.get(sym)
-            if (turtle_state is None and orb_state is None and wolfe_state is None) or trade_state is None:
+            if (
+                turtle_state is None
+                and orb_state is None
+                and wolfe_state is None
+                and ggshot_state is None
+            ) or trade_state is None:
                 return
 
             bar = {
@@ -3482,6 +3609,8 @@ class Bot:
                 orb_state.push_bar(bar)
             if wolfe_state is not None:
                 wolfe_state.push_bar(bar)
+            if ggshot_state is not None:
+                ggshot_state.push_bar(bar)
 
             if turtle_state is not None and self._turtle_engine is not None and not trade_state.in_position:
                 threading.Thread(
@@ -3499,6 +3628,12 @@ class Bot:
                 threading.Thread(
                     target=self._check_wolfe_wave_and_trade,
                     args=(trade_state, wolfe_state),
+                    daemon=True,
+                ).start()
+            if ggshot_state is not None and self._ggshot_engine is not None and not trade_state.in_position:
+                threading.Thread(
+                    target=self._check_ggshot_and_trade,
+                    args=(trade_state, ggshot_state),
                     daemon=True,
                 ).start()
         except Exception:
@@ -3607,6 +3742,30 @@ class Bot:
             f"score={sig.get('score', float('nan')):.1f} "
             f"rr={sig.get('target_rr_planned', float('nan')):.2f} "
             f"tf={sig.get('pattern_tf', '-')}"
+        )
+        self._submit_signal(trade_state, sig)
+
+    def _check_ggshot_and_trade(self, trade_state: SymbolState, ggshot_state: GgShotState) -> None:
+        if self._ggshot_engine is None:
+            return
+        sig = self._ggshot_engine.detect_signal(ggshot_state)
+        if sig is None:
+            return
+        if sig.get("rejected"):
+            reason = str(sig.get("reject_reason", "Rejected by GGShot filter"))
+            log.info(
+                f"[{trade_state.symbol}] GGSHOT candidate {sig['signal'].upper()} rejected "
+                f"-- {reason}"
+            )
+            self._attach_market_context(trade_state, sig)
+            self._record_signal_event("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
+            self._telegram.send_signal("rejected", symbol=trade_state.symbol, sig=sig, reason=reason)
+            return
+        log.info(
+            f"[{trade_state.symbol}] GGSHOT candidate {sig['signal'].upper()} "
+            f"tf={sig.get('pattern_tf', '-')} "
+            f"rr={sig.get('target_rr_planned', float('nan')):.2f} "
+            f"risk={sig.get('entry_risk_pct', float('nan')):.2f}%"
         )
         self._submit_signal(trade_state, sig)
 
@@ -3910,6 +4069,314 @@ class Bot:
         )
         return False
 
+    @staticmethod
+    def _is_multi_tp_exit_style(exit_style: object) -> bool:
+        return str(exit_style or "").lower() in {"multi_tp", "multi_tp_be"}
+
+    def _multi_tp_order_link_id(
+        self,
+        *,
+        strategy: object,
+        symbol: object,
+        direction: object,
+        tp_index: int,
+    ) -> str:
+        ts = datetime.now(timezone.utc).strftime("%y%m%d%H%M")
+        suffix = uuid.uuid4().hex[:4].upper()
+        code = self._strategy_code(strategy)
+        base = self._compact_token(str(symbol).replace("USDT", ""), max_len=7)
+        side = self._direction_code(direction)
+        return f"TP-{code}-{base}-{side}-{tp_index}-{ts}-{suffix}"[:36]
+
+    def _is_multi_tp_reduce_only_fill(self, order: dict, active_trade: dict) -> bool:
+        if not self._is_multi_tp_exit_style(active_trade.get("exit_style")):
+            return False
+        descriptor = " ".join(
+            str(order.get(key) or "")
+            for key in ("orderLinkId", "parentOrderLinkId", "createType", "orderType")
+        ).lower()
+        return (
+            self._truthy_field(order.get("reduceOnly"))
+            and "tp-" in descriptor
+            and str(active_trade.get("strategy") or "").lower() == "ggshot_227"
+        )
+
+    def _place_multi_tp_orders(
+        self,
+        state: SymbolState,
+        sig: dict,
+        *,
+        qty: float,
+        q_step: float,
+        min_q: float,
+        tick: float,
+    ) -> list[dict]:
+        sym = state.symbol
+        direction = str(sig.get("signal", "")).lower()
+        side = "Sell" if direction == "long" else "Buy"
+        strategy = sig.get("strategy", "strategy")
+        prices = sig.get("tp_prices") or [sig.get("tp1")]
+        qty_pcts = sig.get("tp_qty_pcts") or [100.0]
+        placed: list[dict] = []
+
+        for idx, (raw_price, raw_qty_pct) in enumerate(zip(prices, qty_pcts), start=1):
+            try:
+                price = round_to_step(float(raw_price), tick)
+                order_qty = floor_to_step(qty * float(raw_qty_pct) / 100.0, q_step)
+            except (TypeError, ValueError):
+                continue
+            if order_qty < min_q or price <= 0:
+                continue
+            order_link_id = self._multi_tp_order_link_id(
+                strategy=strategy,
+                symbol=sym,
+                direction=direction,
+                tp_index=idx,
+            )
+            order_kwargs = {
+                "category": "linear",
+                "symbol": sym,
+                "side": side,
+                "orderType": "Limit",
+                "qty": qty_to_str(order_qty, q_step),
+                "price": str(price),
+                "timeInForce": "GTC",
+                "reduceOnly": True,
+                "positionIdx": 0,
+                "orderLinkId": order_link_id,
+            }
+            try:
+                resp = self._http.place_order(**order_kwargs)
+                if resp.get("retCode", -1) != 0:
+                    log.warning(
+                        f"[{sym}] GGShot TP{idx} order rejected: "
+                        f"{resp.get('retMsg', '?')} retCode={resp.get('retCode')}"
+                    )
+                    continue
+                order_id = resp.get("result", {}).get("orderId", "?")
+                placed.append(
+                    {
+                        "tp_index": idx,
+                        "order_id": str(order_id),
+                        "order_link_id": order_link_id,
+                        "price": price,
+                        "qty": qty_to_str(order_qty, q_step),
+                    }
+                )
+                log.info(f"[{sym}] GGShot TP{idx} reduce-only order set qty={order_qty:g} price={price:g}")
+            except Exception as exc:
+                log.warning(f"[{sym}] Failed to place GGShot TP{idx}: {exc}")
+        return placed
+
+    def _move_stop_to_breakeven_after_tp1(self, symbol: str) -> None:
+        state = self._states.get(symbol)
+        if state is None:
+            return
+        with self._pos_lock:
+            active_trade = dict(state.active_trade or {})
+        if not active_trade or active_trade.get("be_stop_moved_at"):
+            return
+        if not active_trade.get("move_sl_to_be_after_tp1"):
+            return
+        entry = self._to_float(active_trade.get("entry"))
+        if entry is None or entry <= 0:
+            return
+        tick = float(state.info.get("tick_size", 0.0) or 0.0)
+        be_stop = round_to_step(entry, tick)
+        try:
+            resp = self._http.set_trading_stop(
+                category="linear",
+                symbol=symbol,
+                stopLoss=str(be_stop),
+                slTriggerBy="LastPrice",
+                tpslMode="Full",
+                positionIdx=0,
+            )
+            if resp.get("retCode", -1) != 0:
+                log.warning(
+                    f"[{symbol}] GGShot SL->BE failed: "
+                    f"{resp.get('retMsg', '?')} retCode={resp.get('retCode')}"
+                )
+                return
+        except Exception as exc:
+            log.warning(f"[{symbol}] GGShot SL->BE failed: {exc}")
+            return
+        with self._pos_lock:
+            current = state.active_trade
+            if current:
+                current["sl"] = be_stop
+                current["be_stop_moved_at"] = self._now_ms()
+                current["exit_phase"] = "breakeven_runner"
+                self._save_active_trade_state_locked()
+        log.info(f"[{symbol}] GGShot stop moved to breakeven after TP1  sl={be_stop:g}")
+
+    @staticmethod
+    def _parse_utc_ms(value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            raw = float(value)
+            if not math.isfinite(raw):
+                return None
+            return int(raw if raw > 10_000_000_000 else raw * 1000)
+        try:
+            text = str(value).strip().replace("Z", "+00:00")
+            if not text:
+                return None
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.astimezone(timezone.utc).timestamp() * 1000)
+        except (TypeError, ValueError):
+            return None
+
+    def _session_orb_timeout_at_ms(self, sig_or_trade: dict) -> int | None:
+        if str(sig_or_trade.get("strategy") or "").lower() != "session_orb_judas_fvg":
+            return None
+        max_hold_bars = self._to_float(sig_or_trade.get("max_hold_bars"))
+        if max_hold_bars is None or max_hold_bars <= 0:
+            return None
+        base_ms = self._parse_utc_ms(
+            sig_or_trade.get("entry_time")
+            or sig_or_trade.get("signal_time")
+            or sig_or_trade.get("opened_at")
+        )
+        if base_ms is None:
+            return None
+        return base_ms + int(max_hold_bars * 5 * 60 * 1000)
+
+    def _enforce_session_orb_timeouts(self) -> None:
+        now_ms = self._now_ms()
+        due: list[tuple[str, dict]] = []
+        with self._pos_lock:
+            for sym, state in self._states.items():
+                active_trade = state.active_trade
+                if not active_trade:
+                    continue
+                if str(active_trade.get("strategy") or "").lower() != "session_orb_judas_fvg":
+                    continue
+                timeout_at = int(self._to_float(active_trade.get("timeout_at")) or 0)
+                if timeout_at <= 0 or now_ms < timeout_at:
+                    continue
+                if active_trade.get("timeout_close_submitted_at"):
+                    continue
+                active_trade["timeout_close_submitted_at"] = now_ms
+                due.append((sym, dict(active_trade)))
+            if due:
+                self._save_active_trade_state_locked()
+        for sym, active_trade in due:
+            ok = self._submit_session_orb_timeout_close(sym, active_trade)
+            if not ok:
+                with self._pos_lock:
+                    current = self._states.get(sym).active_trade if sym in self._states else None
+                    if current:
+                        current.pop("timeout_close_submitted_at", None)
+                        current["timeout_close_failed_at"] = self._now_ms()
+                        self._save_active_trade_state_locked()
+
+    def _submit_session_orb_timeout_close(self, symbol: str, active_trade: dict) -> bool:
+        state = self._states.get(symbol)
+        if state is None:
+            return False
+        size = None
+        pos_side = ""
+        try:
+            resp = self._http.get_positions(category="linear", symbol=symbol)
+            for pos in self._extract_response_list(resp):
+                raw_size = self._to_float(pos.get("size"))
+                if raw_size is not None and raw_size > 0:
+                    size = raw_size
+                    pos_side = str(pos.get("side") or "")
+                    break
+        except Exception as exc:
+            log.warning(f"[{symbol}] Session ORB timeout position fetch failed: {exc}")
+        if size is None or size <= 0:
+            size = self._to_float(active_trade.get("qty"))
+            direction = str(active_trade.get("direction") or "").lower()
+            pos_side = "Buy" if direction == "long" else "Sell" if direction == "short" else ""
+        if size is None or size <= 0:
+            log.warning(f"[{symbol}] Session ORB timeout could not determine position size")
+            return False
+        if pos_side == "Buy":
+            close_side = "Sell"
+        elif pos_side == "Sell":
+            close_side = "Buy"
+        else:
+            direction = str(active_trade.get("direction") or "").lower()
+            close_side = "Sell" if direction == "long" else "Buy" if direction == "short" else ""
+        if not close_side:
+            log.warning(f"[{symbol}] Session ORB timeout could not determine close side")
+            return False
+        reason = "Session ORB max-hold timeout"
+        try:
+            cancel_resp = self._http.cancel_all_orders(category="linear", symbol=symbol)
+            if cancel_resp.get("retCode", 0) != 0:
+                log.warning(f"[{symbol}] Session ORB timeout cancel_all_orders: {cancel_resp.get('retMsg', '?')}")
+        except Exception as exc:
+            log.warning(f"[{symbol}] Session ORB timeout cancel_all_orders failed: {exc}")
+        order_link_id = self._make_order_link_id(
+            kind="X",
+            strategy=active_trade.get("strategy") or "session_orb_judas_fvg",
+            symbol=symbol,
+            direction=active_trade.get("direction") or close_side,
+        )
+        try:
+            order_resp = self._http.place_order(
+                category="linear",
+                symbol=symbol,
+                side=close_side,
+                orderType="Market",
+                qty=qty_to_str(size),
+                reduceOnly=True,
+                positionIdx=0,
+                orderLinkId=order_link_id,
+            )
+        except Exception as exc:
+            log.error(f"[{symbol}] Session ORB timeout close failed: {exc}")
+            return False
+        if order_resp.get("retCode", -1) != 0:
+            log.error(
+                f"[{symbol}] Session ORB timeout close rejected "
+                f"(retCode={order_resp.get('retCode')}): {order_resp.get('retMsg', '?')}"
+            )
+            return False
+        order_id = str(order_resp.get("result", {}).get("orderId") or "")
+        if order_id:
+            self._manual_exit_orders[order_id] = {
+                "symbol": symbol,
+                "reason": reason,
+                "strategy": active_trade.get("strategy"),
+                "direction": active_trade.get("direction"),
+                "order_link_id": order_link_id,
+            }
+        self._append_ledger_event(
+            "risk",
+            event="session_orb_timeout_close",
+            symbol=symbol,
+            strategy=active_trade.get("strategy"),
+            direction=active_trade.get("direction"),
+            reason=reason,
+            order_id=order_id,
+            order_link_id=order_link_id,
+            timeout_at=active_trade.get("timeout_at"),
+            qty=qty_to_str(size),
+        )
+        self._telegram.send_risk_event(
+            "Session ORB timeout close",
+            fields={
+                "Symbol": symbol,
+                "Strategy": active_trade.get("strategy", "-"),
+                "Side": close_side,
+                "Qty": qty_to_str(size),
+                "Reason": reason,
+            },
+        )
+        log.warning(
+            f"[{symbol}] Session ORB timeout close submitted "
+            f"size={qty_to_str(size)} orderId={order_id or '-'} orderLinkId={order_link_id}"
+        )
+        return True
+
     def _execute_trade(self, state: SymbolState, sig: dict) -> None:
         sym    = state.symbol
         side   = "Buy" if sig["signal"] == "long" else "Sell"
@@ -4007,6 +4474,7 @@ class Bot:
             order_kwargs["takeProfit"] = str(tp1_price)
             order_kwargs["tpTriggerBy"] = "LastPrice"
         sig["order_request"] = dict(order_kwargs)
+        timeout_at_ms = self._session_orb_timeout_at_ms(sig)
 
         order_resp = self._http.place_order(**order_kwargs)
         ret_code = order_resp.get("retCode", -1)
@@ -4038,6 +4506,21 @@ class Bot:
                 "price_risk_at_sl": f"{expected_price_sl_loss:.2f}",
                 "estimated_fees": f"{expected_fee_loss:.2f}",
                 "exit_style": exit_style,
+                "signal_time": sig.get("signal_time", sig.get("entry_time")),
+                "entry_time": sig.get("entry_time", sig.get("signal_time")),
+                "strategy_variant": sig.get("variant"),
+                "session": sig.get("session"),
+                "or_minutes": sig.get("or_minutes"),
+                "rr": sig.get("rr"),
+                "max_hold_bars": sig.get("max_hold_bars"),
+                "timeout_at": timeout_at_ms,
+                "candidate_filter": sig.get("candidate_filter"),
+                "min_entry_risk_atr": sig.get("min_entry_risk_atr"),
+                "entry_risk_atr": sig.get("entry_risk_atr"),
+                "score": sig.get("score", sig.get("selection_score", sig.get("prob"))),
+                "tp_prices": sig.get("tp_prices"),
+                "tp_qty_pcts": sig.get("tp_qty_pcts"),
+                "move_sl_to_be_after_tp1": bool(sig.get("move_sl_to_be_after_tp1", False)),
                 "tp1_partial_qty": qty_to_str(tp1_partial_qty) if tp1_partial_qty >= min_q else None,
                 "entry_order_id": str(order_id),
                 "opened_at": int(time.time() * 1000),
@@ -4088,6 +4571,31 @@ class Bot:
                 "order_request": dict(order_kwargs),
             },
         )
+
+        if self._is_multi_tp_exit_style(exit_style):
+            time.sleep(0.8)
+            tp_orders = self._place_multi_tp_orders(
+                state,
+                sig,
+                qty=qty,
+                q_step=q_step,
+                min_q=min_q,
+                tick=tick,
+            )
+            with self._pos_lock:
+                if state.active_trade is not None:
+                    state.active_trade["tp_orders"] = tp_orders
+                    self._save_active_trade_state_locked()
+            if not tp_orders:
+                self._telegram.send_risk_event(
+                    "GGShot TP setup failed",
+                    fields={
+                        "Symbol": sym,
+                        "Strategy": strategy,
+                        "Action": "hard SL is set; manual TP inspection recommended",
+                    },
+                )
+            return
 
         if exit_style == "fixed_tp":
             time.sleep(0.8)
@@ -4151,6 +4659,7 @@ class Bot:
                         f"(limit={WS_STALE_SECONDS}s); exiting for Docker restart"
                     )
                     raise SystemExit(2)
+            self._enforce_session_orb_timeouts()
             self._sync_positions()
             self._refresh_risk_state()
             self._audit_position_protection()

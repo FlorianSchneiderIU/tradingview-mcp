@@ -80,6 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fee-bps-per-side", type=float, default=6.5)
     parser.add_argument("--thresholds", default="0.45,0.50,0.55,0.60,0.65,0.70")
     parser.add_argument("--fixed-threshold", type=float, default=0.50)
+    parser.add_argument("--selection-mode", choices=["session_best", "signal_best", "nonoverlap", "all"], default="nonoverlap")
     parser.add_argument("--min-train-trades-for-threshold", type=int, default=80)
     parser.add_argument("--min-oos-trades", type=int, default=30)
     parser.add_argument("--min-oos-pf", type=float, default=1.20)
@@ -144,8 +145,9 @@ def _period_metrics_by_threshold(
     t_start: pd.Timestamp,
     t_end: pd.Timestamp,
     thresholds: list[float],
+    selection_mode: str,
 ) -> pd.DataFrame:
-    """Return per-threshold metrics for trades in [t_start, t_end), with session_id dedup."""
+    """Return per-threshold metrics for trades in [t_start, t_end)."""
     scored = scored.copy()
     scored["entry_time"] = pd.to_datetime(scored["entry_time"], utc=True, errors="coerce")
     if t_start.tzinfo is None:
@@ -154,16 +156,18 @@ def _period_metrics_by_threshold(
         t_end = t_end.tz_localize("UTC")
     rows: list[dict] = []
     for threshold in thresholds:
-        above = scored[scored["ml_prob"] >= threshold]
-        parts = []
-        for _, group in above.groupby("session_id", sort=True):
-            parts.append(group.sort_values("ml_prob", ascending=False).head(1))
-        selected = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=scored.columns)
+        selected = select_ranked_trades(
+            scored,
+            threshold=threshold,
+            split=t_end,
+            selection_mode=selection_mode,
+        )
         period = selected[(selected["entry_time"] >= t_start) & (selected["entry_time"] < t_end)]
         m = metrics(period)
         rows.append(
             {
                 "threshold": threshold,
+                "selection_mode": selection_mode,
                 "val_trades": m["trades"],
                 "val_profit_factor": m["profit_factor"],
                 "val_net_r": m["net_r"],
@@ -308,8 +312,20 @@ def select_top_config_trades(
     return [cfg for cfg, _ in selected_pairs], selected_trades, diagnostics
 
 
-def selected_with_tag(scored: pd.DataFrame, *, threshold: float, split: pd.Timestamp, selection: str) -> pd.DataFrame:
-    selected = select_ranked_trades(scored, threshold=threshold, split=split)
+def selected_with_tag(
+    scored: pd.DataFrame,
+    *,
+    threshold: float,
+    split: pd.Timestamp,
+    selection: str,
+    selection_mode: str,
+) -> pd.DataFrame:
+    selected = select_ranked_trades(
+        scored,
+        threshold=threshold,
+        split=split,
+        selection_mode=selection_mode,
+    )
     if not selected.empty:
         selected = selected.copy()
         selected["selection"] = selection
@@ -395,7 +411,12 @@ def run_symbol_job(params: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame
         # val period (val_split → split) is truly out-of-sample for threshold selection.
         val_split_ts = pd.Timestamp(parse_utc_datetime(params["val_split"])) if params.get("val_split") else None
         ml_split = val_split_ts if val_split_ts is not None else split
-        ml_table, scored, ml_cols = train_ml_ranker(candidates, split=ml_split, thresholds=params["thresholds"])
+        ml_table, scored, ml_cols = train_ml_ranker(
+            candidates,
+            split=ml_split,
+            thresholds=params["thresholds"],
+            selection_mode=params["selection_mode"],
+        )
         if ml_table.empty or scored.empty or "ml_prob" not in scored.columns:
             base_row.update(
                 {
@@ -418,7 +439,13 @@ def run_symbol_job(params: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame
         # Threshold selection: val-based (3-way split) or train-based (original)
         fixed_row = closest_threshold_row(ml_table, params["fixed_threshold"])
         if val_split_ts is not None:
-            val_table = _period_metrics_by_threshold(scored, val_split_ts, split, params["thresholds"])
+            val_table = _period_metrics_by_threshold(
+                scored,
+                val_split_ts,
+                split,
+                params["thresholds"],
+                selection_mode=params["selection_mode"],
+            )
             chosen_row = threshold_choice_val(
                 val_table,
                 min_val_trades=max(10, params["min_train_trades_for_threshold"] // 4),
@@ -430,8 +457,20 @@ def run_symbol_job(params: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame
             chosen_row = threshold_choice(ml_table, min_train_trades=params["min_train_trades_for_threshold"])
         fixed_threshold = float(fixed_row["threshold"]) if fixed_row is not None else float(params["fixed_threshold"])
         chosen_threshold = float(chosen_row["threshold"]) if chosen_row is not None else fixed_threshold
-        fixed_selected = selected_with_tag(scored, threshold=fixed_threshold, split=split, selection="fixed")
-        chosen_selected = selected_with_tag(scored, threshold=chosen_threshold, split=split, selection="train_chosen")
+        fixed_selected = selected_with_tag(
+            scored,
+            threshold=fixed_threshold,
+            split=split,
+            selection="fixed",
+            selection_mode=params["selection_mode"],
+        )
+        chosen_selected = selected_with_tag(
+            scored,
+            threshold=chosen_threshold,
+            split=split,
+            selection="train_chosen",
+            selection_mode=params["selection_mode"],
+        )
         selected = pd.concat([fixed_selected, chosen_selected], ignore_index=True) if (not fixed_selected.empty or not chosen_selected.empty) else pd.DataFrame()
 
         fixed_summary = summary_from_selected(fixed_selected, split, prefix="fixed")
@@ -460,6 +499,7 @@ def run_symbol_job(params: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame
             **prefixed_metrics(train_candidates, "candidate_train"),
             **prefixed_metrics(oos_candidates, "candidate_oos"),
             "fixed_threshold": fixed_threshold,
+            "selection_mode": params["selection_mode"],
             **fixed_table_summary,
             "chosen_threshold": chosen_threshold,
             **chosen_table_summary,
@@ -530,6 +570,7 @@ def params_for_row(row: pd.Series, args: argparse.Namespace, *, train_start: pd.
         "fee_bps_per_side": args.fee_bps_per_side,
         "thresholds": parse_thresholds(args.thresholds),
         "fixed_threshold": args.fixed_threshold,
+        "selection_mode": args.selection_mode,
         "min_train_trades_for_threshold": args.min_train_trades_for_threshold,
         "min_oos_trades": args.min_oos_trades,
         "min_oos_pf": args.min_oos_pf,
@@ -580,7 +621,8 @@ def main() -> None:
     jobs = [params_for_row(row, args, train_start=train_start, split=split, end=end, warmup_start=warmup_start) for _, row in universe.iterrows()]
     print(
         f"Session ORB sweep {utc_now_label()} | {len(jobs)} symbols | "
-        f"{args.family}/{args.entry_mode}/{args.candidate_filter} | split={split.date()}",
+        f"{args.family}/{args.entry_mode}/{args.candidate_filter} | "
+        f"selection={args.selection_mode} | split={split.date()}",
         flush=True,
     )
     print(f"Universe -> {universe_path}", flush=True)

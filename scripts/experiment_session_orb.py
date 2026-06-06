@@ -870,11 +870,79 @@ def feature_columns(frame: pd.DataFrame) -> list[str]:
     return columns
 
 
+def select_scored_trades(
+    scored: pd.DataFrame,
+    *,
+    threshold: float,
+    split: pd.Timestamp,
+    selection_mode: str = "nonoverlap",
+) -> pd.DataFrame:
+    if scored.empty or "ml_prob" not in scored.columns:
+        return pd.DataFrame(columns=scored.columns)
+    mode = str(selection_mode or "nonoverlap").strip().lower()
+    eligible = scored[scored["ml_prob"].astype(float) >= float(threshold)].copy()
+    if eligible.empty:
+        selected = pd.DataFrame(columns=scored.columns)
+    elif mode == "session_best":
+        parts = [
+            group.sort_values("ml_prob", ascending=False).head(1)
+            for _, group in eligible.groupby("session_id", sort=True)
+        ]
+        selected = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=scored.columns)
+    elif mode in {"signal_best", "nonoverlap"}:
+        time_col = "signal_time" if "signal_time" in eligible.columns else "entry_time"
+        group_cols = [column for column in ("symbol", time_col, "direction") if column in eligible.columns]
+        if not group_cols:
+            group_cols = [time_col]
+        parts = [
+            group.sort_values("ml_prob", ascending=False).head(1)
+            for _, group in eligible.groupby(group_cols, sort=True)
+        ]
+        signal_best = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=scored.columns)
+        if mode == "signal_best" or signal_best.empty:
+            selected = signal_best
+        else:
+            signal_best = signal_best.copy()
+            signal_best[time_col] = pd.to_datetime(signal_best[time_col], utc=True, errors="coerce")
+            if "exit_time" in signal_best.columns:
+                signal_best["exit_time"] = pd.to_datetime(signal_best["exit_time"], utc=True, errors="coerce")
+            if "entry_time" in signal_best.columns:
+                signal_best["entry_time"] = pd.to_datetime(signal_best["entry_time"], utc=True, errors="coerce")
+            accepted_rows = []
+            blocked_until: pd.Timestamp | None = None
+            for _, row in signal_best.sort_values([time_col, "ml_prob"], ascending=[True, False]).iterrows():
+                signal_time = row.get(time_col)
+                if pd.isna(signal_time):
+                    continue
+                if blocked_until is not None and signal_time <= blocked_until:
+                    continue
+                accepted_rows.append(row)
+                exit_time = row.get("exit_time")
+                entry_time = row.get("entry_time")
+                if pd.notna(exit_time):
+                    blocked_until = exit_time
+                elif pd.notna(entry_time):
+                    blocked_until = entry_time
+                else:
+                    blocked_until = signal_time
+            selected = pd.DataFrame(accepted_rows, columns=signal_best.columns)
+    elif mode == "all":
+        selected = eligible.sort_values(["entry_time", "ml_prob"], ascending=[True, False]).copy()
+    else:
+        raise ValueError(f"Unknown selection_mode={selection_mode!r}")
+    selected = selected.copy()
+    selected["sample"] = np.where(pd.to_datetime(selected["entry_time"], utc=True) < split, "train", "oos")
+    selected["selection_mode"] = mode
+    selected["selection_score"] = selected["ml_prob"].astype(float) if "ml_prob" in selected.columns else math.nan
+    return selected
+
+
 def train_ml_ranker(
     trades: pd.DataFrame,
     *,
     split: pd.Timestamp,
     thresholds: list[float],
+    selection_mode: str = "nonoverlap",
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     if not SKLEARN_AVAILABLE or trades.empty:
         return pd.DataFrame(), trades, []
@@ -904,15 +972,18 @@ def train_ml_ranker(
 
     rows: list[dict[str, Any]] = []
     for threshold in thresholds:
-        selected_parts = []
-        for _, group in data[data["ml_prob"] >= threshold].groupby("session_id", sort=True):
-            selected_parts.append(group.sort_values("ml_prob", ascending=False).head(1))
-        selected = pd.concat(selected_parts, ignore_index=True) if selected_parts else pd.DataFrame(columns=data.columns)
+        selected = select_scored_trades(
+            data,
+            threshold=threshold,
+            split=split,
+            selection_mode=selection_mode,
+        )
         train_sel = selected[selected["entry_time"] < split].copy()
         oos_sel = selected[selected["entry_time"] >= split].copy()
         rows.append(
             {
                 "threshold": threshold,
+                "selection_mode": selection_mode,
                 "oos_auc": round(auc, 3) if math.isfinite(auc) else math.nan,
                 **{f"train_{k}": v for k, v in metrics(train_sel).items()},
                 **{f"oos_{k}": v for k, v in metrics(oos_sel).items()},
@@ -939,6 +1010,7 @@ def main() -> None:
     parser.add_argument("--fee-bps-per-side", type=float, default=6.5)
     parser.add_argument("--top-train-variants", type=int, default=24)
     parser.add_argument("--thresholds", default="0.45,0.50,0.55,0.60,0.65,0.70")
+    parser.add_argument("--selection-mode", choices=["session_best", "signal_best", "nonoverlap", "all"], default="nonoverlap")
     parser.add_argument("--output-prefix", type=Path, default=Path("scripts/session_orb_btc"))
     args = parser.parse_args()
 
@@ -991,7 +1063,12 @@ def main() -> None:
     top_trades.to_csv(trades_path, index=False)
     print(f"Wrote {trades_path}", flush=True)
 
-    ml_table, scored, ml_cols = train_ml_ranker(top_trades, split=split, thresholds=thresholds)
+    ml_table, scored, ml_cols = train_ml_ranker(
+        top_trades,
+        split=split,
+        thresholds=thresholds,
+        selection_mode=args.selection_mode,
+    )
     ml_path = args.output_prefix.with_name(args.output_prefix.name + "_ml_thresholds.csv")
     scored_path = args.output_prefix.with_name(args.output_prefix.name + "_ml_scored_candidates.csv")
     ml_table.to_csv(ml_path, index=False)

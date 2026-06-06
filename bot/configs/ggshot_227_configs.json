@@ -1,0 +1,49 @@
+{
+  "_comment": "GGShot 227 Pine-preset candidates selected from top100-universe research on 2026-06-05. Live mode uses the non-synthetic BE variant: multi TP ladder plus SL to breakeven after first TP fill.",
+  "BTCUSDT": {
+    "enabled": true,
+    "timeframe": "15m",
+    "bb_period": 150,
+    "bb_dev": 3.1,
+    "sensitivity": 350,
+    "filter_mode": "atr_or_rsi",
+    "sl_pct": 1.5,
+    "tp_pcts": [0.5, 1.1, 2.1, 4.5],
+    "qty_pcts": [30.0, 30.0, 15.0, 15.0],
+    "exit_style": "multi_tp_be",
+    "min_risk_pct": 0.15,
+    "_research": {
+      "mode": "be",
+      "train_trades": 104,
+      "train_net_r": 3.10,
+      "train_profit_factor": 1.19,
+      "oos_trades": 41,
+      "oos_net_r": 15.41,
+      "oos_avg_r": 0.376,
+      "oos_profit_factor": 4.34
+    }
+  },
+  "BNBUSDT": {
+    "enabled": true,
+    "timeframe": "30m",
+    "bb_period": 90,
+    "bb_dev": 2.4,
+    "sensitivity": 350,
+    "filter_mode": "atr_or_rsi",
+    "sl_pct": 1.5,
+    "tp_pcts": [0.5, 1.1, 2.1, 4.5],
+    "qty_pcts": [30.0, 30.0, 15.0, 15.0],
+    "exit_style": "multi_tp_be",
+    "min_risk_pct": 0.15,
+    "_research": {
+      "mode": "be",
+      "train_trades": 93,
+      "train_net_r": 10.23,
+      "train_profit_factor": 1.78,
+      "oos_trades": 54,
+      "oos_net_r": 12.32,
+      "oos_avg_r": 0.228,
+      "oos_profit_factor": 1.98
+    }
+  }
+}

@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fee-bps-per-side", type=float, default=6.5)
     parser.add_argument("--threshold", type=float, default=0.50)
     parser.add_argument("--thresholds", default="0.45,0.50,0.55,0.60,0.65,0.70")
+    parser.add_argument("--selection-mode", choices=["session_best", "signal_best", "nonoverlap", "all"], default="nonoverlap")
     parser.add_argument("--output-dir", type=Path, default=Path("scripts/session_orb_top50_judas_fvg_risk2_v1_models"))
     parser.add_argument("--summary-path", type=Path, default=Path("scripts/session_orb_top50_judas_fvg_risk2_v1_model_summary.csv"))
     return parser.parse_args()
@@ -85,13 +86,25 @@ def train_model(data: pd.DataFrame, split: pd.Timestamp) -> tuple[Any, list[str]
     return model, cols
 
 
-def threshold_table(scored: pd.DataFrame, split: pd.Timestamp, thresholds: list[float]) -> pd.DataFrame:
+def threshold_table(
+    scored: pd.DataFrame,
+    split: pd.Timestamp,
+    thresholds: list[float],
+    *,
+    selection_mode: str,
+) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for threshold in thresholds:
-        selected = select_ranked_trades(scored, threshold=threshold, split=split)
+        selected = select_ranked_trades(
+            scored,
+            threshold=threshold,
+            split=split,
+            selection_mode=selection_mode,
+        )
         rows.append(
             {
                 "threshold": threshold,
+                "selection_mode": selection_mode,
                 **summary_from_selected(selected, split, prefix="selected"),
             }
         )
@@ -143,8 +156,18 @@ def train_symbol(symbol: str, args: argparse.Namespace, train_start: pd.Timestam
     model, cols = train_model(candidates, split)
     scored = candidates.copy()
     scored["ml_prob"] = model.predict_proba(scored[cols].astype(float))[:, 1]
-    selected = select_ranked_trades(scored, threshold=args.threshold, split=split)
-    table = threshold_table(scored, split, parse_thresholds(args.thresholds))
+    selected = select_ranked_trades(
+        scored,
+        threshold=args.threshold,
+        split=split,
+        selection_mode=args.selection_mode,
+    )
+    table = threshold_table(
+        scored,
+        split,
+        parse_thresholds(args.thresholds),
+        selection_mode=args.selection_mode,
+    )
     strategy_configs = [
         cfg
         for cfg in selected_configs
@@ -166,6 +189,7 @@ def train_symbol(symbol: str, args: argparse.Namespace, train_start: pd.Timestam
             "rank_config_scope": args.rank_config_scope,
             "top_train_variants": args.top_train_variants,
             "candidate_filter": args.candidate_filter,
+            "selection_mode": args.selection_mode,
             "fee_bps_per_side": args.fee_bps_per_side,
             "train_start": str(train_start),
             "split": str(split),
