@@ -306,3 +306,17 @@ services:
     volumes:
       - ./bot/configs:/app/configs:ro
       - ./bot/models:/app/models:rw
+
+  relay-bot:
+    build:
+      context: ./relay
+      dockerfile: Dockerfile
+    container_name: relay-bot
+    restart: unless-stopped
+    env_file:
+      - ./relay/.env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
