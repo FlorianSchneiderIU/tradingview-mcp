@@ -95,7 +95,7 @@ def process_message(text, channel_type):
 
     return processed_text
 
-@client.on(events.NewMessage())
+@client.on(events.NewMessage(chats=STAGING_CHANNELS))
 async def handler(event):
     staging_chat_id = event.chat_id
     logger.info(f"Received message from chat_id: {staging_chat_id}")
