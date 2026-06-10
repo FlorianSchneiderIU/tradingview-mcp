@@ -75,6 +75,13 @@ import requests
 from pybit.unified_trading import HTTP
 from market_context import MarketContextEnricher
 
+
+def _env_csv_set(name: str, *, lower: bool = True) -> set[str]:
+    raw = os.environ.get(name, "")
+    values = {item.strip() for item in raw.split(",") if item.strip()}
+    return {value.lower() for value in values} if lower else values
+
+
 # --- Config -------------------------------------------------------------------
 DEMO = os.environ.get("BYBIT_DEMO", "true").lower() in ("1", "true", "yes")
 LIVE_TRADING_CONFIRM = os.environ.get("LIVE_TRADING_CONFIRM", "false").lower() in ("1", "true", "yes")
@@ -123,6 +130,11 @@ MATRIX_RL_EXECUTION_QUEUE_SIZE = int(
         os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"),
     )
 )
+MATRIX_FUNDED_RL_EXECUTION_URL = os.environ.get("MATRIX_FUNDED_RL_EXECUTION_URL", "").strip()
+MATRIX_FUNDED_SYMBOLS = _env_csv_set("MATRIX_FUNDED_SYMBOLS")
+MATRIX_FUNDED_STRATEGIES = _env_csv_set("MATRIX_FUNDED_STRATEGIES")
+MATRIX_FUNDED_STATUSES = _env_csv_set("MATRIX_FUNDED_STATUSES")
+MATRIX_FUNDED_ROOM_IDS = _env_csv_set("MATRIX_FUNDED_ROOM_IDS", lower=False)
 # --- Logging ------------------------------------------------------------------
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -1072,13 +1084,36 @@ class MatrixRlSidecarClient:
         self._url = MATRIX_RL_EXECUTION_URL
         base_url = self._url.rsplit("/v1/signals", 1)[0] if "/v1/signals" in self._url else self._url.rstrip("/")
         self._decision_url = f"{base_url}/v1/decisions" if base_url else ""
+        self._routes: list[dict] = []
+        if self._url:
+            self._routes.append(
+                {
+                    "name": "primary",
+                    "url": self._url,
+                    "symbols": set(),
+                    "strategies": set(),
+                    "statuses": set(),
+                    "room_ids": set(),
+                }
+            )
+        if MATRIX_FUNDED_RL_EXECUTION_URL:
+            self._routes.append(
+                {
+                    "name": "funded",
+                    "url": MATRIX_FUNDED_RL_EXECUTION_URL,
+                    "symbols": MATRIX_FUNDED_SYMBOLS,
+                    "strategies": MATRIX_FUNDED_STRATEGIES,
+                    "statuses": MATRIX_FUNDED_STATUSES,
+                    "room_ids": MATRIX_FUNDED_ROOM_IDS,
+                }
+            )
         self._timeout = max(0.1, MATRIX_RL_EXECUTION_TIMEOUT_SECONDS)
         self._queue: queue.Queue[dict] | None = None
         self._dispatch_thread: threading.Thread | None = None
         self._market_http = HTTP(testnet=False, demo=DEMO)
         self._market_enricher = MarketContextEnricher(self._market_http, logger=log)
 
-        if self._url:
+        if self._routes:
             self._queue = queue.Queue(maxsize=max(1, MATRIX_RL_EXECUTION_QUEUE_SIZE))
             self._dispatch_thread = threading.Thread(
                 target=self._dispatch_worker,
@@ -1086,9 +1121,10 @@ class MatrixRlSidecarClient:
                 name="matrix-rl-dispatch",
             )
             self._dispatch_thread.start()
-            log.info("Matrix RL sidecar enabled  signal_url=%s", self._url)
+            route_desc = ", ".join(f"{route['name']}={route['url']}" for route in self._routes)
+            log.info("Matrix RL sidecar routes enabled  %s", route_desc)
         else:
-            log.info("Matrix RL sidecar disabled; MATRIX_RL_EXECUTION_URL is empty")
+            log.info("Matrix RL sidecar disabled; MATRIX_RL_EXECUTION_URL and MATRIX_FUNDED_RL_EXECUTION_URL are empty")
 
     def _market_features_for_signal(self, sig: dict) -> dict:
         symbol = str(sig.get("symbol") or "").upper()
@@ -1179,12 +1215,28 @@ class MatrixRlSidecarClient:
             "extra": {},
         }
 
+    @staticmethod
+    def _route_matches(route: dict, payload: dict) -> bool:
+        symbol = str(payload.get("symbol") or "").strip().lower()
+        strategy = str(payload.get("strategy") or "").strip().lower()
+        status = str(payload.get("status") or "").strip().lower()
+        room_id = str(payload.get("room_id") or "").strip()
+        if route.get("symbols") and symbol not in route["symbols"]:
+            return False
+        if route.get("strategies") and strategy not in route["strategies"]:
+            return False
+        if route.get("statuses") and status not in route["statuses"]:
+            return False
+        if route.get("room_ids") and room_id not in route["room_ids"]:
+            return False
+        return True
+
     def enqueue_signal(self, sig: dict, status: str, reason: str | None, source_event_id: str | None = None) -> dict:
-        if not self._url or self._queue is None:
+        if not self._routes or self._queue is None:
             return {
                 "enabled": False,
                 "queued": False,
-                "message": "MATRIX_RL_EXECUTION_URL is empty",
+                "message": "No Matrix RL execution routes configured",
             }
         payload = self._build_signal_payload(
             status,
@@ -1192,25 +1244,42 @@ class MatrixRlSidecarClient:
             reason=reason,
             source_event_id=source_event_id,
         )
-        try:
-            self._queue.put_nowait(payload)
-        except queue.Full:
-            log.warning(
-                "[matrix-rl] Dispatch queue full; dropping %s signal %s %s",
-                status,
-                sig.get("symbol"),
-                sig.get("strategy", "matrix"),
-            )
+        queued_routes: list[str] = []
+        matched_routes: list[str] = []
+        for route in self._routes:
+            if not self._route_matches(route, payload):
+                continue
+            matched_routes.append(str(route["name"]))
+            try:
+                self._queue.put_nowait({"route": route, "payload": payload})
+                queued_routes.append(str(route["name"]))
+            except queue.Full:
+                log.warning(
+                    "[matrix-rl:%s] Dispatch queue full; dropping %s signal %s %s",
+                    route["name"],
+                    status,
+                    sig.get("symbol"),
+                    sig.get("strategy", "matrix"),
+                )
+        if not matched_routes:
             return {
                 "enabled": True,
                 "queued": False,
-                "message": "RL dispatch queue full",
+                "message": "No Matrix RL route matched signal",
+                "routes_matched": [],
+                "routes_queued": [],
             }
         return {
             "enabled": True,
-            "queued": True,
-            "message": "RL sidecar signal queued",
+            "queued": bool(queued_routes),
+            "message": (
+                f"RL sidecar signal queued: {', '.join(queued_routes)}"
+                if queued_routes
+                else "RL dispatch queue full for matched routes"
+            ),
             "event_id": payload.get("event_id"),
+            "routes_matched": matched_routes,
+            "routes_queued": queued_routes,
         }
 
     def fetch_decision_by_event_id(self, event_id: str) -> Optional[dict]:
@@ -1243,23 +1312,27 @@ class MatrixRlSidecarClient:
     def _dispatch_worker(self) -> None:
         assert self._queue is not None
         while True:
-            payload = self._queue.get()
+            item = self._queue.get()
             try:
-                self._dispatch_signal(payload)
+                if isinstance(item, dict) and "payload" in item and "route" in item:
+                    self._dispatch_signal(item["payload"], item["route"])
+                else:
+                    self._dispatch_signal(item, {"name": "primary", "url": self._url})
             except Exception as exc:
                 log.warning("[matrix-rl] Dispatch failed: %s", exc)
             finally:
                 self._queue.task_done()
 
-    def _dispatch_signal(self, payload: dict) -> None:
+    def _dispatch_signal(self, payload: dict, route: dict) -> None:
         response = requests.post(
-            self._url,
+            route["url"],
             json=payload,
             timeout=self._timeout,
         )
         if response.status_code >= 300:
             log.warning(
-                "[matrix-rl] Sidecar returned HTTP %s: %s",
+                "[matrix-rl:%s] Sidecar returned HTTP %s: %s",
+                route.get("name", "primary"),
                 response.status_code,
                 response.text[:300],
             )
@@ -1270,7 +1343,8 @@ class MatrixRlSidecarClient:
             reply = {}
 
         log.info(
-            "[matrix-rl] Dispatched %s signal %s %s decision=%s status=%s action=%s",
+            "[matrix-rl:%s] Dispatched %s signal %s %s decision=%s status=%s action=%s",
+            route.get("name", "primary"),
             payload.get("status"),
             payload.get("symbol"),
             payload.get("strategy"),
@@ -1729,6 +1803,9 @@ class MatrixSignalBot:
         rl_state = "queued" if dispatch.get("queued") else "not queued"
         if dispatch.get("enabled"):
             lines.append(f"RL sidecar: {rl_state}")
+            routes = dispatch.get("routes_queued")
+            if isinstance(routes, list) and routes:
+                lines.append(f"Routes: {', '.join(str(route) for route in routes)}")
         lines.append(f"Message: {result.get('message')}")
         return "\n".join(lines)
 

@@ -38,6 +38,11 @@ LOWPASS_NUMERIC_WEIGHTS = {
     "min_score": 1.15,
     "target_projection_bars": 0.65,
     "max_hold_bars": 0.55,
+    "p1_horizontal_tolerance_atr": 0.45,
+    "p1_horizontal_max_distance_bars": 0.35,
+    "p4_contrary_min_swing_atr": 0.55,
+    "min_v2_quality": 0.90,
+    "v2_score_weight": 0.70,
 }
 LOWPASS_CATEGORICAL_WEIGHTS = {
     "pattern_tf": 1.25,
@@ -45,6 +50,8 @@ LOWPASS_CATEGORICAL_WEIGHTS = {
     "pivot_source": 0.45,
     "trend_filter": 0.65,
     "regime_filter": 0.70,
+    "p1_horizontal_mode": 0.80,
+    "p4_contrary_mode": 0.80,
 }
 LOWPASS_MEDIAN_METRICS = [
     "robust_score",
@@ -412,6 +419,13 @@ class WolfeConfig:
     risk_fraction: float = 0.01
     min_entry_risk_pct: float = 0.05
     max_entry_risk_pct: float = 3.5
+    p1_horizontal_mode: str = "off"
+    p1_horizontal_tolerance_atr: float = 0.15
+    p1_horizontal_max_distance_bars: int = 16
+    p4_contrary_mode: str = "off"
+    p4_contrary_min_swing_atr: float = 0.50
+    min_v2_quality: float = 0.0
+    v2_score_weight: float = 0.0
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> "WolfeConfig":
@@ -441,6 +455,21 @@ class WolfeSignal:
     epa_slope_atr: float
     volume_ratio: float
     rsi: float
+    p1_horizontal_hit: bool
+    p1_horizontal_distance_bars: float
+    p1_horizontal_error_atr: float
+    p1_horizontal_score: float
+    p4_contrary_pivots: int
+    p4_contrary_swing_atr: float
+    p4_contrary_score: float
+    impulse_45_bars: int
+    impulse_45_atr: float
+    impulse_45_same_dir_ratio: float
+    sweet_zone_width_atr: float
+    sweet_zone_expansion_atr_per_bar: float
+    p5_volume_ratio: float
+    p5_rejection_atr: float
+    v2_quality: float
     trend_context: str
     pattern_tf: str
     exec_tf: str
@@ -481,6 +510,21 @@ class WolfeTrade:
     epa_slope_atr: float
     volume_ratio: float
     rsi: float
+    p1_horizontal_hit: bool
+    p1_horizontal_distance_bars: float
+    p1_horizontal_error_atr: float
+    p1_horizontal_score: float
+    p4_contrary_pivots: int
+    p4_contrary_swing_atr: float
+    p4_contrary_score: float
+    impulse_45_bars: int
+    impulse_45_atr: float
+    impulse_45_same_dir_ratio: float
+    sweet_zone_width_atr: float
+    sweet_zone_expansion_atr_per_bar: float
+    p5_volume_ratio: float
+    p5_rejection_atr: float
+    v2_quality: float
     pattern_tf: str
     exec_tf: str
     pivot_method: str
@@ -672,6 +716,216 @@ def find_pivots(pattern: pd.DataFrame, cfg: WolfeConfig) -> list[Pivot]:
     raise ValueError(f"Unknown pivot_method: {cfg.pivot_method!r}")
 
 
+def _point1_horizontal_features(
+    pivots: tuple[Pivot, Pivot, Pivot, Pivot, Pivot],
+    pattern: pd.DataFrame,
+    cfg: WolfeConfig,
+    atr: float,
+) -> dict[str, float | bool]:
+    p1, p2, p3, _p4, _p5 = pivots
+    level = float(p3.price)
+    start_idx = max(0, int(p1.idx) - max(int(cfg.p1_horizontal_max_distance_bars) * 4, 64))
+    end_idx = max(0, int(p2.idx))
+    if end_idx <= start_idx or len(pattern) == 0:
+        return {
+            "p1_horizontal_hit": False,
+            "p1_horizontal_hit_idx": math.nan,
+            "p1_horizontal_distance_bars": math.inf,
+            "p1_horizontal_error_atr": math.inf,
+            "p1_horizontal_score": 0.0,
+        }
+    highs = pattern["high"].to_numpy(dtype=float)
+    lows = pattern["low"].to_numpy(dtype=float)
+    tolerance = max(float(cfg.p1_horizontal_tolerance_atr), 0.0) * max(float(atr), 1e-9)
+    best_idx: int | None = None
+    best_error = math.inf
+    for idx in range(end_idx - 1, start_idx - 1, -1):
+        low = float(lows[idx])
+        high = float(highs[idx])
+        if low - tolerance <= level <= high + tolerance:
+            error = 0.0 if low <= level <= high else min(abs(level - low), abs(level - high))
+            best_idx = idx
+            best_error = error
+            break
+    if best_idx is None:
+        return {
+            "p1_horizontal_hit": False,
+            "p1_horizontal_hit_idx": math.nan,
+            "p1_horizontal_distance_bars": math.inf,
+            "p1_horizontal_error_atr": math.inf,
+            "p1_horizontal_score": 0.0,
+        }
+    distance = abs(int(p1.idx) - int(best_idx))
+    max_distance = max(float(cfg.p1_horizontal_max_distance_bars), 1.0)
+    distance_score = max(0.0, 1.0 - min(distance / max_distance, 1.0))
+    error_atr = best_error / max(float(atr), 1e-9)
+    error_score = max(0.0, 1.0 - min(error_atr / max(float(cfg.p1_horizontal_tolerance_atr), 1e-9), 1.0))
+    return {
+        "p1_horizontal_hit": True,
+        "p1_horizontal_hit_idx": float(best_idx),
+        "p1_horizontal_distance_bars": float(distance),
+        "p1_horizontal_error_atr": float(error_atr),
+        "p1_horizontal_score": float(0.35 + 0.45 * distance_score + 0.20 * error_score),
+    }
+
+
+def _minor_contrary_pivots(pattern: pd.DataFrame, cfg: WolfeConfig, p2: Pivot, p4: Pivot) -> list[Pivot]:
+    start = max(0, int(p2.idx))
+    end = min(len(pattern) - 1, int(p4.idx))
+    if end - start < 6:
+        return []
+    segment = pattern.iloc[start : end + 1].reset_index(drop=True)
+    minor_cfg = WolfeConfig.from_mapping(
+        {
+            **asdict(cfg),
+            "pivot_method": "fractal",
+            "pivot_window": max(2, min(5, int(cfg.pivot_window) // 2 or 2)),
+            "pivot_confirm_window": max(1, min(3, int(cfg.pivot_confirm_window) // 2 or 1)),
+        }
+    )
+    pivots = fractal_pivots(segment, minor_cfg)
+    out: list[Pivot] = []
+    for pivot in pivots:
+        global_idx = pivot.idx + start
+        if global_idx <= start or global_idx >= end:
+            continue
+        out.append(
+            Pivot(
+                idx=int(global_idx),
+                confirm_idx=int(pivot.confirm_idx + start),
+                time=pivot.time,
+                confirm_time=pivot.confirm_time,
+                kind=pivot.kind,
+                price=float(pivot.price),
+                atr=float(pivot.atr),
+            )
+        )
+    return dedupe_alternating(out)
+
+
+def _point4_contrary_features(
+    pivots: tuple[Pivot, Pivot, Pivot, Pivot, Pivot],
+    pattern: pd.DataFrame,
+    cfg: WolfeConfig,
+    atr: float,
+) -> dict[str, float | int]:
+    _p1, p2, _p3, p4, _p5 = pivots
+    minor = _minor_contrary_pivots(pattern, cfg, p2, p4)
+    max_swing = 0.0
+    for a, b in zip(minor, minor[1:]):
+        max_swing = max(max_swing, abs(float(b.price) - float(a.price)) / max(float(atr), 1e-9))
+    mode = str(cfg.p4_contrary_mode or "off").strip().lower()
+    required = 3
+    if mode == "pivots3":
+        required = 3
+    elif mode == "pivots5":
+        required = 5
+    count_score = min(len(minor) / max(required, 1), 1.0)
+    swing_score = min(max_swing / max(float(cfg.p4_contrary_min_swing_atr), 1e-9), 1.0)
+    return {
+        "p4_contrary_pivots": int(len(minor)),
+        "p4_contrary_swing_atr": float(max_swing),
+        "p4_contrary_score": float(0.60 * count_score + 0.40 * swing_score),
+    }
+
+
+def _impulse_features(
+    pivots: tuple[Pivot, Pivot, Pivot, Pivot, Pivot],
+    pattern: pd.DataFrame,
+    direction: str,
+    atr: float,
+) -> dict[str, float | int]:
+    _p1, _p2, _p3, p4, p5 = pivots
+    bars = max(int(p5.idx) - int(p4.idx), 1)
+    impulse_atr = abs(float(p5.price) - float(p4.price)) / max(float(atr), 1e-9)
+    segment = pattern.iloc[int(p4.idx) + 1 : int(p5.idx) + 1]
+    if segment.empty:
+        same_dir_ratio = 0.0
+    elif direction == "long":
+        same_dir_ratio = float((segment["close"].to_numpy(dtype=float) < segment["open"].to_numpy(dtype=float)).mean())
+    else:
+        same_dir_ratio = float((segment["close"].to_numpy(dtype=float) > segment["open"].to_numpy(dtype=float)).mean())
+    speed_score = min((impulse_atr / max(bars, 1)) / 0.35, 1.0)
+    impulse_score = 0.55 * same_dir_ratio + 0.45 * speed_score
+    return {
+        "impulse_45_bars": int(bars),
+        "impulse_45_atr": float(impulse_atr),
+        "impulse_45_same_dir_ratio": float(same_dir_ratio),
+        "impulse_45_score": float(impulse_score),
+    }
+
+
+def _sweet_zone_features(
+    pivots: tuple[Pivot, Pivot, Pivot, Pivot, Pivot],
+    valid: dict[str, Any],
+    atr: float,
+) -> dict[str, float]:
+    _p1, _p2, _p3, p4, p5 = pivots
+    line13_p4 = line_value(float(valid["m13_i"]), float(valid["b13_i"]), p4.idx)
+    line13_p5 = line_value(float(valid["m13_i"]), float(valid["b13_i"]), p5.idx)
+    line24_p4 = line_value(float(valid["m24_i"]), float(valid["b24_i"]), p4.idx)
+    line24_p5 = line_value(float(valid["m24_i"]), float(valid["b24_i"]), p5.idx)
+    width_p4 = abs(line24_p4 - line13_p4) / max(float(atr), 1e-9)
+    width_p5 = abs(line24_p5 - line13_p5) / max(float(atr), 1e-9)
+    bars = max(int(p5.idx) - int(p4.idx), 1)
+    expansion = (width_p5 - width_p4) / bars
+    width_score = _score_closeness(width_p5, 1.8, 2.2)
+    expansion_score = max(0.0, 1.0 - min(max(expansion, 0.0) / 0.35, 1.0))
+    return {
+        "sweet_zone_width_atr": float(width_p5),
+        "sweet_zone_expansion_atr_per_bar": float(expansion),
+        "sweet_zone_score": float(0.70 * width_score + 0.30 * expansion_score),
+    }
+
+
+def _point5_volume_rejection_features(
+    pivots: tuple[Pivot, Pivot, Pivot, Pivot, Pivot],
+    pattern: pd.DataFrame,
+    direction: str,
+    atr: float,
+) -> dict[str, float]:
+    p5 = pivots[-1]
+    row = pattern.iloc[min(max(int(p5.idx), 0), len(pattern) - 1)]
+    volume_ratio = float(row.get("volume_ratio", math.nan))
+    close = float(row.get("close", math.nan))
+    if direction == "long":
+        rejection_atr = (close - float(p5.price)) / max(float(atr), 1e-9)
+    else:
+        rejection_atr = (float(p5.price) - close) / max(float(atr), 1e-9)
+    volume_score = min(max((volume_ratio - 1.0) / 1.5, 0.0), 1.0) if _finite(volume_ratio) else 0.0
+    rejection_score = min(max(rejection_atr / 0.6, 0.0), 1.0) if _finite(rejection_atr) else 0.0
+    return {
+        "p5_volume_ratio": volume_ratio if _finite(volume_ratio) else math.nan,
+        "p5_rejection_atr": float(rejection_atr) if _finite(rejection_atr) else math.nan,
+        "volume_rejection_score": float(0.45 * volume_score + 0.55 * rejection_score),
+    }
+
+
+def structural_quality_features(
+    pivots: tuple[Pivot, Pivot, Pivot, Pivot, Pivot],
+    pattern: pd.DataFrame,
+    valid: dict[str, Any],
+    direction: str,
+    cfg: WolfeConfig,
+    atr: float,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    out.update(_point1_horizontal_features(pivots, pattern, cfg, atr))
+    out.update(_point4_contrary_features(pivots, pattern, cfg, atr))
+    out.update(_impulse_features(pivots, pattern, direction, atr))
+    out.update(_sweet_zone_features(pivots, valid, atr))
+    out.update(_point5_volume_rejection_features(pivots, pattern, direction, atr))
+    components = [
+        float(out.get("p1_horizontal_score", 0.0)),
+        float(out.get("p4_contrary_score", 0.0)),
+        float(out.get("impulse_45_score", 0.0)),
+        float(out.get("sweet_zone_score", 0.0)),
+        float(out.get("volume_rejection_score", 0.0)),
+    ]
+    out["v2_quality"] = float(100.0 * sum(components) / len(components))
+    return out
+
+
 def score_pattern(
     pivots: tuple[Pivot, Pivot, Pivot, Pivot, Pivot],
     *,
@@ -682,6 +936,7 @@ def score_pattern(
     epa_slope_atr: float,
     target_rr: float,
     cfg: WolfeConfig,
+    v2_quality: float = 0.0,
 ) -> float:
     symmetry = _score_closeness(symmetry_ratio, 1.0, max(cfg.max_time_ratio - 1.0, 0.1))
     false_break_mid = (cfg.min_p5_break_atr + cfg.max_p5_break_atr) / 2.0
@@ -712,6 +967,9 @@ def score_pattern(
         + 18.0 * rr_score
         + 10.0 * depth_balance
     )
+    weight = max(0.0, min(float(cfg.v2_score_weight), 1.0))
+    if weight > 0.0:
+        raw = (1.0 - weight) * raw + weight * max(0.0, min(float(v2_quality), 100.0))
     return round(float(max(0.0, min(100.0, raw))), 3)
 
 
@@ -837,10 +1095,12 @@ def validate_pivot_five(
     context_ok, trend_context = _pattern_context_ok(row, direction, cfg)
     if not context_ok:
         return None
-    return {
+    valid = {
         "direction": direction,
         "m13_i": m13_i,
         "b13_i": b13_i,
+        "m24_i": m24_i,
+        "b24_i": b24_i,
         "m14_t": m14_t,
         "b14_t": b14_t,
         "p5_break_atr": float(p5_break_atr),
@@ -849,6 +1109,30 @@ def validate_pivot_five(
         "epa_slope_atr": float(epa_slope_atr),
         "trend_context": trend_context,
     }
+    quality = structural_quality_features(pivots, pattern, valid, direction, cfg, atr)
+    p1_mode = str(cfg.p1_horizontal_mode or "off").strip().lower()
+    if p1_mode not in {"off", "before_p2", "near_p1"}:
+        raise ValueError(f"Unknown p1_horizontal_mode: {cfg.p1_horizontal_mode!r}")
+    if p1_mode != "off":
+        if not bool(quality["p1_horizontal_hit"]):
+            return None
+        if p1_mode == "near_p1" and float(quality["p1_horizontal_distance_bars"]) > float(cfg.p1_horizontal_max_distance_bars):
+            return None
+
+    p4_mode = str(cfg.p4_contrary_mode or "off").strip().lower()
+    if p4_mode not in {"off", "pivots3", "pivots5"}:
+        raise ValueError(f"Unknown p4_contrary_mode: {cfg.p4_contrary_mode!r}")
+    if p4_mode != "off":
+        required = 3 if p4_mode == "pivots3" else 5
+        if int(quality["p4_contrary_pivots"]) < required:
+            return None
+        if float(quality["p4_contrary_swing_atr"]) < float(cfg.p4_contrary_min_swing_atr):
+            return None
+
+    if float(cfg.min_v2_quality) > 0.0 and float(quality["v2_quality"]) < float(cfg.min_v2_quality):
+        return None
+    valid.update(quality)
+    return valid
 
 
 def _exec_time_index(exec_df: pd.DataFrame) -> pd.DatetimeIndex:
@@ -977,6 +1261,7 @@ def _find_entry(
             epa_slope_atr=float(valid["epa_slope_atr"]),
             target_rr=target_rr,
             cfg=cfg,
+            v2_quality=float(valid.get("v2_quality", 0.0)),
         )
         if score < cfg.min_score:
             continue
@@ -1000,6 +1285,21 @@ def _find_entry(
             epa_slope_atr=float(valid["epa_slope_atr"]),
             volume_ratio=volume_ratio if _finite(volume_ratio) else math.nan,
             rsi=float(row.get("rsi", math.nan)),
+            p1_horizontal_hit=bool(valid.get("p1_horizontal_hit", False)),
+            p1_horizontal_distance_bars=float(valid.get("p1_horizontal_distance_bars", math.nan)),
+            p1_horizontal_error_atr=float(valid.get("p1_horizontal_error_atr", math.nan)),
+            p1_horizontal_score=float(valid.get("p1_horizontal_score", 0.0)),
+            p4_contrary_pivots=int(valid.get("p4_contrary_pivots", 0)),
+            p4_contrary_swing_atr=float(valid.get("p4_contrary_swing_atr", 0.0)),
+            p4_contrary_score=float(valid.get("p4_contrary_score", 0.0)),
+            impulse_45_bars=int(valid.get("impulse_45_bars", 0)),
+            impulse_45_atr=float(valid.get("impulse_45_atr", math.nan)),
+            impulse_45_same_dir_ratio=float(valid.get("impulse_45_same_dir_ratio", math.nan)),
+            sweet_zone_width_atr=float(valid.get("sweet_zone_width_atr", math.nan)),
+            sweet_zone_expansion_atr_per_bar=float(valid.get("sweet_zone_expansion_atr_per_bar", math.nan)),
+            p5_volume_ratio=float(valid.get("p5_volume_ratio", math.nan)),
+            p5_rejection_atr=float(valid.get("p5_rejection_atr", math.nan)),
+            v2_quality=float(valid.get("v2_quality", 0.0)),
             trend_context=str(valid["trend_context"]),
             pattern_tf=cfg.pattern_tf,
             exec_tf=cfg.exec_tf,
@@ -1072,6 +1372,21 @@ def signal_rows(signals: list[WolfeSignal]) -> pd.DataFrame:
             "epa_slope_atr": sig.epa_slope_atr,
             "volume_ratio": sig.volume_ratio,
             "rsi": sig.rsi,
+            "p1_horizontal_hit": sig.p1_horizontal_hit,
+            "p1_horizontal_distance_bars": sig.p1_horizontal_distance_bars,
+            "p1_horizontal_error_atr": sig.p1_horizontal_error_atr,
+            "p1_horizontal_score": sig.p1_horizontal_score,
+            "p4_contrary_pivots": sig.p4_contrary_pivots,
+            "p4_contrary_swing_atr": sig.p4_contrary_swing_atr,
+            "p4_contrary_score": sig.p4_contrary_score,
+            "impulse_45_bars": sig.impulse_45_bars,
+            "impulse_45_atr": sig.impulse_45_atr,
+            "impulse_45_same_dir_ratio": sig.impulse_45_same_dir_ratio,
+            "sweet_zone_width_atr": sig.sweet_zone_width_atr,
+            "sweet_zone_expansion_atr_per_bar": sig.sweet_zone_expansion_atr_per_bar,
+            "p5_volume_ratio": sig.p5_volume_ratio,
+            "p5_rejection_atr": sig.p5_rejection_atr,
+            "v2_quality": sig.v2_quality,
             "trend_context": sig.trend_context,
             "pattern_tf": sig.pattern_tf,
             "exec_tf": sig.exec_tf,
@@ -1187,6 +1502,21 @@ def run_backtest(
                 epa_slope_atr=float(sig.epa_slope_atr),
                 volume_ratio=float(sig.volume_ratio),
                 rsi=float(sig.rsi),
+                p1_horizontal_hit=bool(sig.p1_horizontal_hit),
+                p1_horizontal_distance_bars=float(sig.p1_horizontal_distance_bars),
+                p1_horizontal_error_atr=float(sig.p1_horizontal_error_atr),
+                p1_horizontal_score=float(sig.p1_horizontal_score),
+                p4_contrary_pivots=int(sig.p4_contrary_pivots),
+                p4_contrary_swing_atr=float(sig.p4_contrary_swing_atr),
+                p4_contrary_score=float(sig.p4_contrary_score),
+                impulse_45_bars=int(sig.impulse_45_bars),
+                impulse_45_atr=float(sig.impulse_45_atr),
+                impulse_45_same_dir_ratio=float(sig.impulse_45_same_dir_ratio),
+                sweet_zone_width_atr=float(sig.sweet_zone_width_atr),
+                sweet_zone_expansion_atr_per_bar=float(sig.sweet_zone_expansion_atr_per_bar),
+                p5_volume_ratio=float(sig.p5_volume_ratio),
+                p5_rejection_atr=float(sig.p5_rejection_atr),
+                v2_quality=float(sig.v2_quality),
                 pattern_tf=sig.pattern_tf,
                 exec_tf=sig.exec_tf,
                 pivot_method=sig.pivot_method,
@@ -1360,6 +1690,13 @@ BTC_TUNE_KEYS = [
     "max_hold_bars",
     "trend_filter",
     "regime_filter",
+    "p1_horizontal_mode",
+    "p1_horizontal_tolerance_atr",
+    "p1_horizontal_max_distance_bars",
+    "p4_contrary_mode",
+    "p4_contrary_min_swing_atr",
+    "min_v2_quality",
+    "v2_score_weight",
 ]
 BTC_TUNE_VALUES = {
     "pattern_tf": ("5m", "15m", "1h", "4h"),
@@ -1375,11 +1712,32 @@ BTC_TUNE_VALUES = {
     "max_hold_bars": (96, 144, 288, 432, 576),
     "trend_filter": ("none", "rsi"),
     "regime_filter": ("none", "high_vol", "low_vol", "trend_aligned", "mean_reversion"),
+    "p1_horizontal_mode": ("off",),
+    "p1_horizontal_tolerance_atr": (0.15,),
+    "p1_horizontal_max_distance_bars": (16,),
+    "p4_contrary_mode": ("off",),
+    "p4_contrary_min_swing_atr": (0.50,),
+    "min_v2_quality": (0.0,),
+    "v2_score_weight": (0.0,),
+}
+WOLFE_V2_TUNE_VALUES = {
+    "p1_horizontal_mode": ("off", "before_p2", "near_p1"),
+    "p1_horizontal_tolerance_atr": (0.05, 0.15, 0.30),
+    "p1_horizontal_max_distance_bars": (8, 16, 32),
+    "p4_contrary_mode": ("off", "pivots3", "pivots5"),
+    "p4_contrary_min_swing_atr": (0.25, 0.50, 0.80),
+    "min_v2_quality": (0.0, 45.0, 60.0),
+    "v2_score_weight": (0.0, 0.20, 0.35),
 }
 BTC_CONFIRM_VALUES = {
     "zigzag": (0,),
     "fractal": (0, 3, 5, 8, 12),
 }
+
+
+def enable_wolfe_v2_tune_values() -> None:
+    for key, values in WOLFE_V2_TUNE_VALUES.items():
+        BTC_TUNE_VALUES[key] = values
 
 
 def btc_parameter_grid(max_configs: int, seed: int = 42) -> list[dict[str, Any]]:
@@ -1402,6 +1760,13 @@ def btc_parameter_grid(max_configs: int, seed: int = 42) -> list[dict[str, Any]]
                 BTC_TUNE_VALUES["max_hold_bars"],
                 BTC_TUNE_VALUES["trend_filter"],
                 BTC_TUNE_VALUES["regime_filter"],
+                BTC_TUNE_VALUES["p1_horizontal_mode"],
+                BTC_TUNE_VALUES["p1_horizontal_tolerance_atr"],
+                BTC_TUNE_VALUES["p1_horizontal_max_distance_bars"],
+                BTC_TUNE_VALUES["p4_contrary_mode"],
+                BTC_TUNE_VALUES["p4_contrary_min_swing_atr"],
+                BTC_TUNE_VALUES["min_v2_quality"],
+                BTC_TUNE_VALUES["v2_score_weight"],
             ):
                 yield dict(zip(BTC_TUNE_KEYS, (pivot_method, *values)))
 
@@ -1425,6 +1790,13 @@ def btc_parameter_grid(max_configs: int, seed: int = 42) -> list[dict[str, Any]]
                 len(BTC_TUNE_VALUES["max_hold_bars"]),
                 len(BTC_TUNE_VALUES["trend_filter"]),
                 len(BTC_TUNE_VALUES["regime_filter"]),
+                len(BTC_TUNE_VALUES["p1_horizontal_mode"]),
+                len(BTC_TUNE_VALUES["p1_horizontal_tolerance_atr"]),
+                len(BTC_TUNE_VALUES["p1_horizontal_max_distance_bars"]),
+                len(BTC_TUNE_VALUES["p4_contrary_mode"]),
+                len(BTC_TUNE_VALUES["p4_contrary_min_swing_atr"]),
+                len(BTC_TUNE_VALUES["min_v2_quality"]),
+                len(BTC_TUNE_VALUES["v2_score_weight"]),
             ]
         )
         for method in methods
@@ -1457,6 +1829,13 @@ def btc_parameter_grid(max_configs: int, seed: int = 42) -> list[dict[str, Any]]
             "max_hold_bars": pick(BTC_TUNE_VALUES["max_hold_bars"]),
             "trend_filter": pick(BTC_TUNE_VALUES["trend_filter"]),
             "regime_filter": pick(BTC_TUNE_VALUES["regime_filter"]),
+            "p1_horizontal_mode": pick(BTC_TUNE_VALUES["p1_horizontal_mode"]),
+            "p1_horizontal_tolerance_atr": pick(BTC_TUNE_VALUES["p1_horizontal_tolerance_atr"]),
+            "p1_horizontal_max_distance_bars": pick(BTC_TUNE_VALUES["p1_horizontal_max_distance_bars"]),
+            "p4_contrary_mode": pick(BTC_TUNE_VALUES["p4_contrary_mode"]),
+            "p4_contrary_min_swing_atr": pick(BTC_TUNE_VALUES["p4_contrary_min_swing_atr"]),
+            "min_v2_quality": pick(BTC_TUNE_VALUES["min_v2_quality"]),
+            "v2_score_weight": pick(BTC_TUNE_VALUES["v2_score_weight"]),
         }
         key = tuple(row[key] for key in BTC_TUNE_KEYS)
         if key in seen:
@@ -1480,7 +1859,13 @@ def plain_value(value: Any) -> Any:
 
 
 def coerce_tune_param(key: str, value: Any) -> Any:
-    if key in {"pivot_window", "pivot_confirm_window", "target_projection_bars", "max_hold_bars"}:
+    if key in {
+        "pivot_window",
+        "pivot_confirm_window",
+        "target_projection_bars",
+        "max_hold_bars",
+        "p1_horizontal_max_distance_bars",
+    }:
         return int(float(value))
     if key in {
         "zigzag_atr_mult",
@@ -1489,6 +1874,10 @@ def coerce_tune_param(key: str, value: Any) -> Any:
         "stop_atr_buffer",
         "min_rr",
         "min_score",
+        "p1_horizontal_tolerance_atr",
+        "p4_contrary_min_swing_atr",
+        "min_v2_quality",
+        "v2_score_weight",
     }:
         return float(value)
     return str(value)
@@ -1556,6 +1945,29 @@ def local_refinement_options(seed_params: dict[str, Any], width: int) -> dict[st
         "regime_filter": tuple(
             dict.fromkeys((seed_params.get("regime_filter", "none"), *BTC_TUNE_VALUES["regime_filter"]))
         ),
+        "p1_horizontal_mode": tuple(
+            dict.fromkeys((seed_params.get("p1_horizontal_mode", "off"), *BTC_TUNE_VALUES["p1_horizontal_mode"]))
+        ),
+        "p1_horizontal_tolerance_atr": adjacent_values(
+            BTC_TUNE_VALUES["p1_horizontal_tolerance_atr"],
+            seed_params.get("p1_horizontal_tolerance_atr", 0.15),
+            width,
+        ),
+        "p1_horizontal_max_distance_bars": adjacent_values(
+            BTC_TUNE_VALUES["p1_horizontal_max_distance_bars"],
+            seed_params.get("p1_horizontal_max_distance_bars", 16),
+            width,
+        ),
+        "p4_contrary_mode": tuple(
+            dict.fromkeys((seed_params.get("p4_contrary_mode", "off"), *BTC_TUNE_VALUES["p4_contrary_mode"]))
+        ),
+        "p4_contrary_min_swing_atr": adjacent_values(
+            BTC_TUNE_VALUES["p4_contrary_min_swing_atr"],
+            seed_params.get("p4_contrary_min_swing_atr", 0.50),
+            width,
+        ),
+        "min_v2_quality": adjacent_values(BTC_TUNE_VALUES["min_v2_quality"], seed_params.get("min_v2_quality", 0.0), width),
+        "v2_score_weight": adjacent_values(BTC_TUNE_VALUES["v2_score_weight"], seed_params.get("v2_score_weight", 0.0), width),
     }
 
 
@@ -1950,6 +2362,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refine-random-seed", type=int, default=725)
     parser.add_argument("--pattern-tfs", help="Comma-separated pattern timeframes to include in tuning/refinement.")
     parser.add_argument("--regime-filters", help="Comma-separated regime filters to include in tuning/refinement.")
+    parser.add_argument("--enable-v2-grid", action="store_true", help="Include Wolfe v2 structural validation/scoring params in tuning.")
     parser.add_argument("--disable-fee-aware-stop", action="store_true")
     parser.add_argument("--max-fee-to-price-risk", type=float)
     parser.add_argument("--disable-lowpass", action="store_true")
@@ -1972,6 +2385,9 @@ def split_cli_values(raw: str | None) -> tuple[str, ...] | None:
 
 
 def apply_tune_value_filters(args: argparse.Namespace) -> None:
+    if getattr(args, "enable_v2_grid", False):
+        enable_wolfe_v2_tune_values()
+
     pattern_tfs = split_cli_values(args.pattern_tfs)
     if pattern_tfs is not None:
         normalized = tuple(normalize_timeframe(value) for value in pattern_tfs)

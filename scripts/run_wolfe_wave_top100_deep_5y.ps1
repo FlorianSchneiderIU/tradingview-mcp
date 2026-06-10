@@ -6,7 +6,10 @@ param(
     [int]$RefineSamplesPerSeed = 48,
     [string]$RunName = "",
     [switch]$Refresh,
-    [switch]$Resume
+    [switch]$Resume,
+    [switch]$EnableV2Grid,
+    [string]$PythonExe = "",
+    [switch]$CheckEnvOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,8 +17,79 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
+function Test-WolfePythonEnv {
+    param([string]$Candidate)
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {
+        return $false
+    }
+    $Probe = "import pandas, numpy, requests"
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Candidate -c $Probe 1>$null 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+}
+
+function Add-PythonCandidate {
+    param(
+        [string[]]$Current,
+        [string]$Candidate
+    )
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {
+        return $Current
+    }
+    if ($Current -contains $Candidate) {
+        return $Current
+    }
+    return @($Current + $Candidate)
+}
+
+$PythonCandidates = @()
+if (![string]::IsNullOrWhiteSpace($PythonExe)) {
+    $PythonCandidates = Add-PythonCandidate $PythonCandidates $PythonExe
+}
+else {
+    $PythonCandidates = Add-PythonCandidate $PythonCandidates $env:WOLFE_PYTHON
+    $PythonCandidates = Add-PythonCandidate $PythonCandidates (Join-Path $RepoRoot ".venv\Scripts\python.exe")
+    foreach ($Candidate in @(where.exe python 2>$null)) {
+        $PythonCandidates = Add-PythonCandidate $PythonCandidates $Candidate
+    }
+    foreach ($Line in @(py -0p 2>$null)) {
+        if ($Line -match "([A-Za-z]:\\.*python(?:\.exe)?)\s*$") {
+            $PythonCandidates = Add-PythonCandidate $PythonCandidates $Matches[1]
+        }
+    }
+}
+
+$SelectedPython = $null
+foreach ($Candidate in $PythonCandidates) {
+    if (Test-WolfePythonEnv $Candidate) {
+        $SelectedPython = $Candidate
+        break
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($SelectedPython)) {
+    $Tried = if ($PythonCandidates.Count -gt 0) { $PythonCandidates -join "`n  " } else { "(none)" }
+    throw "No Python interpreter with pandas, numpy, and requests was found. Tried:`n  $Tried`nPass -PythonExe C:\path\to\python.exe or install dependencies into the repo .venv."
+}
+
+if ($CheckEnvOnly) {
+    Write-Host "Wolfe Python environment OK: $SelectedPython"
+    & $SelectedPython -c "import sys, pandas, numpy, requests; print(sys.executable); print('pandas', pandas.__version__); print('numpy', numpy.__version__); print('requests', requests.__version__)"
+    exit $LASTEXITCODE
+}
+
 if ([string]::IsNullOrWhiteSpace($RunName)) {
-    $RunName = "wolfe_wave_top100_deep5y_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+    $Prefix = if ($EnableV2Grid) { "wolfe_wave_v2_top100_deep5y" } else { "wolfe_wave_top100_deep5y" }
+    $RunName = "{0}_{1}" -f $Prefix, (Get-Date -Format "yyyyMMdd_HHmmss")
 }
 
 $OutputDir = Join-Path "scripts" $RunName
@@ -66,6 +140,10 @@ if ($Resume) {
     $PythonArgs += "--resume"
 }
 
+if ($EnableV2Grid) {
+    $PythonArgs += "--enable-v2-grid"
+}
+
 if ($ExtraSymbols.Count -gt 0) {
     $PythonArgs += "--symbols"
     $PythonArgs += $ExtraSymbols
@@ -85,22 +163,48 @@ $ErrPath = Join-Path $OutputDir "run.err"
     "MaxRandomConfigs: $MaxRandomConfigs",
     "RefineSeeds: $RefineSeeds",
     "RefineSamplesPerSeed: $RefineSamplesPerSeed",
+    "EnableV2Grid: $EnableV2Grid",
+    "PythonExe: $SelectedPython",
     "Extra live symbols appended: $($ExtraSymbols -join ',')",
     "",
-    "python $($PythonArgs -join ' ')"
+    "$SelectedPython $($PythonArgs -join ' ')"
 ) | Set-Content -LiteralPath $CommandPath -Encoding utf8
 
 Write-Host "Starting Wolfe 5y deep sweep"
 Write-Host "Output: $OutputDir"
 Write-Host "Log:    $LogPath"
 Write-Host "Cache:  $CacheDir"
+Write-Host "Python: $SelectedPython"
 Write-Host ""
 Write-Host "Use this to continue the same run later:"
-Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\run_wolfe_wave_top100_deep_5y.ps1 -RunName $RunName -Resume"
+$ResumeV2 = if ($EnableV2Grid) { " -EnableV2Grid" } else { "" }
+$ResumePython = " -PythonExe `"$SelectedPython`""
+Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\run_wolfe_wave_top100_deep_5y.ps1 -RunName $RunName -Resume$ResumeV2$ResumePython"
 Write-Host ""
 
-& python @PythonArgs 2> $ErrPath | Tee-Object -FilePath $LogPath
-$ExitCode = $LASTEXITCODE
+$PreviousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & $SelectedPython @PythonArgs 2>&1 | Tee-Object -FilePath $LogPath
+    $PythonExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $PreviousErrorActionPreference
+}
+
+if ($PythonExitCode -ne 0) {
+    @(
+        "Python exited with code $PythonExitCode.",
+        "See full combined output in $LogPath.",
+        "",
+        "Last log lines:",
+        (Get-Content $LogPath -Tail 120)
+    ) | Set-Content -Path $ErrPath -Encoding UTF8
+    throw "Wolfe sweep failed with exit code $PythonExitCode. See $LogPath"
+}
+
+Set-Content -Path $ErrPath -Value "" -Encoding UTF8
+$ExitCode = $PythonExitCode
 
 "Finished: $(Get-Date -Format o); exit=$ExitCode" | Add-Content -LiteralPath $CommandPath -Encoding utf8
 if ($ExitCode -ne 0) {

@@ -24,6 +24,7 @@ from scripts.backtest_wolfe_wave import (  # noqa: E402
     btc_parameter_grid,
     bybit_symbol,
     config_key,
+    enable_wolfe_v2_tune_values,
     evaluate_btc_grid,
     fetch_bybit_mintick,
     refine_btc,
@@ -52,7 +53,10 @@ def parse_csv_values(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def apply_value_filters(pattern_tfs: str | None, regime_filters: str | None) -> None:
+def apply_value_filters(pattern_tfs: str | None, regime_filters: str | None, *, enable_v2_grid: bool = False) -> None:
+    if enable_v2_grid:
+        enable_wolfe_v2_tune_values()
+
     selected_tfs = parse_csv_values(pattern_tfs)
     if selected_tfs:
         normalized = tuple(normalize_timeframe(value) for value in selected_tfs)
@@ -253,7 +257,11 @@ def best_candidate(table: pd.DataFrame, *, min_validation: int, min_oos_net_r: f
 
 
 def evaluate_symbol(task: dict[str, Any]) -> dict[str, Any]:
-    apply_value_filters(task.get("pattern_tfs"), task.get("regime_filters"))
+    apply_value_filters(
+        task.get("pattern_tfs"),
+        task.get("regime_filters"),
+        enable_v2_grid=truthy(task.get("enable_v2_grid", False)),
+    )
     symbol = bybit_symbol(task["symbol"])
     end = parse_utc_datetime(task["end"]) if task.get("end") else None
     history_ok, history_reason = has_min_daily_history(
@@ -434,6 +442,13 @@ def evaluate_symbol(task: dict[str, Any]) -> dict[str, Any]:
                 "max_hold_bars",
                 "trend_filter",
                 "regime_filter",
+                "p1_horizontal_mode",
+                "p1_horizontal_tolerance_atr",
+                "p1_horizontal_max_distance_bars",
+                "p4_contrary_mode",
+                "p4_contrary_min_swing_atr",
+                "min_v2_quality",
+                "v2_score_weight",
                 "allow_longs",
                 "allow_shorts",
                 "optimization_score",
@@ -469,12 +484,19 @@ def write_outputs(output_dir: Path, rows: list[dict[str, Any]], symbol_table: pd
     symbol_table.to_csv(output_dir / "top_symbols.csv", index=False)
     summary = pd.DataFrame(rows)
     if not summary.empty:
+        if "candidate_ok" not in summary.columns:
+            summary["candidate_ok"] = False
+        if "rank_score" not in summary.columns:
+            summary["rank_score"] = math.nan
         summary = summary.sort_values(["candidate_ok", "rank_score"], ascending=[False, False], na_position="last")
     summary.to_csv(output_dir / "candidate_retest.csv", index=False)
     configs: dict[str, Any] = {}
     if not summary.empty and "candidate_ok" in summary.columns and "selected_config_json" in summary.columns:
-        for _, row in summary[summary["candidate_ok"].astype(bool)].iterrows():
-            configs[str(row["symbol"])] = json.loads(str(row["selected_config_json"]))
+        for _, row in summary[summary["candidate_ok"].apply(truthy)].iterrows():
+            selected_config = row.get("selected_config_json")
+            if selected_config is None or pd.isna(selected_config):
+                continue
+            configs[str(row["symbol"])] = json.loads(str(selected_config))
     (output_dir / "selected_configs.json").write_text(
         json.dumps(configs, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
@@ -503,6 +525,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--template-all", action="store_true")
     parser.add_argument("--pattern-tfs", default="5m,15m,1h")
     parser.add_argument("--regime-filters", default="none,high_vol,low_vol,mean_reversion")
+    parser.add_argument("--enable-v2-grid", action="store_true", help="Include Wolfe v2 structural validation/scoring params.")
     parser.add_argument("--min-train", type=int, default=20)
     parser.add_argument("--min-validation", type=int, default=8)
     parser.add_argument("--min-oos-net-r", type=float, default=1.0)
@@ -556,10 +579,10 @@ def main() -> None:
                     seen.add(symbol)
                     symbols.append(symbol)
 
-    apply_value_filters(args.pattern_tfs, args.regime_filters)
+    apply_value_filters(args.pattern_tfs, args.regime_filters, enable_v2_grid=args.enable_v2_grid)
     print(
         f"Top Wolfe low-pass universe symbols={len(symbols)} days={args.days} "
-        f"max_configs={args.max_configs} refine={args.refine} workers={args.workers}",
+        f"max_configs={args.max_configs} refine={args.refine} v2={args.enable_v2_grid} workers={args.workers}",
         flush=True,
     )
     print(",".join(symbols), flush=True)
@@ -579,6 +602,7 @@ def main() -> None:
         "template_candidate_only": not args.template_all,
         "pattern_tfs": args.pattern_tfs,
         "regime_filters": args.regime_filters,
+        "enable_v2_grid": args.enable_v2_grid,
         "min_train": args.min_train,
         "min_validation": args.min_validation,
         "min_oos_net_r": args.min_oos_net_r,

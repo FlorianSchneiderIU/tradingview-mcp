@@ -192,6 +192,21 @@ class WolfeWaveEngine:
             "epa_slope_atr": float(signal.epa_slope_atr),
             "volume_ratio": float(signal.volume_ratio),
             "rsi": float(signal.rsi),
+            "p1_horizontal_hit": bool(signal.p1_horizontal_hit),
+            "p1_horizontal_distance_bars": float(signal.p1_horizontal_distance_bars),
+            "p1_horizontal_error_atr": float(signal.p1_horizontal_error_atr),
+            "p1_horizontal_score": float(signal.p1_horizontal_score),
+            "p4_contrary_pivots": int(signal.p4_contrary_pivots),
+            "p4_contrary_swing_atr": float(signal.p4_contrary_swing_atr),
+            "p4_contrary_score": float(signal.p4_contrary_score),
+            "impulse_45_bars": int(signal.impulse_45_bars),
+            "impulse_45_atr": float(signal.impulse_45_atr),
+            "impulse_45_same_dir_ratio": float(signal.impulse_45_same_dir_ratio),
+            "sweet_zone_width_atr": float(signal.sweet_zone_width_atr),
+            "sweet_zone_expansion_atr_per_bar": float(signal.sweet_zone_expansion_atr_per_bar),
+            "p5_volume_ratio": float(signal.p5_volume_ratio),
+            "p5_rejection_atr": float(signal.p5_rejection_atr),
+            "v2_quality": float(signal.v2_quality),
             "feature_columns": [
                 "score",
                 "target_rr_planned",
@@ -203,6 +218,21 @@ class WolfeWaveEngine:
                 "epa_slope_atr",
                 "volume_ratio",
                 "rsi",
+                "p1_horizontal_hit",
+                "p1_horizontal_distance_bars",
+                "p1_horizontal_error_atr",
+                "p1_horizontal_score",
+                "p4_contrary_pivots",
+                "p4_contrary_swing_atr",
+                "p4_contrary_score",
+                "impulse_45_bars",
+                "impulse_45_atr",
+                "impulse_45_same_dir_ratio",
+                "sweet_zone_width_atr",
+                "sweet_zone_expansion_atr_per_bar",
+                "p5_volume_ratio",
+                "p5_rejection_atr",
+                "v2_quality",
             ],
             "feature_snapshot": {
                 "score": float(signal.score),
@@ -215,6 +245,31 @@ class WolfeWaveEngine:
                 "epa_slope_atr": float(signal.epa_slope_atr),
                 "volume_ratio": float(signal.volume_ratio) if math.isfinite(float(signal.volume_ratio)) else None,
                 "rsi": float(signal.rsi) if math.isfinite(float(signal.rsi)) else None,
+                "p1_horizontal_hit": bool(signal.p1_horizontal_hit),
+                "p1_horizontal_distance_bars": float(signal.p1_horizontal_distance_bars)
+                if math.isfinite(float(signal.p1_horizontal_distance_bars))
+                else None,
+                "p1_horizontal_error_atr": float(signal.p1_horizontal_error_atr)
+                if math.isfinite(float(signal.p1_horizontal_error_atr))
+                else None,
+                "p1_horizontal_score": float(signal.p1_horizontal_score),
+                "p4_contrary_pivots": int(signal.p4_contrary_pivots),
+                "p4_contrary_swing_atr": float(signal.p4_contrary_swing_atr),
+                "p4_contrary_score": float(signal.p4_contrary_score),
+                "impulse_45_bars": int(signal.impulse_45_bars),
+                "impulse_45_atr": float(signal.impulse_45_atr) if math.isfinite(float(signal.impulse_45_atr)) else None,
+                "impulse_45_same_dir_ratio": float(signal.impulse_45_same_dir_ratio)
+                if math.isfinite(float(signal.impulse_45_same_dir_ratio))
+                else None,
+                "sweet_zone_width_atr": float(signal.sweet_zone_width_atr)
+                if math.isfinite(float(signal.sweet_zone_width_atr))
+                else None,
+                "sweet_zone_expansion_atr_per_bar": float(signal.sweet_zone_expansion_atr_per_bar)
+                if math.isfinite(float(signal.sweet_zone_expansion_atr_per_bar))
+                else None,
+                "p5_volume_ratio": float(signal.p5_volume_ratio) if math.isfinite(float(signal.p5_volume_ratio)) else None,
+                "p5_rejection_atr": float(signal.p5_rejection_atr) if math.isfinite(float(signal.p5_rejection_atr)) else None,
+                "v2_quality": float(signal.v2_quality),
             },
         }
 

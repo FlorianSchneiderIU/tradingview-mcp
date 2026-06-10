@@ -173,8 +173,13 @@ services:
       - ./bot/.env.matrix
     depends_on:
       - matrix-rl-exec-bot
+      - matrix-funded-rl-exec-bot
     environment:
       MATRIX_RL_EXECUTION_URL: http://matrix-rl-exec-bot:8091/v1/signals
+      MATRIX_FUNDED_RL_EXECUTION_URL: http://matrix-funded-rl-exec-bot:8092/v1/signals
+      MATRIX_FUNDED_SYMBOLS: XLMUSDT,ADAUSDT
+      MATRIX_FUNDED_STRATEGIES: wolfe_channel
+      MATRIX_FUNDED_STATUSES: accepted
       MATRIX_RL_EXECUTION_TIMEOUT_SECONDS: "1.0"
       LOG_DIR: /app/logs
     volumes:
@@ -216,6 +221,54 @@ services:
 
   # ── One-off DT training service ─────────────────────────────────────────────
   # Read-only local dashboard for both RL sidecars.
+  # Matrix Wolfe funded-account execution sidecar.
+  # Receives only accepted wolfe_channel XLMUSDT/ADAUSDT signals from matrix-bot
+  # and enforces account-floor risk guards before any live order is placed.
+  # Put funded account credentials in bot/.env.funded.
+  matrix-funded-rl-exec-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python rl_execution_bot.py
+    container_name: matrix-funded-rl-exec-bot
+    restart: unless-stopped
+    env_file:
+      - path: ./bot/.env.funded
+        required: false
+    environment:
+      RL_HOST: 0.0.0.0
+      RL_PORT: "8092"
+      RL_LOG_DIR: /app/rl_matrix_funded
+      RL_STATE_PATH: /app/rl_matrix_funded/runtime_state.json
+      RL_MODEL_PATH: /app/rl_matrix_funded/agent_state.json
+      RL_DECISIONS_PATH: /app/rl_matrix_funded/decisions.jsonl
+      RL_REWARDS_PATH: /app/rl_matrix_funded/rewards.jsonl
+      RL_TRAINING_EXAMPLES_PATH: /app/rl_matrix_funded/training_examples.jsonl
+      RL_ALLOWED_SYMBOLS: XLMUSDT,ADAUSDT
+      RL_ALLOWED_STRATEGIES: wolfe_channel
+      RL_ALLOWED_SOURCE_STATUSES: accepted
+      RL_ALLOW_REVERSE_ACTIONS: "false"
+      RL_FORCE_RISK_ACTION: "1.0"
+      RL_DEFAULT_RISK_USDT: "7.5"
+      RL_MAX_RISK_USDT: "7.5"
+      RL_MAX_TOTAL_OPEN_RISK_USDT: "15"
+      RL_MAX_ACTIVE_TRADES: "2"
+      RL_MAX_SYMBOL_ACTIVE_TRADES: "1"
+      RL_ACCOUNT_EQUITY_FLOOR: "4500"
+      RL_ACCOUNT_EQUITY_BUFFER_USDT: "10"
+      RL_ACCOUNT_TARGET_EQUITY: "5300"
+      RL_MIN_ACTION_TO_TRADE: "0.01"
+      RL_EXPLORATION_RATE: "0"
+      RL_EXPLORATION_MAX_ACTION: "0"
+      RL_MAX_FEE_TO_PRICE_RISK: "0.25"
+    volumes:
+      - ./bot/logs/rl_matrix_funded:/app/rl_matrix_funded
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   rl-dashboard:
     build:
       context: .

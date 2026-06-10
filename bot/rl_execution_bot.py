@@ -59,6 +59,22 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_optional_float(name: str) -> float | None:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def env_csv_set(name: str) -> set[str]:
+    raw = os.environ.get(name, "")
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
 HOST = os.environ.get("RL_HOST", "0.0.0.0")
 PORT = env_int("RL_PORT", 8090)
 LOG_DIR = os.environ.get("RL_LOG_DIR", "/app/rl")
@@ -118,6 +134,17 @@ TAKER_FEE_RATE = env_float("RL_TAKER_FEE_RATE", env_float("TAKER_FEE_RATE", 0.00
 MIN_STOP_DISTANCE_PCT = env_float("RL_MIN_STOP_DISTANCE_PCT", env_float("MIN_STOP_DISTANCE_PCT", 0.001))
 MAX_FEE_TO_PRICE_RISK = env_float("RL_MAX_FEE_TO_PRICE_RISK", env_float("MAX_FEE_TO_PRICE_RISK", 0.25))
 ALLOW_MIN_QTY_OVERRISK = env_bool("RL_ALLOW_MIN_QTY_OVERRISK", False)
+ALLOWED_SYMBOLS = env_csv_set("RL_ALLOWED_SYMBOLS")
+ALLOWED_STRATEGIES = env_csv_set("RL_ALLOWED_STRATEGIES")
+ALLOWED_SOURCE_STATUSES = env_csv_set("RL_ALLOWED_SOURCE_STATUSES")
+FORCE_RISK_ACTION = env_optional_float("RL_FORCE_RISK_ACTION")
+MAX_RISK_USDT = env_float("RL_MAX_RISK_USDT", 0.0)
+MAX_TOTAL_OPEN_RISK_USDT = env_float("RL_MAX_TOTAL_OPEN_RISK_USDT", 0.0)
+MAX_ACTIVE_TRADES = env_int("RL_MAX_ACTIVE_TRADES", 0)
+MAX_SYMBOL_ACTIVE_TRADES = env_int("RL_MAX_SYMBOL_ACTIVE_TRADES", 0)
+ACCOUNT_EQUITY_FLOOR = env_float("RL_ACCOUNT_EQUITY_FLOOR", 0.0)
+ACCOUNT_EQUITY_BUFFER_USDT = env_float("RL_ACCOUNT_EQUITY_BUFFER_USDT", 0.0)
+ACCOUNT_TARGET_EQUITY = env_float("RL_ACCOUNT_TARGET_EQUITY", 0.0)
 
 TRAILING_CONVERSION_REASON = (
     "Bybit trailing stops are scoped to the whole hedge-mode position side; "
@@ -1574,6 +1601,16 @@ class RLExecutionService:
                 return self._decision_response(self.decisions[existing_id])
 
         action, agent_info = self.agent.decide(payload)
+        if FORCE_RISK_ACTION is not None:
+            original_action = float(action)
+            forced_risk_action = clamp(abs(float(FORCE_RISK_ACTION)), 0.0, 1.0)
+            action = forced_risk_action
+            agent_info = {
+                **agent_info,
+                "original_action": original_action,
+                "forced_risk_action": forced_risk_action,
+                "forced_risk_action_env": "RL_FORCE_RISK_ACTION",
+            }
         decision_id = uuid.uuid4().hex
         setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
         exit_request = self._exit_request_metadata(setup)
@@ -1733,6 +1770,51 @@ class RLExecutionService:
         side = "L" if str(direction).lower() == "long" else "S"
         return f"RL-{strat}-{base}-{side}-{ts}-{suffix}"[:36]
 
+    @staticmethod
+    def _scope_value(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _execution_scope_skip_reason(self, decision: dict[str, Any]) -> str | None:
+        symbol = self._scope_value(decision.get("symbol")).upper()
+        strategy = self._scope_value(decision.get("strategy"))
+        status = self._scope_value(decision.get("source_status"))
+        if ALLOWED_SYMBOLS and symbol.lower() not in ALLOWED_SYMBOLS:
+            return f"symbol {symbol or '-'} not in RL_ALLOWED_SYMBOLS"
+        if ALLOWED_STRATEGIES and strategy not in ALLOWED_STRATEGIES:
+            return f"strategy {strategy or '-'} not in RL_ALLOWED_STRATEGIES"
+        if ALLOWED_SOURCE_STATUSES and status not in ALLOWED_SOURCE_STATUSES:
+            return f"source status {status or '-'} not in RL_ALLOWED_SOURCE_STATUSES"
+        return None
+
+    def _active_risk_snapshot(self, symbol: str) -> dict[str, float]:
+        symbol_upper = str(symbol or "").upper()
+        with self.lock:
+            active_ids = list(self.active_trades.keys())
+            active_decisions = [
+                self.decisions.get(decision_id)
+                for decision_id in active_ids
+                if isinstance(self.decisions.get(decision_id), dict)
+            ]
+        open_risk = 0.0
+        active_count = 0
+        symbol_count = 0
+        for active in active_decisions:
+            if active.get("completed"):
+                continue
+            active_count += 1
+            if str(active.get("symbol") or "").upper() == symbol_upper:
+                symbol_count += 1
+            open_risk += (
+                to_float(active.get("expected_sl_loss_usdt"))
+                or to_float(active.get("risk_budget_usdt"))
+                or 0.0
+            )
+        return {
+            "active_count": float(active_count),
+            "symbol_active_count": float(symbol_count),
+            "open_risk_usdt": float(open_risk),
+        }
+
     def _ensure_max_leverage(self, symbol: str, info: dict[str, Any]) -> float:
         if self.http is None:
             raise RuntimeError("Bybit HTTP client unavailable")
@@ -1807,6 +1889,11 @@ class RLExecutionService:
         decision["risk_action"] = risk_action
         decision["source_direction"] = source_direction
         decision["reversed_trade"] = False
+
+        scope_skip_reason = self._execution_scope_skip_reason(decision)
+        if scope_skip_reason:
+            decision["skip_reason"] = scope_skip_reason
+            return
 
         if action < 0:
             if not ALLOW_REVERSE_ACTIONS:
@@ -1888,14 +1975,73 @@ class RLExecutionService:
         if equity <= 0:
             decision["skip_reason"] = f"invalid equity {equity}"
             return
+        if ACCOUNT_TARGET_EQUITY > 0 and equity >= ACCOUNT_TARGET_EQUITY:
+            decision["skip_reason"] = (
+                f"account target reached: equity {equity:.2f} >= "
+                f"RL_ACCOUNT_TARGET_EQUITY={ACCOUNT_TARGET_EQUITY:.2f}"
+            )
+            return
 
         default_risk_usdt = DEFAULT_RISK_USDT
         if default_risk_usdt <= 0:
             decision["skip_reason"] = f"invalid RL_DEFAULT_RISK_USDT={default_risk_usdt}"
             return
         risk_budget = default_risk_usdt * risk_action
+        if MAX_RISK_USDT > 0 and risk_budget > MAX_RISK_USDT:
+            risk_budget = MAX_RISK_USDT
+            decision["risk_budget_capped_by_max_risk_usdt"] = True
         if risk_budget <= 0:
             decision["skip_reason"] = f"risk budget is zero for action={action:.4f}"
+            return
+
+        active_snapshot = self._active_risk_snapshot(symbol)
+        active_count = int(active_snapshot["active_count"])
+        symbol_active_count = int(active_snapshot["symbol_active_count"])
+        open_risk_usdt = float(active_snapshot["open_risk_usdt"])
+        decision["active_trade_count"] = active_count
+        decision["symbol_active_trade_count"] = symbol_active_count
+        decision["open_risk_usdt"] = open_risk_usdt
+        if MAX_ACTIVE_TRADES > 0 and active_count >= MAX_ACTIVE_TRADES:
+            decision["skip_reason"] = f"active trade limit reached ({active_count}/{MAX_ACTIVE_TRADES})"
+            return
+        if MAX_SYMBOL_ACTIVE_TRADES > 0 and symbol_active_count >= MAX_SYMBOL_ACTIVE_TRADES:
+            decision["skip_reason"] = (
+                f"symbol active trade limit reached for {symbol} "
+                f"({symbol_active_count}/{MAX_SYMBOL_ACTIVE_TRADES})"
+            )
+            return
+        if MAX_TOTAL_OPEN_RISK_USDT > 0:
+            remaining_open_risk = MAX_TOTAL_OPEN_RISK_USDT - open_risk_usdt
+            decision["max_total_open_risk_usdt"] = MAX_TOTAL_OPEN_RISK_USDT
+            decision["remaining_open_risk_usdt"] = remaining_open_risk
+            if remaining_open_risk <= 0:
+                decision["skip_reason"] = (
+                    f"open risk {open_risk_usdt:.2f} >= "
+                    f"RL_MAX_TOTAL_OPEN_RISK_USDT={MAX_TOTAL_OPEN_RISK_USDT:.2f}"
+                )
+                return
+            if risk_budget > remaining_open_risk:
+                risk_budget = remaining_open_risk
+                decision["risk_budget_capped_by_total_open_risk"] = True
+        if ACCOUNT_EQUITY_FLOOR > 0:
+            loss_budget_to_floor = equity - ACCOUNT_EQUITY_FLOOR - max(ACCOUNT_EQUITY_BUFFER_USDT, 0.0)
+            remaining_loss_budget = loss_budget_to_floor - open_risk_usdt
+            decision["account_equity_floor"] = ACCOUNT_EQUITY_FLOOR
+            decision["account_equity_buffer_usdt"] = ACCOUNT_EQUITY_BUFFER_USDT
+            decision["loss_budget_to_floor_usdt"] = loss_budget_to_floor
+            decision["remaining_loss_budget_to_floor_usdt"] = remaining_loss_budget
+            if remaining_loss_budget <= 0:
+                decision["skip_reason"] = (
+                    f"no loss budget above floor: equity={equity:.2f} "
+                    f"floor={ACCOUNT_EQUITY_FLOOR:.2f} buffer={ACCOUNT_EQUITY_BUFFER_USDT:.2f} "
+                    f"open_risk={open_risk_usdt:.2f}"
+                )
+                return
+            if risk_budget > remaining_loss_budget:
+                risk_budget = remaining_loss_budget
+                decision["risk_budget_capped_by_account_floor"] = True
+        if risk_budget <= 0:
+            decision["skip_reason"] = "risk budget is zero after account safety caps"
             return
         q_step = float(info["qty_step"])
         min_qty = float(info["min_qty"])
@@ -1972,6 +2118,20 @@ class RLExecutionService:
         expected_price_sl_loss = qty * unit_risk
         expected_fee_loss = qty * fee_risk_per_unit
         expected_sl_loss = expected_price_sl_loss + expected_fee_loss
+        if MAX_TOTAL_OPEN_RISK_USDT > 0 and open_risk_usdt + expected_sl_loss > MAX_TOTAL_OPEN_RISK_USDT + 1e-9:
+            decision["skip_reason"] = (
+                f"expected open risk {open_risk_usdt + expected_sl_loss:.2f} exceeds "
+                f"RL_MAX_TOTAL_OPEN_RISK_USDT={MAX_TOTAL_OPEN_RISK_USDT:.2f}"
+            )
+            return
+        if ACCOUNT_EQUITY_FLOOR > 0:
+            max_loss_above_floor = equity - ACCOUNT_EQUITY_FLOOR - max(ACCOUNT_EQUITY_BUFFER_USDT, 0.0)
+            if open_risk_usdt + expected_sl_loss > max_loss_above_floor + 1e-9:
+                decision["skip_reason"] = (
+                    f"expected loss budget {open_risk_usdt + expected_sl_loss:.2f} exceeds "
+                    f"equity-floor budget {max_loss_above_floor:.2f}"
+                )
+                return
         decision.update({
             "executed": True,
             "entry_order_id": order_id,
@@ -3215,7 +3375,9 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     log.info(
         "RL execution sidecar listening on %s:%d  trading_enabled=%s demo=%s "
-        "default_risk=%.2f USDT min_action=%.3f reverse_actions=%s",
+        "default_risk=%.2f USDT min_action=%.3f reverse_actions=%s "
+        "force_action=%s max_risk=%s floor=%s buffer=%s target=%s "
+        "allowed_symbols=%s allowed_strategies=%s allowed_statuses=%s",
         HOST,
         PORT,
         TRADING_ENABLED,
@@ -3223,6 +3385,14 @@ def main() -> None:
         DEFAULT_RISK_USDT,
         MIN_ACTION_TO_TRADE,
         ALLOW_REVERSE_ACTIONS,
+        "-" if FORCE_RISK_ACTION is None else f"{FORCE_RISK_ACTION:.3f}",
+        "-" if MAX_RISK_USDT <= 0 else f"{MAX_RISK_USDT:.2f}",
+        "-" if ACCOUNT_EQUITY_FLOOR <= 0 else f"{ACCOUNT_EQUITY_FLOOR:.2f}",
+        "-" if ACCOUNT_EQUITY_BUFFER_USDT <= 0 else f"{ACCOUNT_EQUITY_BUFFER_USDT:.2f}",
+        "-" if ACCOUNT_TARGET_EQUITY <= 0 else f"{ACCOUNT_TARGET_EQUITY:.2f}",
+        ",".join(sorted(ALLOWED_SYMBOLS)) if ALLOWED_SYMBOLS else "-",
+        ",".join(sorted(ALLOWED_STRATEGIES)) if ALLOWED_STRATEGIES else "-",
+        ",".join(sorted(ALLOWED_SOURCE_STATUSES)) if ALLOWED_SOURCE_STATUSES else "-",
     )
     server.serve_forever()
 

@@ -2,6 +2,7 @@ node_modules/
 screenshots/
 bot/logs/
 bot/.env
+bot/.env.funded
 bot/models/*.pkl
 scripts/current.pine
 temp_*
