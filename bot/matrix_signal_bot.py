@@ -76,8 +76,35 @@ from pybit.unified_trading import HTTP
 from market_context import MarketContextEnricher
 
 
-def _env_csv_set(name: str, *, lower: bool = True) -> set[str]:
-    raw = os.environ.get(name, "")
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_csv_set(name: str, *, lower: bool = True, default: str = "") -> set[str]:
+    raw = os.environ.get(name, default)
     values = {item.strip() for item in raw.split(",") if item.strip()}
     return {value.lower() for value in values} if lower else values
 
@@ -130,11 +157,22 @@ MATRIX_RL_EXECUTION_QUEUE_SIZE = int(
         os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"),
     )
 )
-MATRIX_FUNDED_RL_EXECUTION_URL = os.environ.get("MATRIX_FUNDED_RL_EXECUTION_URL", "").strip()
-MATRIX_FUNDED_SYMBOLS = _env_csv_set("MATRIX_FUNDED_SYMBOLS")
-MATRIX_FUNDED_STRATEGIES = _env_csv_set("MATRIX_FUNDED_STRATEGIES")
-MATRIX_FUNDED_STATUSES = _env_csv_set("MATRIX_FUNDED_STATUSES")
+MATRIX_FUNDED_EXECUTION_ENABLED = _env_bool("MATRIX_FUNDED_EXECUTION_ENABLED", False)
+MATRIX_FUNDED_BYBIT_API_KEY = os.environ.get("MATRIX_FUNDED_BYBIT_API_KEY", "").strip()
+MATRIX_FUNDED_BYBIT_API_SECRET = os.environ.get("MATRIX_FUNDED_BYBIT_API_SECRET", "").strip()
+MATRIX_FUNDED_BYBIT_DEMO = _env_bool("MATRIX_FUNDED_BYBIT_DEMO", False)
+MATRIX_FUNDED_SYMBOLS = _env_csv_set("MATRIX_FUNDED_SYMBOLS", default="XLMUSDT,ADAUSDT")
+MATRIX_FUNDED_STRATEGIES = _env_csv_set("MATRIX_FUNDED_STRATEGIES", default="wolfe_channel")
+MATRIX_FUNDED_STATUSES = _env_csv_set("MATRIX_FUNDED_STATUSES", default="accepted")
 MATRIX_FUNDED_ROOM_IDS = _env_csv_set("MATRIX_FUNDED_ROOM_IDS", lower=False)
+MATRIX_FUNDED_RISK_USDT = _env_float("MATRIX_FUNDED_RISK_USDT", 7.5)
+MATRIX_FUNDED_MAX_TOTAL_OPEN_RISK_USDT = _env_float("MATRIX_FUNDED_MAX_TOTAL_OPEN_RISK_USDT", 15.0)
+MATRIX_FUNDED_MAX_OPEN_POSITIONS = _env_int("MATRIX_FUNDED_MAX_OPEN_POSITIONS", 2)
+MATRIX_FUNDED_MAX_SYMBOL_POSITIONS = _env_int("MATRIX_FUNDED_MAX_SYMBOL_POSITIONS", 1)
+MATRIX_FUNDED_ACCOUNT_EQUITY_FLOOR = _env_float("MATRIX_FUNDED_ACCOUNT_EQUITY_FLOOR", 4500.0)
+MATRIX_FUNDED_ACCOUNT_EQUITY_BUFFER_USDT = _env_float("MATRIX_FUNDED_ACCOUNT_EQUITY_BUFFER_USDT", 10.0)
+MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY = _env_float("MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY", 5300.0)
+MATRIX_FUNDED_MAX_RISK_MULTIPLIER = _env_float("MATRIX_FUNDED_MAX_RISK_MULTIPLIER", 1.05)
 # --- Logging ------------------------------------------------------------------
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -1075,6 +1113,224 @@ class OrderExecutor:
         }
 
 
+class FundedFixedRiskExecutor(OrderExecutor):
+    """Direct fixed-risk executor for selected Matrix Wolfe signals."""
+
+    def __init__(self) -> None:
+        self.enabled = bool(MATRIX_FUNDED_EXECUTION_ENABLED)
+        self.ready = bool(MATRIX_FUNDED_BYBIT_API_KEY and MATRIX_FUNDED_BYBIT_API_SECRET)
+        if self.ready:
+            http = HTTP(
+                testnet=False,
+                demo=MATRIX_FUNDED_BYBIT_DEMO,
+                api_key=MATRIX_FUNDED_BYBIT_API_KEY,
+                api_secret=MATRIX_FUNDED_BYBIT_API_SECRET,
+            )
+        else:
+            http = HTTP(testnet=False, demo=MATRIX_FUNDED_BYBIT_DEMO)
+        super().__init__(http)
+        if self.enabled and not self.ready:
+            log.error("Funded Wolfe executor enabled but MATRIX_FUNDED_BYBIT_API_KEY/SECRET are missing")
+        log.info(
+            "Funded Wolfe executor %s demo=%s symbols=%s strategies=%s risk=%.2f floor=%.2f buffer=%.2f target=%.2f",
+            "enabled" if self.enabled else "disabled",
+            MATRIX_FUNDED_BYBIT_DEMO,
+            ",".join(sorted(MATRIX_FUNDED_SYMBOLS)) if MATRIX_FUNDED_SYMBOLS else "-",
+            ",".join(sorted(MATRIX_FUNDED_STRATEGIES)) if MATRIX_FUNDED_STRATEGIES else "-",
+            MATRIX_FUNDED_RISK_USDT,
+            MATRIX_FUNDED_ACCOUNT_EQUITY_FLOOR,
+            MATRIX_FUNDED_ACCOUNT_EQUITY_BUFFER_USDT,
+            MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY,
+        )
+
+    @staticmethod
+    def matches(sig: dict, *, status: str) -> bool:
+        symbol = str(sig.get("symbol") or "").strip().lower()
+        strategy = str(sig.get("strategy") or "").strip().lower()
+        room_id = str(sig.get("room_id") or "").strip()
+        status_key = str(status or "").strip().lower()
+        if MATRIX_FUNDED_SYMBOLS and symbol not in MATRIX_FUNDED_SYMBOLS:
+            return False
+        if MATRIX_FUNDED_STRATEGIES and strategy not in MATRIX_FUNDED_STRATEGIES:
+            return False
+        if MATRIX_FUNDED_STATUSES and status_key not in MATRIX_FUNDED_STATUSES:
+            return False
+        if MATRIX_FUNDED_ROOM_IDS and room_id not in MATRIX_FUNDED_ROOM_IDS:
+            return False
+        return True
+
+    def execute_if_relevant(self, sig: dict, *, status: str) -> dict:
+        if not self.matches(sig, status=status):
+            return {"enabled": self.enabled, "matched": False, "executed": False, "message": "not a funded Wolfe signal"}
+        if not self.enabled:
+            return {"enabled": False, "matched": True, "executed": False, "message": "MATRIX_FUNDED_EXECUTION_ENABLED is false"}
+        if not self.ready:
+            return {"enabled": True, "matched": True, "executed": False, "message": "funded Bybit credentials missing"}
+        with self._lock:
+            return self._execute_funded_locked(sig)
+
+    def _execute_funded_locked(self, sig: dict) -> dict:
+        symbol = str(sig["symbol"]).upper()
+        direction = str(sig["signal"]).lower()
+        entry = float(sig["entry"])
+        stop = float(sig["sl"])
+        tp1 = float(sig.get("tp1") or 0.0)
+        strategy = str(sig.get("strategy", "matrix"))
+        if direction not in {"long", "short"}:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"invalid direction {direction}"}
+        if tp1 <= 0:
+            return {"enabled": True, "matched": True, "executed": False, "message": "missing TP; funded executor requires fixed TP/SL"}
+
+        try:
+            open_positions = self._fetch_open_positions()
+        except Exception as exc:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"Could not verify funded positions: {exc}"}
+        symbol_positions = [pos for pos in open_positions if str(pos.get("symbol", "")).upper() == symbol]
+        open_count = len(open_positions)
+        symbol_count = len(symbol_positions)
+        if MATRIX_FUNDED_MAX_OPEN_POSITIONS >= 0 and open_count >= MATRIX_FUNDED_MAX_OPEN_POSITIONS:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded position limit reached ({open_count}/{MATRIX_FUNDED_MAX_OPEN_POSITIONS})"}
+        if MATRIX_FUNDED_MAX_SYMBOL_POSITIONS >= 0 and symbol_count >= MATRIX_FUNDED_MAX_SYMBOL_POSITIONS:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded symbol position limit reached for {symbol} ({symbol_count}/{MATRIX_FUNDED_MAX_SYMBOL_POSITIONS})"}
+
+        balances = get_balance_metrics(self._http)
+        equity = float(balances.get("equity", 0.0))
+        available = float(balances.get("available", 0.0))
+        if equity <= 0:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"Bad funded equity: {equity}"}
+        if MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY > 0 and equity >= MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded target reached: equity {equity:.2f} >= {MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY:.2f}"}
+
+        unit_risk = abs(entry - stop)
+        if unit_risk <= 0 or entry <= 0:
+            return {"enabled": True, "matched": True, "executed": False, "message": "invalid entry/SL"}
+        stop_distance_pct = unit_risk / entry
+        if MIN_STOP_DISTANCE_PCT > 0 and stop_distance_pct < MIN_STOP_DISTANCE_PCT:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded SL too close: {stop_distance_pct:.4%} < {MIN_STOP_DISTANCE_PCT:.4%}"}
+        fee_risk_per_unit = max(TAKER_FEE_RATE, 0.0) * (entry + stop)
+        fee_to_price_risk = fee_risk_per_unit / unit_risk
+        if MAX_FEE_TO_PRICE_RISK > 0 and fee_to_price_risk > MAX_FEE_TO_PRICE_RISK:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded fee/risk ratio too high: {fee_to_price_risk:.2%} > {MAX_FEE_TO_PRICE_RISK:.2%}"}
+
+        open_risk_estimate = open_count * max(MATRIX_FUNDED_RISK_USDT, 0.0)
+        risk_budget = max(MATRIX_FUNDED_RISK_USDT, 0.0)
+        if MATRIX_FUNDED_MAX_TOTAL_OPEN_RISK_USDT > 0:
+            remaining = MATRIX_FUNDED_MAX_TOTAL_OPEN_RISK_USDT - open_risk_estimate
+            if remaining <= 0:
+                return {"enabled": True, "matched": True, "executed": False, "message": f"funded open-risk limit reached: {open_risk_estimate:.2f}/{MATRIX_FUNDED_MAX_TOTAL_OPEN_RISK_USDT:.2f}"}
+            risk_budget = min(risk_budget, remaining)
+        if MATRIX_FUNDED_ACCOUNT_EQUITY_FLOOR > 0:
+            floor_budget = equity - MATRIX_FUNDED_ACCOUNT_EQUITY_FLOOR - max(MATRIX_FUNDED_ACCOUNT_EQUITY_BUFFER_USDT, 0.0)
+            remaining_floor_budget = floor_budget - open_risk_estimate
+            if remaining_floor_budget <= 0:
+                return {
+                    "enabled": True,
+                    "matched": True,
+                    "executed": False,
+                    "message": (
+                        f"funded loss budget exhausted: equity={equity:.2f} "
+                        f"floor={MATRIX_FUNDED_ACCOUNT_EQUITY_FLOOR:.2f} buffer={MATRIX_FUNDED_ACCOUNT_EQUITY_BUFFER_USDT:.2f}"
+                    ),
+                }
+            risk_budget = min(risk_budget, remaining_floor_budget)
+        if risk_budget <= 0:
+            return {"enabled": True, "matched": True, "executed": False, "message": "funded risk budget is zero"}
+
+        info = self._get_info(symbol)
+        if not info:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"Unknown funded symbol: {symbol}"}
+        if info.get("status") and info["status"] != "Trading":
+            return {"enabled": True, "matched": True, "executed": False, "message": f"{symbol} status={info['status']}"}
+
+        q_step = float(info["qty_step"])
+        min_q = float(info["min_qty"])
+        tick = float(info["tick_size"])
+        leverage_step = float(info.get("leverage_step", 0.01) or 0.01)
+        order_lev = self._determine_order_leverage(info, entry, stop)
+        raw_qty = risk_budget / (unit_risk + fee_risk_per_unit)
+        margin_basis = available if available > 0 else equity
+        raw_qty = min(raw_qty, (margin_basis * order_lev * 0.95) / entry)
+        qty = floor_to_step(raw_qty, q_step)
+        if qty < min_q:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded risk too small for min qty: {qty_to_str(qty, q_step)} < {qty_to_str(min_q, q_step)}"}
+
+        expected_price_sl_loss = qty * unit_risk
+        expected_fee_loss = qty * fee_risk_per_unit
+        expected_sl_loss = expected_price_sl_loss + expected_fee_loss
+        if expected_sl_loss > risk_budget * MATRIX_FUNDED_MAX_RISK_MULTIPLIER:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded rounded risk too high: {expected_sl_loss:.2f} > target {risk_budget:.2f}"}
+
+        self._set_leverage(symbol, order_lev, leverage_step)
+        sl_price = round_to_step(stop, tick)
+        tp_price = round_to_step(tp1, tick)
+        side = "Buy" if direction == "long" else "Sell"
+        pos_idx = 0
+        order_link_id = f"fd_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
+        order_kwargs: dict = dict(
+            category="linear",
+            symbol=symbol,
+            side=side,
+            orderType="Market",
+            qty=qty_to_str(qty, q_step),
+            stopLoss=str(sl_price),
+            takeProfit=str(tp_price),
+            slTriggerBy="LastPrice",
+            tpTriggerBy="LastPrice",
+            tpslMode="Partial",
+            slOrderType="Market",
+            tpOrderType="Market",
+            positionIdx=pos_idx,
+            orderLinkId=order_link_id,
+        )
+        try:
+            resp = self._http.place_order(**order_kwargs)
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if "position idx" in exc_str or ("10001" in exc_str and "position" in exc_str):
+                pos_idx = 1 if direction == "long" else 2
+                order_kwargs["positionIdx"] = pos_idx
+                order_link_id = f"fd_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
+                order_kwargs["orderLinkId"] = order_link_id
+                resp = self._http.place_order(**order_kwargs)
+            else:
+                raise
+        ret_code = int(resp.get("retCode", -1))
+        if ret_code == 10001 and "position idx" in str(resp.get("retMsg", "")).lower():
+            pos_idx = 1 if direction == "long" else 2
+            order_kwargs["positionIdx"] = pos_idx
+            order_link_id = f"fd_{strategy[:4]}_{symbol[:6]}_{direction[0]}_{uuid.uuid4().hex[:8]}"
+            order_kwargs["orderLinkId"] = order_link_id
+            resp = self._http.place_order(**order_kwargs)
+            ret_code = int(resp.get("retCode", -1))
+        if ret_code != 0:
+            return {"enabled": True, "matched": True, "executed": False, "message": f"funded order rejected ({ret_code}): {resp.get('retMsg', '?')}"}
+
+        order_id = resp.get("result", {}).get("orderId", "?")
+        log.info(
+            "[funded-wolfe] %s %s qty=%s risk~%.2f equity=%.2f sl=%s tp=%s order=%s",
+            symbol,
+            direction.upper(),
+            qty_to_str(qty, q_step),
+            expected_sl_loss,
+            equity,
+            sl_price,
+            tp_price,
+            order_id,
+        )
+        return {
+            "enabled": True,
+            "matched": True,
+            "executed": True,
+            "order_id": order_id,
+            "link_id": order_link_id,
+            "qty": qty_to_str(qty, q_step),
+            "risk_at_sl": f"{expected_sl_loss:.2f}",
+            "risk_budget": f"{risk_budget:.2f}",
+            "equity": f"{equity:.2f}",
+            "message": f"funded order placed: {side} {qty_to_str(qty, q_step)} {symbol} risk~{expected_sl_loss:.2f}",
+        }
+
+
 # --- RL sidecar forwarding ----------------------------------------------------
 
 class MatrixRlSidecarClient:
@@ -1084,36 +1340,13 @@ class MatrixRlSidecarClient:
         self._url = MATRIX_RL_EXECUTION_URL
         base_url = self._url.rsplit("/v1/signals", 1)[0] if "/v1/signals" in self._url else self._url.rstrip("/")
         self._decision_url = f"{base_url}/v1/decisions" if base_url else ""
-        self._routes: list[dict] = []
-        if self._url:
-            self._routes.append(
-                {
-                    "name": "primary",
-                    "url": self._url,
-                    "symbols": set(),
-                    "strategies": set(),
-                    "statuses": set(),
-                    "room_ids": set(),
-                }
-            )
-        if MATRIX_FUNDED_RL_EXECUTION_URL:
-            self._routes.append(
-                {
-                    "name": "funded",
-                    "url": MATRIX_FUNDED_RL_EXECUTION_URL,
-                    "symbols": MATRIX_FUNDED_SYMBOLS,
-                    "strategies": MATRIX_FUNDED_STRATEGIES,
-                    "statuses": MATRIX_FUNDED_STATUSES,
-                    "room_ids": MATRIX_FUNDED_ROOM_IDS,
-                }
-            )
         self._timeout = max(0.1, MATRIX_RL_EXECUTION_TIMEOUT_SECONDS)
         self._queue: queue.Queue[dict] | None = None
         self._dispatch_thread: threading.Thread | None = None
         self._market_http = HTTP(testnet=False, demo=DEMO)
         self._market_enricher = MarketContextEnricher(self._market_http, logger=log)
 
-        if self._routes:
+        if self._url:
             self._queue = queue.Queue(maxsize=max(1, MATRIX_RL_EXECUTION_QUEUE_SIZE))
             self._dispatch_thread = threading.Thread(
                 target=self._dispatch_worker,
@@ -1121,10 +1354,9 @@ class MatrixRlSidecarClient:
                 name="matrix-rl-dispatch",
             )
             self._dispatch_thread.start()
-            route_desc = ", ".join(f"{route['name']}={route['url']}" for route in self._routes)
-            log.info("Matrix RL sidecar routes enabled  %s", route_desc)
+            log.info("Matrix RL sidecar enabled  signal_url=%s", self._url)
         else:
-            log.info("Matrix RL sidecar disabled; MATRIX_RL_EXECUTION_URL and MATRIX_FUNDED_RL_EXECUTION_URL are empty")
+            log.info("Matrix RL sidecar disabled; MATRIX_RL_EXECUTION_URL is empty")
 
     def _market_features_for_signal(self, sig: dict) -> dict:
         symbol = str(sig.get("symbol") or "").upper()
@@ -1215,28 +1447,12 @@ class MatrixRlSidecarClient:
             "extra": {},
         }
 
-    @staticmethod
-    def _route_matches(route: dict, payload: dict) -> bool:
-        symbol = str(payload.get("symbol") or "").strip().lower()
-        strategy = str(payload.get("strategy") or "").strip().lower()
-        status = str(payload.get("status") or "").strip().lower()
-        room_id = str(payload.get("room_id") or "").strip()
-        if route.get("symbols") and symbol not in route["symbols"]:
-            return False
-        if route.get("strategies") and strategy not in route["strategies"]:
-            return False
-        if route.get("statuses") and status not in route["statuses"]:
-            return False
-        if route.get("room_ids") and room_id not in route["room_ids"]:
-            return False
-        return True
-
     def enqueue_signal(self, sig: dict, status: str, reason: str | None, source_event_id: str | None = None) -> dict:
-        if not self._routes or self._queue is None:
+        if not self._url or self._queue is None:
             return {
                 "enabled": False,
                 "queued": False,
-                "message": "No Matrix RL execution routes configured",
+                "message": "MATRIX_RL_EXECUTION_URL is empty",
             }
         payload = self._build_signal_payload(
             status,
@@ -1244,42 +1460,25 @@ class MatrixRlSidecarClient:
             reason=reason,
             source_event_id=source_event_id,
         )
-        queued_routes: list[str] = []
-        matched_routes: list[str] = []
-        for route in self._routes:
-            if not self._route_matches(route, payload):
-                continue
-            matched_routes.append(str(route["name"]))
-            try:
-                self._queue.put_nowait({"route": route, "payload": payload})
-                queued_routes.append(str(route["name"]))
-            except queue.Full:
-                log.warning(
-                    "[matrix-rl:%s] Dispatch queue full; dropping %s signal %s %s",
-                    route["name"],
-                    status,
-                    sig.get("symbol"),
-                    sig.get("strategy", "matrix"),
-                )
-        if not matched_routes:
+        try:
+            self._queue.put_nowait(payload)
+        except queue.Full:
+            log.warning(
+                "[matrix-rl] Dispatch queue full; dropping %s signal %s %s",
+                status,
+                sig.get("symbol"),
+                sig.get("strategy", "matrix"),
+            )
             return {
                 "enabled": True,
                 "queued": False,
-                "message": "No Matrix RL route matched signal",
-                "routes_matched": [],
-                "routes_queued": [],
+                "message": "RL dispatch queue full",
             }
         return {
             "enabled": True,
-            "queued": bool(queued_routes),
-            "message": (
-                f"RL sidecar signal queued: {', '.join(queued_routes)}"
-                if queued_routes
-                else "RL dispatch queue full for matched routes"
-            ),
+            "queued": True,
+            "message": "RL sidecar signal queued",
             "event_id": payload.get("event_id"),
-            "routes_matched": matched_routes,
-            "routes_queued": queued_routes,
         }
 
     def fetch_decision_by_event_id(self, event_id: str) -> Optional[dict]:
@@ -1312,27 +1511,23 @@ class MatrixRlSidecarClient:
     def _dispatch_worker(self) -> None:
         assert self._queue is not None
         while True:
-            item = self._queue.get()
+            payload = self._queue.get()
             try:
-                if isinstance(item, dict) and "payload" in item and "route" in item:
-                    self._dispatch_signal(item["payload"], item["route"])
-                else:
-                    self._dispatch_signal(item, {"name": "primary", "url": self._url})
+                self._dispatch_signal(payload)
             except Exception as exc:
                 log.warning("[matrix-rl] Dispatch failed: %s", exc)
             finally:
                 self._queue.task_done()
 
-    def _dispatch_signal(self, payload: dict, route: dict) -> None:
+    def _dispatch_signal(self, payload: dict) -> None:
         response = requests.post(
-            route["url"],
+            self._url,
             json=payload,
             timeout=self._timeout,
         )
         if response.status_code >= 300:
             log.warning(
-                "[matrix-rl:%s] Sidecar returned HTTP %s: %s",
-                route.get("name", "primary"),
+                "[matrix-rl] Sidecar returned HTTP %s: %s",
                 response.status_code,
                 response.text[:300],
             )
@@ -1343,8 +1538,7 @@ class MatrixRlSidecarClient:
             reply = {}
 
         log.info(
-            "[matrix-rl:%s] Dispatched %s signal %s %s decision=%s status=%s action=%s",
-            route.get("name", "primary"),
+            "[matrix-rl] Dispatched %s signal %s %s decision=%s status=%s action=%s",
             payload.get("status"),
             payload.get("symbol"),
             payload.get("strategy"),
@@ -1382,6 +1576,7 @@ class MatrixSignalBot:
         self._rl_entry_refs_last_save_at = 0.0
         # Order executor for managing positions (entry, close, SL modifications)
         self._order_executor = OrderExecutor(HTTP(testnet=False, demo=DEMO))
+        self._funded_executor = FundedFixedRiskExecutor()
         self._load_rl_entry_refs_state()
 
     @staticmethod
@@ -1728,6 +1923,19 @@ class MatrixSignalBot:
                         "message": f"RL forward failed: {exc}",
                         "dispatch": {"enabled": True, "queued": False, "message": str(exc)},
                     }
+                funded_result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self._funded_executor.execute_if_relevant(sig, status="accepted"),
+                )
+                result["funded"] = funded_result
+                if funded_result.get("matched"):
+                    log.info(
+                        "Funded Wolfe result | symbol=%s strategy=%s executed=%s message=%s",
+                        sig.get("symbol"),
+                        sig.get("strategy"),
+                        funded_result.get("executed"),
+                        funded_result.get("message"),
+                    )
 
             reply = self._format_reply(sig, result)
             log.info("Forward result: %s", result.get("message"))
@@ -1803,9 +2011,11 @@ class MatrixSignalBot:
         rl_state = "queued" if dispatch.get("queued") else "not queued"
         if dispatch.get("enabled"):
             lines.append(f"RL sidecar: {rl_state}")
-            routes = dispatch.get("routes_queued")
-            if isinstance(routes, list) and routes:
-                lines.append(f"Routes: {', '.join(str(route) for route in routes)}")
+        funded = result.get("funded") if isinstance(result.get("funded"), dict) else {}
+        if funded.get("matched"):
+            funded_state = "executed" if funded.get("executed") else "not executed"
+            lines.append(f"Funded Wolfe: {funded_state}")
+            lines.append(f"Funded message: {funded.get('message')}")
         lines.append(f"Message: {result.get('message')}")
         return "\n".join(lines)
 
