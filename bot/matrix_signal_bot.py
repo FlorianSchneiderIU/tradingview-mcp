@@ -69,7 +69,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 from pybit.unified_trading import HTTP
@@ -173,6 +173,8 @@ MATRIX_FUNDED_ACCOUNT_EQUITY_FLOOR = _env_float("MATRIX_FUNDED_ACCOUNT_EQUITY_FL
 MATRIX_FUNDED_ACCOUNT_EQUITY_BUFFER_USDT = _env_float("MATRIX_FUNDED_ACCOUNT_EQUITY_BUFFER_USDT", 10.0)
 MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY = _env_float("MATRIX_FUNDED_ACCOUNT_TARGET_EQUITY", 5300.0)
 MATRIX_FUNDED_MAX_RISK_MULTIPLIER = _env_float("MATRIX_FUNDED_MAX_RISK_MULTIPLIER", 1.05)
+MATRIX_WOLFE_SETUP_TTL_SECONDS = _env_float("MATRIX_WOLFE_SETUP_TTL_SECONDS", 6 * 60 * 60)
+MATRIX_OPI_COOLDOWN_SECONDS = _env_float("MATRIX_OPI_COOLDOWN_SECONDS", 30 * 60)
 # --- Logging ------------------------------------------------------------------
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -245,6 +247,27 @@ _WOLFE_CHANNEL_TARGET_RE = re.compile(
     re.IGNORECASE,
 )
 _WOLFE_CHANNEL_SL_RE = re.compile(r"\bSL\s*\$?(?P<sl>[\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_WOLFE_LIFECYCLE_STAGE_RE = re.compile(r"\[(?P<stage>[A-Za-z0-9_]+)\]", re.IGNORECASE)
+_WOLFE_LIFECYCLE_MARKER_RE = re.compile(
+    r"#(?P<sym>[A-Z0-9]{2,10})\s+(?P<tf>\d+[smhdw])(?:\s+(?P<dir>BULL|BEAR))?",
+    re.IGNORECASE,
+)
+_WOLFE_LIFECYCLE_HEADER_DIR_RE = re.compile(r"\]\s+(?P<dir>BULL|BEAR)\b", re.IGNORECASE)
+_WOLFE_LIFECYCLE_CURRENT_RE = re.compile(
+    r"\$\s*(?P<price>[\d,]+(?:\.\d+)?)\s*-\s*\d{1,2}/\d{1,2}",
+    re.IGNORECASE,
+)
+_WOLFE_LIFECYCLE_ENTRY_ZONE_RE = re.compile(
+    r"(?P<side>Long|Short)\s+Entry\s+Zone:\s*(?P<low>[\d,]+(?:\.\d+)?)\s*-\s*(?P<high>[\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_WOLFE_LIFECYCLE_STOP_RE = re.compile(r"\bStop:\s*(?P<sl>[\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_WOLFE_LIFECYCLE_SCORE_RE = re.compile(r"\((?P<score>[\d.]+)\s*/\s*8\)")
+_WOLFE_LIFECYCLE_RR_RE = re.compile(r"\bR/R\s+(?P<rr>[\d.]+)", re.IGNORECASE)
+_WOLFE_LIFECYCLE_ID_RE = re.compile(
+    r"\b(?P<wave_id>[A-Za-z0-9]{4})\s*//\s*Regime:\s*(?P<regime>[^\n]+)",
+    re.IGNORECASE,
+)
 # Preliminary signals (need confirmation — skip for auto-trading)
 _PRELIMINARY_RE = re.compile(r"⚡\s*//\s*PRELIMINARY", re.IGNORECASE)
 # wolfe_entry / wolfe_long / wolfe_short keywords
@@ -272,6 +295,76 @@ _INLINE_RE = re.compile(
 )
 
 # Short-alias → canonical USDT symbol map (add more as needed)
+_OPI_FULL_RE = re.compile(
+    r"\bOp\S*\s*//\s*(?P<symbol>[A-Z0-9]{2,16})\s+"
+    r"(?P<timeframe>\d+[smhdw])\s+(?P<direction>LONG|SHORT)\s*@\s*\$?(?P<entry>[\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_OPI_TARGET_RE = re.compile(r"\b(?:T|TP)\s*:?\s*\$?(?P<target>[\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_OPI_SL_RE = re.compile(r"\bSL\s*:?\s*\$?(?P<sl>[\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_OPI_SCORE_RE = re.compile(
+    r"(?:\b1C\s*//.*?)?(?:\*|\bscore\b)?\s*(?P<score>[\d.]+)\s*/\s*8",
+    re.IGNORECASE | re.DOTALL,
+)
+_OPI_NEXT_EVENT_RE = re.compile(r"\bNext\s+event:\s*(?P<event>[^\n\r]+)", re.IGNORECASE)
+_OPI_TF_FLOOR_RE = re.compile(r"(?P<floor>\d+[smhdw]\s+TF-floor[^\n\r]*)", re.IGNORECASE)
+_OPI_MULTI_TF_RE = re.compile(r"(?P<multi_tf>\d+[smhdw](?:/\d+[smhdw]){1,})")
+_OPI_BIAS_FLIP_RE = re.compile(
+    r"(?P<symbol>[A-Z0-9]{2,16})\s+(?P<timeframe>\d+[smhdw])\s*//\s*Bias\s+Flip\s*"
+    r"\[(?P<bias>[^\]]+)\]\s*@\s*\$?(?P<entry>[\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_OPI_MARKER_PATTERN = r"(?:[\u25b2\u25b3\u25bc\u25bd]|\U0001f53a|\U0001f53b)"
+_OPI_DOMINO_RE = re.compile(
+    rf"(?P<marker>{_OPI_MARKER_PATTERN})?\s*"
+    r"(?P<symbol>[A-Z0-9]{2,16})\s*//\s*DOMINO\s*@\s*\$?(?P<entry>[\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_OPI_TURN_RE = re.compile(
+    r"(?P<timeframes>\d+[smhdw](?:\+\d+[smhdw])*)\s*<(?P<minutes>\d+)min\s*\[Turn\s+Detected\]",
+    re.IGNORECASE,
+)
+_OPI_MOVE_RE = re.compile(
+    rf"(?P<marker>{_OPI_MARKER_PATTERN})?\s*"
+    r"(?P<symbol>[A-Z0-9]{2,16})\s*\[(?P<timeframe>\d+[smhdw])\]\s*"
+    r"(?P<pct>[+-]?\d+(?:\.\d+)?)%\s+Move\s*@\s*\$?(?P<entry>[\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_OPI_TEXT_TRANSLATION = str.maketrans(
+    {
+        "\u1d3c": "O",
+        "\u1d52": "o",
+        "\u1d56": "p",
+        "\u1da6": "i",
+        "\u1d38": "L",
+        "\u1d5b": "v",
+        "\u02e1": "l",
+        "\u1dbb": "z",
+        "\u2142": "L",
+        "\u2146": "d",
+        "\u2124": "Z",
+        "\u2605": "*",
+        "\u00d7": "x",
+        "\u00b7": " ",
+        "\u2192": " -> ",
+        "\u279c": " -> ",
+        "\u27f6": " -> ",
+    }
+)
+_OPI_FULL_CANDIDATES = {
+    ("BTCUSDT", "5m"),
+    ("XLMUSDT", "5m"),
+    ("XAUUSDT", "5m"),
+}
+_OPI_STRUCTURAL_CANDIDATES = {
+    ("move_alert", "XLMUSDT", "30m"),
+    ("domino_turn", "XRPUSDT", "3m"),
+}
+_OPI_STRUCTURAL_LOOKBACK = 80
+_OPI_STRUCTURAL_TARGET_R = 3.0
+_OPI_KLINE_CACHE: dict[tuple[str, str, int], tuple[float, list[dict[str, float]]]] = {}
+_OPI_HTTP: HTTP | None = None
+
 _SHORT_ALIAS: dict[str, str] = {
     "XAU": "XAUUSDT", "XAG": "XAGUSDT",
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
@@ -302,6 +395,445 @@ def _strip_html(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", " ", text))
 
 
+_NON_ACTIONABLE_SIGNAL = object()
+
+
+def _normalise_opi_alert_text(text: str) -> str:
+    return str(text).translate(_OPI_TEXT_TRANSLATION)
+
+
+def _opi_direction_from_marker(raw: str | None) -> Optional[str]:
+    if raw in {"\u25b2", "\u25b3", "\U0001f53a"}:
+        return "long"
+    if raw in {"\u25bc", "\u25bd", "\U0001f53b"}:
+        return "short"
+    return None
+
+
+def _opi_direction_from_nearby_marker(text: str, symbol_start: int) -> Optional[str]:
+    prefix = text[max(0, int(symbol_start) - 16):int(symbol_start)]
+    for char in reversed(prefix):
+        direction = _opi_direction_from_marker(char)
+        if direction:
+            return direction
+    return None
+
+
+def _opi_direction_from_bias(raw: str) -> Optional[str]:
+    value = str(raw or "").upper()
+    if "SHORT" in value or "BEAR" in value:
+        return "short"
+    if "LONG" in value or "BULL" in value:
+        return "long"
+    return None
+
+
+def _opi_split_bias_flip(raw: str) -> tuple[str, str, Optional[str]]:
+    text = str(raw or "").strip()
+    states = re.findall(r"(?:LEAN\s+)?(?:SHORT|LONG|BEAR|BULL)", text, flags=re.IGNORECASE)
+    to_bias = states[-1] if states else text
+    from_bias = states[0] if len(states) > 1 else ""
+    return from_bias, to_bias, _opi_direction_from_bias(to_bias)
+
+
+def _opi_levels_are_valid(direction: str, entry: float, sl: float, tp: float) -> bool:
+    if entry <= 0 or sl <= 0 or tp <= 0:
+        return False
+    if direction == "long":
+        return sl < entry < tp
+    return tp < entry < sl
+
+
+def _opi_fee_to_stop_risk(entry: float, sl: float) -> float:
+    risk = abs(float(entry) - float(sl))
+    if risk <= 0:
+        return math.inf
+    return TAKER_FEE_RATE * (float(entry) + float(sl)) / risk
+
+
+def _opi_get_http() -> HTTP:
+    global _OPI_HTTP
+    if _OPI_HTTP is None:
+        _OPI_HTTP = HTTP(testnet=False, demo=DEMO)
+    return _OPI_HTTP
+
+
+def _opi_fetch_recent_bars(symbol: str, *, interval: str = "1", limit: int = 140) -> list[dict[str, float]]:
+    key = (symbol.upper(), interval, int(limit))
+    now = time.time()
+    cached = _OPI_KLINE_CACHE.get(key)
+    if cached and now - cached[0] <= 15.0:
+        return cached[1]
+
+    resp = _opi_get_http().get_kline(category="linear", symbol=symbol.upper(), interval=interval, limit=limit)
+    if not isinstance(resp, dict) or resp.get("retCode", 0) not in (0, "0"):
+        raise RuntimeError(f"Bybit kline retCode={resp.get('retCode') if isinstance(resp, dict) else '?'}")
+    items = resp.get("result", {}).get("list", [])
+    if not isinstance(items, list):
+        return []
+
+    interval_ms = int(interval) * 60_000 if str(interval).isdigit() else 60_000
+    now_ms = int(now * 1000)
+    bars: list[dict[str, float]] = []
+    for item in items:
+        if not isinstance(item, (list, tuple)) or len(item) < 6:
+            continue
+        try:
+            ts = int(float(item[0]))
+            if ts + interval_ms > now_ms:
+                continue
+            bars.append(
+                {
+                    "ts": float(ts),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    bars.sort(key=lambda row: row["ts"])
+    _OPI_KLINE_CACHE[key] = (now, bars)
+    return bars
+
+
+def _with_opi_signal_controls(sig: dict, *, key: str) -> dict:
+    sig["dedup_key"] = key
+    sig["dedup_seconds"] = MATRIX_OPI_COOLDOWN_SECONDS
+    sig["drop_duplicate"] = True
+    return sig
+
+
+def _build_opi_structural_signal(
+    *,
+    kind: str,
+    symbol: str,
+    timeframe: str,
+    direction: str,
+    entry: float,
+    extra: dict[str, Any] | None = None,
+) -> Optional[dict]:
+    try:
+        bars = _opi_fetch_recent_bars(symbol, interval="1", limit=max(_OPI_STRUCTURAL_LOOKBACK + 20, 120))
+    except Exception as exc:  # noqa: BLE001 - keep live parser resilient.
+        log.warning("[opi] %s %s structural level fetch failed: %s", symbol, timeframe, exc)
+        return None
+    if len(bars) < _OPI_STRUCTURAL_LOOKBACK:
+        log.debug("[opi] %s %s skipped: only %s 1m bars", symbol, timeframe, len(bars))
+        return None
+
+    window = bars[-_OPI_STRUCTURAL_LOOKBACK:]
+    if direction == "long":
+        sl = min(float(row["low"]) for row in window)
+        risk = entry - sl
+        tp = entry + _OPI_STRUCTURAL_TARGET_R * risk
+    else:
+        sl = max(float(row["high"]) for row in window)
+        risk = sl - entry
+        tp = entry - _OPI_STRUCTURAL_TARGET_R * risk
+
+    risk_pct = risk / entry if entry > 0 else 0.0
+    if risk <= 0 or risk_pct < max(0.0002, MIN_STOP_DISTANCE_PCT):
+        log.debug("[opi] %s %s skipped: risk_pct=%.5f", symbol, timeframe, risk_pct)
+        return None
+    fee_ratio = _opi_fee_to_stop_risk(entry, sl)
+    if fee_ratio > MAX_FEE_TO_PRICE_RISK:
+        log.debug("[opi] %s %s skipped: fee_to_risk=%.3f", symbol, timeframe, fee_ratio)
+        return None
+    if not _opi_levels_are_valid(direction, entry, sl, tp):
+        return None
+
+    sig = {
+        "symbol": symbol,
+        "signal": direction,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp,
+        "strategy": "opi_curl_reversal",
+        "source_format": "opi_matrix_structural",
+        "opi_kind": kind,
+        "timeframe": timeframe,
+        "structure_lookback_bars": _OPI_STRUCTURAL_LOOKBACK,
+        "target_r": _OPI_STRUCTURAL_TARGET_R,
+        "risk_pct": risk_pct,
+        "fee_to_stop_risk": fee_ratio,
+    }
+    if extra:
+        sig.update(extra)
+    return _with_opi_signal_controls(
+        sig,
+        key=f"opi|opi_curl_reversal|{kind}|{symbol}|{timeframe}|{direction}",
+    )
+
+
+def _parse_opi_signal(clean: str) -> Optional[dict]:
+    match_text = _normalise_opi_alert_text(clean)
+    if not any(token in match_text for token in ("//", "DOMINO", "Bias Flip", "Move @")):
+        return None
+
+    full_m = _OPI_FULL_RE.search(match_text)
+    if full_m:
+        symbol = _normalise_symbol(full_m.group("symbol"))
+        timeframe = full_m.group("timeframe").lower()
+        if (symbol, timeframe) not in _OPI_FULL_CANDIDATES:
+            return None
+        direction = full_m.group("direction").lower()
+        entry = _parse_price(full_m.group("entry"))
+        target_m = _OPI_TARGET_RE.search(match_text)
+        sl_m = _OPI_SL_RE.search(match_text)
+        if not target_m or not sl_m:
+            return None
+        sl = _parse_price(sl_m.group("sl"))
+        tp = _parse_price(target_m.group("target"))
+        if not _opi_levels_are_valid(direction, entry, sl, tp):
+            return None
+        risk_pct = abs(entry - sl) / entry if entry > 0 else 0.0
+        fee_ratio = _opi_fee_to_stop_risk(entry, sl)
+        if risk_pct < max(0.0002, MIN_STOP_DISTANCE_PCT) or fee_ratio > MAX_FEE_TO_PRICE_RISK:
+            return None
+
+        sig: dict = {
+            "symbol": symbol,
+            "signal": direction,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp,
+            "strategy": "opi_full",
+            "source_format": "opi_matrix_full",
+            "opi_kind": "opi_full",
+            "timeframe": timeframe,
+            "risk_pct": risk_pct,
+            "fee_to_stop_risk": fee_ratio,
+        }
+        score_m = _OPI_SCORE_RE.search(match_text)
+        if score_m:
+            try:
+                sig["score"] = float(score_m.group("score"))
+            except (TypeError, ValueError):
+                pass
+        floor_m = _OPI_TF_FLOOR_RE.search(match_text)
+        if floor_m:
+            sig["tf_floor"] = floor_m.group("floor").strip()
+        multi_tf_m = _OPI_MULTI_TF_RE.search(match_text)
+        if multi_tf_m:
+            sig["multi_tf"] = multi_tf_m.group("multi_tf")
+        event_m = _OPI_NEXT_EVENT_RE.search(match_text)
+        if event_m:
+            sig["next_event"] = event_m.group("event").strip()
+        return _with_opi_signal_controls(
+            sig,
+            key=f"opi|opi_full|{symbol}|{timeframe}|{direction}",
+        )
+
+    if domino_m := _OPI_DOMINO_RE.search(match_text):
+        direction = _opi_direction_from_marker(domino_m.group("marker")) or _opi_direction_from_nearby_marker(
+            match_text,
+            domino_m.start("symbol"),
+        )
+        turn_m = _OPI_TURN_RE.search(match_text)
+        timeframe = turn_m.group("timeframes").split("+")[-1].lower() if turn_m else "1m"
+        symbol = _normalise_symbol(domino_m.group("symbol"))
+        kind = "domino_turn"
+        if direction and (kind, symbol, timeframe) in _OPI_STRUCTURAL_CANDIDATES:
+            return _build_opi_structural_signal(
+                kind=kind,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                entry=_parse_price(domino_m.group("entry")),
+                extra={"multi_tf": turn_m.group("timeframes") if turn_m else ""},
+            )
+
+    if move_m := _OPI_MOVE_RE.search(match_text):
+        direction = _opi_direction_from_marker(move_m.group("marker")) or _opi_direction_from_nearby_marker(
+            match_text,
+            move_m.start("symbol"),
+        )
+        if not direction:
+            direction = "long" if float(move_m.group("pct")) > 0 else "short"
+        symbol = _normalise_symbol(move_m.group("symbol"))
+        timeframe = move_m.group("timeframe").lower()
+        kind = "move_alert"
+        if direction and (kind, symbol, timeframe) in _OPI_STRUCTURAL_CANDIDATES:
+            return _build_opi_structural_signal(
+                kind=kind,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                entry=_parse_price(move_m.group("entry")),
+                extra={"move_pct": float(move_m.group("pct"))},
+            )
+
+    if bias_m := _OPI_BIAS_FLIP_RE.search(match_text):
+        from_bias, to_bias, direction = _opi_split_bias_flip(bias_m.group("bias"))
+        symbol = _normalise_symbol(bias_m.group("symbol"))
+        timeframe = bias_m.group("timeframe").lower()
+        kind = "bias_flip"
+        if direction and (kind, symbol, timeframe) in _OPI_STRUCTURAL_CANDIDATES:
+            return _build_opi_structural_signal(
+                kind=kind,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                entry=_parse_price(bias_m.group("entry")),
+                extra={"from_bias": from_bias, "to_bias": to_bias},
+            )
+
+    return None
+
+
+def _wolfe_direction(raw: str | None) -> Optional[str]:
+    if str(raw or "").upper() == "BULL":
+        return "long"
+    if str(raw or "").upper() == "BEAR":
+        return "short"
+    return None
+
+
+def _extract_wolfe_lifecycle_event(clean: str) -> Optional[dict]:
+    stage_m = _WOLFE_LIFECYCLE_STAGE_RE.search(clean)
+    marker_m = _WOLFE_LIFECYCLE_MARKER_RE.search(clean)
+    if not stage_m or not marker_m:
+        return None
+
+    stage = stage_m.group("stage").lower()
+    direction_raw = marker_m.group("dir")
+    if not direction_raw:
+        header_dir_m = _WOLFE_LIFECYCLE_HEADER_DIR_RE.search(clean)
+        direction_raw = header_dir_m.group("dir") if header_dir_m else ""
+    direction = _wolfe_direction(direction_raw)
+
+    wave_id = None
+    regime = None
+    id_m = _WOLFE_LIFECYCLE_ID_RE.search(clean)
+    if id_m:
+        wave_id = id_m.group("wave_id")
+        regime = id_m.group("regime").strip()
+    else:
+        trailing_id_m = re.search(r"\]\s*.*?\b([A-Za-z0-9]{4,})\s*$", clean.strip(), re.IGNORECASE)
+        if trailing_id_m:
+            wave_id = trailing_id_m.group(1)
+
+    event = {
+        "stage": stage,
+        "symbol": _normalise_symbol(marker_m.group("sym")),
+        "timeframe": marker_m.group("tf"),
+        "direction": direction,
+        "wave_id": wave_id,
+        "strategy": "wolfe_channel",
+    }
+
+    compact_head_m = _WOLFE_CHANNEL_HEADER_RE.search(clean)
+    if stage == "entry" and compact_head_m and direction:
+        sig = {
+            "symbol": _normalise_symbol(compact_head_m.group("sym")),
+            "signal": direction,
+            "entry": _parse_price(compact_head_m.group("entry")),
+            "strategy": "wolfe_channel",
+            "wave_stage": stage,
+            "timeframe": marker_m.group("tf"),
+            "source_format": "wolfe_compact",
+        }
+        if wave_id:
+            sig["wave_id"] = wave_id
+        wolfe_sl_m = _WOLFE_CHANNEL_SL_RE.search(clean)
+        if wolfe_sl_m:
+            sig["sl"] = _parse_price(wolfe_sl_m.group("sl"))
+        wolfe_tp_m = _WOLFE_CHANNEL_TARGET_RE.search(clean)
+        if wolfe_tp_m:
+            sig["tp1"] = _parse_price(wolfe_tp_m.group("tp"))
+        rr_m = _WOLFE_LIFECYCLE_RR_RE.search(clean)
+        if rr_m:
+            sig["rr"] = float(rr_m.group("rr"))
+        if _is_valid_signal(sig):
+            event["signal_payload"] = sig
+        return event
+
+    if stage != "bona_fide" or not direction:
+        return event
+
+    entry_zone_m = _WOLFE_LIFECYCLE_ENTRY_ZONE_RE.search(clean)
+    stop_m = _WOLFE_LIFECYCLE_STOP_RE.search(clean)
+    current_m = _WOLFE_LIFECYCLE_CURRENT_RE.search(clean)
+    tp1_m = _TP1_RE.search(clean)
+    if not (entry_zone_m and stop_m and current_m and tp1_m):
+        return event
+
+    zone_low = _parse_price(entry_zone_m.group("low"))
+    zone_high = _parse_price(entry_zone_m.group("high"))
+    signal_price = _parse_price(current_m.group("price"))
+    stop_price = _parse_price(stop_m.group("sl"))
+    raw_tps = [_parse_price(m.group(2)) for m in _TP_ALL_RE.finditer(clean)]
+    if not raw_tps:
+        raw_tps = [_parse_price(tp1_m.group(1))]
+
+    if direction == "long":
+        entry_candidates = [zone_low, zone_high, signal_price]
+        stop_ok = lambda entry: stop_price < entry
+        valid_tp = lambda entry, tp: tp > entry
+    else:
+        entry_candidates = [zone_high, zone_low, signal_price]
+        stop_ok = lambda entry: stop_price > entry
+        valid_tp = lambda entry, tp: tp < entry
+
+    entry_ref = None
+    selected_tps: list[float] = []
+    for candidate in entry_candidates:
+        profit_tps = [tp for tp in raw_tps if valid_tp(candidate, tp)]
+        if stop_ok(candidate) and profit_tps:
+            entry_ref = candidate
+            selected_tps = profit_tps
+            break
+    if entry_ref is None:
+        return event
+
+    sig = {
+        "symbol": event["symbol"],
+        "signal": direction,
+        "entry": entry_ref,
+        "sl": stop_price,
+        "tp1": selected_tps[0],
+        "strategy": "wolfe_channel",
+        "wave_stage": stage,
+        "timeframe": marker_m.group("tf"),
+        "source_format": "wolfe_lifecycle",
+        "signal_price": signal_price,
+        "entry_zone_low": zone_low,
+        "entry_zone_high": zone_high,
+    }
+    if wave_id:
+        sig["wave_id"] = wave_id
+    if regime:
+        sig["regime"] = regime
+    score_m = _WOLFE_LIFECYCLE_SCORE_RE.search(clean)
+    if score_m:
+        sig["score"] = float(score_m.group("score"))
+    rr_m = _WOLFE_LIFECYCLE_RR_RE.search(clean)
+    if rr_m:
+        sig["rr"] = float(rr_m.group("rr"))
+    ldz_m = _LDZ_LEVEL_RE.search(clean)
+    if ldz_m:
+        sig["ldz_level"] = _parse_price(ldz_m.group(1))
+    if len(selected_tps) > 1:
+        sig["tps"] = selected_tps
+    if len(raw_tps) > 1:
+        sig["raw_tps"] = raw_tps
+    if _is_valid_signal(sig):
+        event["signal_payload"] = sig
+    return event
+
+
+def _parse_wolfe_lifecycle_signal(clean: str):
+    event = _extract_wolfe_lifecycle_event(clean)
+    if event is None:
+        return None
+    if event.get("stage") == "entry" and isinstance(event.get("signal_payload"), dict):
+        return event["signal_payload"]
+    return _NON_ACTIONABLE_SIGNAL
+
+
 def parse_signal(text: str) -> Optional[dict]:
     """
     Try to extract a trading signal from a message string.
@@ -325,6 +857,16 @@ def parse_signal(text: str) -> Optional[dict]:
         return None
 
     # 2 & 3 — Bandit / LDZ format (both share the same ➾ Entry Zone / ❌ Stop structure)
+    opi_sig = _parse_opi_signal(clean)
+    if opi_sig:
+        return opi_sig
+
+    wolfe_lifecycle_sig = _parse_wolfe_lifecycle_signal(clean)
+    if wolfe_lifecycle_sig is _NON_ACTIONABLE_SIGNAL:
+        return None
+    if wolfe_lifecycle_sig:
+        return wolfe_lifecycle_sig
+
     entry_m = _ENTRY_ZONE_RE.search(clean)
     stop_m  = _STOP_RE.search(clean)
     if entry_m and stop_m:
@@ -1381,7 +1923,7 @@ class MatrixRlSidecarClient:
                 "bot_version": "matrix",
                 "strategy": sig.get("strategy", "matrix"),
                 "symbol": symbol,
-                "timeframe": "5",
+                "timeframe": str(sig.get("timeframe") or "5"),
                 "runtime": {"bybit_demo": DEMO},
                 "build": {
                     "git_commit": os.environ.get("GIT_COMMIT") or os.environ.get("COMMIT_SHA"),
@@ -1418,6 +1960,17 @@ class MatrixRlSidecarClient:
             "matrix_status_accepted": 1.0 if status == "accepted" else 0.0,
             "matrix_status_rejected": 1.0 if status == "rejected" else 0.0,
         }
+        for name in ("score", "risk_pct", "fee_to_stop_risk", "target_r", "move_pct"):
+            try:
+                value = float(sig.get(name))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                feature_payload[f"signal.{name}"] = value
+        kind = str(sig.get("opi_kind") or "").strip().lower()
+        if kind:
+            for candidate in ("opi_full", "move_alert", "domino_turn", "bias_flip"):
+                feature_payload[f"signal.opi_kind_{candidate}"] = 1.0 if kind == candidate else 0.0
         feature_payload.update(market_enrichment.get("features") or {})
         feature_columns = list(feature_payload.keys())
         return {
@@ -1436,6 +1989,8 @@ class MatrixRlSidecarClient:
                 "stop_loss": sig.get("sl"),
                 "take_profit": sig.get("tp1"),
                 "take_profit_levels": sig.get("tps"),
+                "timeframe": sig.get("timeframe"),
+                "source_format": sig.get("source_format"),
                 "entry_time": datetime.now(timezone.utc).isoformat(),
             },
             "features": feature_payload,
@@ -1571,6 +2126,7 @@ class MatrixSignalBot:
         self._client.user_id = None  # will be populated by whoami()
         self._processed_event_ids: set[str] = set()
         self._recent_signal_keys: dict[str, float] = {}
+        self._wolfe_lifecycle_setups: dict[str, dict] = {}
         self._rl_entry_refs: dict[str, dict] = {}
         self._rl_entry_refs_dirty = False
         self._rl_entry_refs_last_save_at = 0.0
@@ -1773,6 +2329,9 @@ class MatrixSignalBot:
 
     @staticmethod
     def _signal_key(sig: dict) -> str:
+        if sig.get("dedup_key"):
+            return str(sig["dedup_key"])
+
         def fmt(value: object) -> str:
             try:
                 return f"{float(value):.8g}"
@@ -1789,7 +2348,11 @@ class MatrixSignalBot:
         )
 
     def _claim_signal(self, sig: dict) -> tuple[bool, float]:
-        if MATRIX_DEDUP_SECONDS <= 0:
+        try:
+            dedup_seconds = float(sig.get("dedup_seconds", MATRIX_DEDUP_SECONDS))
+        except (TypeError, ValueError):
+            dedup_seconds = MATRIX_DEDUP_SECONDS
+        if dedup_seconds <= 0:
             return True, 0.0
         now = time.time()
         expired = [key for key, expires_at in self._recent_signal_keys.items() if expires_at <= now]
@@ -1799,8 +2362,123 @@ class MatrixSignalBot:
         expires_at = self._recent_signal_keys.get(key, 0.0)
         if expires_at > now:
             return False, expires_at - now
-        self._recent_signal_keys[key] = now + MATRIX_DEDUP_SECONDS
+        self._recent_signal_keys[key] = now + dedup_seconds
         return True, 0.0
+
+    @staticmethod
+    def _wolfe_lifecycle_key(event: dict) -> str:
+        return "|".join(
+            [
+                str(event.get("wave_id") or "").lower(),
+                str(event.get("symbol") or "").upper(),
+                str(event.get("timeframe") or "").lower(),
+                str(event.get("direction") or "").lower(),
+            ]
+        )
+
+    def _prune_wolfe_lifecycle_setups(self) -> None:
+        if MATRIX_WOLFE_SETUP_TTL_SECONDS <= 0:
+            return
+        cutoff = time.time() - MATRIX_WOLFE_SETUP_TTL_SECONDS
+        expired = [
+            key
+            for key, row in self._wolfe_lifecycle_setups.items()
+            if float(row.get("updated_at") or 0.0) < cutoff
+        ]
+        for key in expired:
+            self._wolfe_lifecycle_setups.pop(key, None)
+
+    def _pop_wolfe_lifecycle_setup(self, event: dict) -> Optional[dict]:
+        key = self._wolfe_lifecycle_key(event)
+        if key in self._wolfe_lifecycle_setups:
+            return self._wolfe_lifecycle_setups.pop(key, None)
+        wave_id = str(event.get("wave_id") or "").lower()
+        if not wave_id:
+            return None
+        matches = [
+            (key, row)
+            for key, row in self._wolfe_lifecycle_setups.items()
+            if str(row.get("wave_id") or "").lower() == wave_id
+        ]
+        if not matches:
+            return None
+        key, row = sorted(matches, key=lambda item: float(item[1].get("updated_at") or 0.0), reverse=True)[0]
+        self._wolfe_lifecycle_setups.pop(key, None)
+        return row
+
+    def _handle_wolfe_lifecycle_message(self, body: str, *, room_id: str) -> Optional[dict]:
+        event = _extract_wolfe_lifecycle_event(_strip_html(body).strip())
+        if not event:
+            return None
+
+        self._prune_wolfe_lifecycle_setups()
+        stage = str(event.get("stage") or "").lower()
+        wave_id = str(event.get("wave_id") or "")
+        payload = event.get("signal_payload")
+
+        if stage == "bona_fide":
+            if isinstance(payload, dict):
+                key = self._wolfe_lifecycle_key(event)
+                self._wolfe_lifecycle_setups[key] = {
+                    "wave_id": wave_id,
+                    "symbol": event.get("symbol"),
+                    "timeframe": event.get("timeframe"),
+                    "direction": event.get("direction"),
+                    "signal_payload": payload,
+                    "updated_at": time.time(),
+                }
+                log.info(
+                    "Wolfe setup cached | id=%s symbol=%s tf=%s dir=%s entry_ref=%s sl=%s tp=%s",
+                    wave_id or "-",
+                    payload.get("symbol"),
+                    payload.get("timeframe"),
+                    payload.get("signal"),
+                    payload.get("entry"),
+                    payload.get("sl"),
+                    payload.get("tp1"),
+                )
+            return {"handled": True, "signal": None, "event": event}
+
+        if stage == "entry":
+            if isinstance(payload, dict):
+                payload = dict(payload)
+                payload["room_id"] = room_id
+                return {"handled": True, "signal": payload, "event": event}
+            cached = self._pop_wolfe_lifecycle_setup(event)
+            if cached and isinstance(cached.get("signal_payload"), dict):
+                sig = dict(cached["signal_payload"])
+                sig["wave_stage"] = "entry"
+                sig["source_format"] = "wolfe_lifecycle_entry"
+                sig["room_id"] = room_id
+                log.info(
+                    "Wolfe entry trigger matched | id=%s symbol=%s tf=%s dir=%s",
+                    wave_id or "-",
+                    sig.get("symbol"),
+                    sig.get("timeframe"),
+                    sig.get("signal"),
+                )
+                return {"handled": True, "signal": sig, "event": event}
+            log.info(
+                "Wolfe entry trigger ignored; no cached setup | id=%s symbol=%s tf=%s dir=%s",
+                wave_id or "-",
+                event.get("symbol"),
+                event.get("timeframe"),
+                event.get("direction"),
+            )
+            return {"handled": True, "signal": None, "event": event}
+
+        if stage in {"canceled", "stop_out", "target_hit"}:
+            removed = self._pop_wolfe_lifecycle_setup(event)
+            log.info(
+                "Wolfe lifecycle %s | id=%s symbol=%s removed_cached=%s",
+                stage,
+                wave_id or "-",
+                event.get("symbol"),
+                bool(removed),
+            )
+            return {"handled": True, "signal": None, "event": event}
+
+        return {"handled": True, "signal": None, "event": event}
 
     async def start(self) -> None:
         room_list = ", ".join(sorted(MATRIX_ROOM_IDS)) if MATRIX_ROOM_IDS else "(all joined rooms)"
@@ -1871,8 +2549,15 @@ class MatrixSignalBot:
 
         log.debug("Message from %s: %s", event.sender, body[:200])
 
-        # 1. Try to parse as entry signal
-        sig = parse_signal(body)
+        # 1. Wolfe channel lifecycle messages are stateful: [bona_fide] defines
+        # levels, [entry] triggers execution, and outcome states must not trade.
+        wolfe_lifecycle = self._handle_wolfe_lifecycle_message(body, room_id=room.room_id)
+        if wolfe_lifecycle is not None:
+            sig = wolfe_lifecycle.get("signal")
+            if sig is None:
+                return
+        else:
+            sig = parse_signal(body)
         if sig is not None:
             # Add room metadata to signal for RL feature vector
             sig["room_id"] = room.room_id
@@ -1887,6 +2572,9 @@ class MatrixSignalBot:
             dispatch_result: dict
             if not claimed:
                 reason = f"Duplicate signal ignored for {wait_seconds:.0f}s"
+                if bool(sig.get("drop_duplicate")):
+                    log.info("%s | symbol=%s strategy=%s", reason, sig.get("symbol"), sig.get("strategy"))
+                    return
                 dispatch_result = self._rl_client.enqueue_signal(
                     sig,
                     status="rejected",
