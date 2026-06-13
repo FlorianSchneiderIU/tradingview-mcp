@@ -146,11 +146,12 @@ class WolfeWaveState:
 
 
 class WolfeWaveEngine:
-    def __init__(self):
+    def __init__(self, *, strategy_name: str = "wolfe_wave"):
+        self.strategy_name = strategy_name
         self.min_bars = int(os.environ.get("WOLFE_WAVE_MIN_BARS", "3000"))
 
-    @staticmethod
     def _signal_payload(
+        self,
         signal,
         *,
         entry: float,
@@ -165,7 +166,7 @@ class WolfeWaveEngine:
     ) -> dict:
         planned_rr = float(signal.target_rr_planned if target_rr_planned is None else target_rr_planned)
         return {
-            "strategy": "wolfe_wave",
+            "strategy": self.strategy_name,
             "signal": signal.direction,
             "entry": entry,
             "model_entry": float(signal.entry_price),

@@ -59,6 +59,25 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float_map(name: str) -> dict[str, float]:
+    raw = os.environ.get(name, "")
+    out: dict[str, float] = {}
+    for item in raw.replace(";", ",").split(","):
+        if not item.strip() or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip().lower()
+        if not key:
+            continue
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            continue
+        if math.isfinite(parsed):
+            out[key] = max(0.0, min(5.0, parsed))
+    return out
+
+
 HOST = os.environ.get("RL_HOST", "0.0.0.0")
 PORT = env_int("RL_PORT", 8090)
 LOG_DIR = os.environ.get("RL_LOG_DIR", "/app/rl")
@@ -103,6 +122,7 @@ TELEGRAM_CHAT_ID = os.environ.get("RL_TELEGRAM_CHAT_ID", os.environ.get("TELEGRA
 
 DEFAULT_RISK_USDT = env_float("RL_DEFAULT_RISK_USDT", 100.0)
 MIN_ACTION_TO_TRADE = env_float("RL_MIN_ACTION_TO_TRADE", 0.05)
+RISK_MULTIPLIERS = env_float_map("RL_RISK_MULTIPLIERS")
 INITIAL_ACTION = env_float("RL_INITIAL_ACTION", 0.10)
 ALLOW_REVERSE_ACTIONS = env_bool("RL_ALLOW_REVERSE_ACTIONS", True)
 INITIAL_SIDE_CONFIDENCE = min(0.999, max(0.01, env_float("RL_INITIAL_SIDE_CONFIDENCE", 0.95)))
@@ -216,6 +236,29 @@ def opposite_direction(direction: str) -> str:
     if text == "short":
         return "long"
     return text
+
+
+def risk_multiplier_for_decision(decision: dict[str, Any]) -> tuple[float, str]:
+    if not RISK_MULTIPLIERS:
+        return 1.0, ""
+    strategy = str(decision.get("strategy") or "").strip().lower()
+    status = str(decision.get("source_status") or "").strip().lower()
+    symbol = str(decision.get("symbol") or "").strip().lower()
+    direction = str(decision.get("source_direction") or decision.get("direction") or "").strip().lower()
+    candidates = [
+        ":".join(part for part in (strategy, status, symbol, direction) if part),
+        ":".join(part for part in (strategy, status, symbol) if part),
+        ":".join(part for part in (strategy, status) if part),
+        ":".join(part for part in (strategy, symbol) if part),
+        strategy,
+        f"status:{status}" if status else "",
+        f"symbol:{symbol}" if symbol else "",
+        "default",
+    ]
+    for key in candidates:
+        if key and key in RISK_MULTIPLIERS:
+            return RISK_MULTIPLIERS[key], key
+    return 1.0, ""
 
 
 def qty_to_str(value: float, step: float = 0.0) -> str:
@@ -1893,9 +1936,18 @@ class RLExecutionService:
         if default_risk_usdt <= 0:
             decision["skip_reason"] = f"invalid RL_DEFAULT_RISK_USDT={default_risk_usdt}"
             return
-        risk_budget = default_risk_usdt * risk_action
+        risk_multiplier, risk_multiplier_key = risk_multiplier_for_decision(decision)
+        risk_budget_base = default_risk_usdt * risk_action
+        risk_budget = risk_budget_base * risk_multiplier
+        decision["risk_multiplier"] = risk_multiplier
+        if risk_multiplier_key:
+            decision["risk_multiplier_key"] = risk_multiplier_key
+        decision["risk_budget_base_usdt"] = risk_budget_base
         if risk_budget <= 0:
-            decision["skip_reason"] = f"risk budget is zero for action={action:.4f}"
+            decision["skip_reason"] = (
+                f"risk budget is zero for action={action:.4f} "
+                f"risk_multiplier={risk_multiplier:.4f}"
+            )
             return
         q_step = float(info["qty_step"])
         min_qty = float(info["min_qty"])
@@ -3215,7 +3267,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     log.info(
         "RL execution sidecar listening on %s:%d  trading_enabled=%s demo=%s "
-        "default_risk=%.2f USDT min_action=%.3f reverse_actions=%s",
+        "default_risk=%.2f USDT min_action=%.3f reverse_actions=%s risk_multipliers=%s",
         HOST,
         PORT,
         TRADING_ENABLED,
@@ -3223,6 +3275,7 @@ def main() -> None:
         DEFAULT_RISK_USDT,
         MIN_ACTION_TO_TRADE,
         ALLOW_REVERSE_ACTIONS,
+        ",".join(f"{key}={value:g}" for key, value in sorted(RISK_MULTIPLIERS.items())) or "(none)",
     )
     server.serve_forever()
 
