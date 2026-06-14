@@ -114,6 +114,7 @@ API_KEY = os.environ.get("RL_BYBIT_API_KEY", os.environ.get("BYBIT_API_KEY", "")
 API_SECRET = os.environ.get("RL_BYBIT_API_SECRET", os.environ.get("BYBIT_API_SECRET", "")).strip()
 ENABLE_PRIVATE_ORDER_WS = env_bool("RL_ENABLE_PRIVATE_ORDER_WS", True)
 REWARD_POLL_SECONDS = env_float("RL_REWARD_POLL_SECONDS", 30.0)
+TRAILING_POLL_SECONDS = max(0.5, env_float("RL_TRAILING_POLL_SECONDS", 2.0))
 HEARTBEAT_CHECK_SECONDS = env_float("RL_HEARTBEAT_CHECK_SECONDS", 60.0)
 DAILY_HEARTBEAT_UTC_HOUR = env_int("RL_DAILY_HEARTBEAT_UTC_HOUR", env_int("DAILY_HEARTBEAT_UTC_HOUR", 0))
 DAILY_HEARTBEAT_UTC_MINUTE = env_int("RL_DAILY_HEARTBEAT_UTC_MINUTE", env_int("DAILY_HEARTBEAT_UTC_MINUTE", 5))
@@ -143,6 +144,13 @@ TRAILING_CONVERSION_REASON = (
     "Bybit trailing stops are scoped to the whole hedge-mode position side; "
     "RL multi-trade execution uses order-attached Partial TP/SL sized to the entry qty instead"
 )
+SOFTWARE_TRAILING_STYLES = {
+    "trigger_trailing",
+    "trigger-trailing",
+    "software_trailing",
+    "software-trailing",
+    "trailing",
+}
 
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -213,6 +221,49 @@ def round_to_step(value: float, step: float) -> float:
         return value
     precision = max(0, round(-math.log10(step)))
     return round(round(value / step) * step, precision)
+
+
+def trailing_stop_state(
+    *,
+    direction: str,
+    entry: float,
+    market_price: float,
+    previous_best: float | None,
+    previous_stop: float,
+    trigger_price: float,
+    trail_distance_pct: float,
+    move_to_breakeven: bool,
+    force_arm: bool = False,
+    was_armed: bool = False,
+) -> dict[str, float | bool]:
+    """Advance one decision-specific software trailing stop."""
+    if direction not in {"long", "short"}:
+        raise ValueError(f"invalid trailing direction: {direction}")
+    if entry <= 0 or market_price <= 0 or trigger_price <= 0:
+        raise ValueError("entry, market_price, and trigger_price must be positive")
+    if trail_distance_pct <= 0:
+        raise ValueError("trail_distance_pct must be positive")
+
+    best = float(previous_best) if previous_best and previous_best > 0 else entry
+    if direction == "long":
+        best = max(best, market_price)
+        armed = bool(was_armed or force_arm or best >= trigger_price)
+        candidate = previous_stop
+        if armed:
+            candidate = best * (1.0 - trail_distance_pct)
+            if move_to_breakeven:
+                candidate = max(candidate, entry)
+            candidate = max(previous_stop, candidate)
+    else:
+        best = min(best, market_price)
+        armed = bool(was_armed or force_arm or best <= trigger_price)
+        candidate = previous_stop
+        if armed:
+            candidate = best * (1.0 + trail_distance_pct)
+            if move_to_breakeven:
+                candidate = min(candidate, entry)
+            candidate = min(previous_stop, candidate)
+    return {"best_price": best, "armed": armed, "stop_price": candidate}
 
 
 def floor_to_step(value: float, step: float) -> float:
@@ -1396,6 +1447,7 @@ class RLExecutionService:
             if ENABLE_PRIVATE_ORDER_WS:
                 self._open_private_ws()
             threading.Thread(target=self._reward_poll_loop, daemon=True, name="rl-reward-poll").start()
+            threading.Thread(target=self._trailing_loop, daemon=True, name="rl-trailing").start()
             threading.Thread(target=self._heartbeat_loop, daemon=True, name="rl-heartbeat").start()
         elif TRADING_ENABLED:
             log.error("RL_TRADING_ENABLED=true but RL_BYBIT_API_KEY/SECRET are missing")
@@ -1598,14 +1650,28 @@ class RLExecutionService:
     def _exit_request_metadata(cls, setup: dict[str, Any]) -> dict[str, Any]:
         source_exit_style = cls._source_exit_style(setup)
         source_trail_dist = to_float(setup.get("trail_dist"))
+        trail_distance_pct = to_float(setup.get("trail_distance_pct"))
+        trail_trigger_price = to_float(setup.get("trail_trigger_price"))
+        trail_trigger_pct = to_float(setup.get("trail_trigger_pct"))
+        move_to_breakeven = setup.get("move_stop_to_breakeven_on_trigger")
+        if move_to_breakeven is None:
+            move_to_breakeven = True
         fixed_exit_styles = {"fixed_tp", "fixed-tp", "fixedtp", "fixed", "partial_fixed_tp_sl"}
         source_requests_trailing = source_exit_style not in fixed_exit_styles
+        software_trailing_requested = source_exit_style in SOFTWARE_TRAILING_STYLES
         return {
             "source_exit_style": source_exit_style,
             "source_trail_dist": source_trail_dist,
             "source_requests_trailing": source_requests_trailing,
+            "software_trailing_requested": software_trailing_requested,
+            "trail_distance_pct": trail_distance_pct,
+            "trail_trigger_price": trail_trigger_price,
+            "trail_trigger_pct": trail_trigger_pct,
+            "move_stop_to_breakeven_on_trigger": bool(move_to_breakeven),
             "exit_style_conversion_reason": (
-                TRAILING_CONVERSION_REASON if source_requests_trailing else None
+                TRAILING_CONVERSION_REASON
+                if source_requests_trailing and not software_trailing_requested
+                else None
             ),
         }
 
@@ -1705,6 +1771,10 @@ class RLExecutionService:
             "source_exit_style": decision.get("source_exit_style"),
             "effective_exit_style": decision.get("effective_exit_style"),
             "exit_style_converted": decision.get("exit_style_converted"),
+            "trailing_armed": decision.get("trailing_armed"),
+            "trailing_current_stop": decision.get("trailing_current_stop"),
+            "trailing_best_price": decision.get("trailing_best_price"),
+            "trailing_updates": decision.get("trailing_updates"),
             "reward": decision.get("reward"),
         }
 
@@ -1846,6 +1916,7 @@ class RLExecutionService:
         trail_dist = to_float(setup.get("trail_dist"))
         exit_request = self._exit_request_metadata(setup)
         source_requests_trailing = bool(exit_request["source_requests_trailing"])
+        software_trailing_requested = bool(exit_request["software_trailing_requested"])
         decision.update(exit_request)
         decision["risk_action"] = risk_action
         decision["source_direction"] = source_direction
@@ -1900,6 +1971,29 @@ class RLExecutionService:
         if target is None:
             decision["skip_reason"] = "missing take-profit; hedge-mode RL requires paired partial TP/SL"
             return
+        if software_trailing_requested:
+            trail_distance_pct = to_float(exit_request.get("trail_distance_pct"))
+            if trail_distance_pct is None or trail_distance_pct <= 0:
+                decision["skip_reason"] = "software trailing requires trail_distance_pct"
+                return
+            trigger_price = to_float(exit_request.get("trail_trigger_price"))
+            trigger_pct = to_float(exit_request.get("trail_trigger_pct"))
+            if trigger_price is None and trigger_pct is not None and trigger_pct > 0:
+                trigger_price = (
+                    entry * (1.0 + trigger_pct)
+                    if direction == "long"
+                    else entry * (1.0 - trigger_pct)
+                )
+            if trigger_price is None:
+                trigger_price = target
+            if direction == "long" and trigger_price <= entry:
+                decision["skip_reason"] = "long trailing trigger must be above entry"
+                return
+            if direction == "short" and trigger_price >= entry:
+                decision["skip_reason"] = "short trailing trigger must be below entry"
+                return
+            decision["trail_trigger_price"] = trigger_price
+            decision["trail_distance_pct"] = trail_distance_pct
 
         unit_risk = abs(entry - stop)
         if unit_risk <= 0:
@@ -1973,7 +2067,11 @@ class RLExecutionService:
         sl_price = round_to_step(stop, tick)
         tp_price = round_to_step(target, tick) if target is not None else None
         trail_price_dist = round_to_step(trail_dist, tick) if trail_dist is not None else 0.0
-        effective_exit_style = "partial_fixed_tp_sl" if tp_price is not None else "unprotected_market_entry"
+        effective_exit_style = (
+            "software_partial_trailing"
+            if software_trailing_requested
+            else ("partial_fixed_tp_sl" if tp_price is not None else "unprotected_market_entry")
+        )
         side = "Buy" if direction == "long" else "Sell"
         position_idx = 1 if side == "Buy" else 2
         order_link_id = self._order_link_id(decision.get("strategy"), symbol, direction)
@@ -1988,7 +2086,12 @@ class RLExecutionService:
             "positionIdx": position_idx,
             "orderLinkId": order_link_id,
         }
-        if tp_price is not None:
+        if software_trailing_requested:
+            order_kwargs["stopLoss"] = str(sl_price)
+            order_kwargs["tpslMode"] = "Partial"
+            order_kwargs["slTriggerBy"] = "LastPrice"
+            order_kwargs["slOrderType"] = "Market"
+        elif tp_price is not None:
             order_kwargs["takeProfit"] = str(tp_price)
             order_kwargs["stopLoss"] = str(sl_price)
             order_kwargs["tpslMode"] = "Partial"
@@ -2047,12 +2150,29 @@ class RLExecutionService:
             "opened_at_ms": now_ms(),
             "order_request": order_kwargs,
             "order_response": resp,
-            "partial_tpsl_mode": bool(tp_price is not None),
+            "partial_tpsl_mode": bool(tp_price is not None or software_trailing_requested),
             "source_trail_dist_rounded": trail_price_dist,
             "effective_exit_style": effective_exit_style,
-            "exit_style_converted": source_requests_trailing,
-            "trailing_disabled_reason": TRAILING_CONVERSION_REASON if source_requests_trailing else None,
+            "exit_style_converted": source_requests_trailing and not software_trailing_requested,
+            "trailing_disabled_reason": (
+                TRAILING_CONVERSION_REASON
+                if source_requests_trailing and not software_trailing_requested
+                else None
+            ),
         })
+        if software_trailing_requested:
+            decision.update(
+                {
+                    "trailing_armed": False,
+                    "trailing_best_price": entry,
+                    "trailing_current_stop": sl_price,
+                    "trailing_stop_order_id": None,
+                    "trailing_updates": 0,
+                    "move_stop_to_breakeven_on_trigger": bool(
+                        exit_request.get("move_stop_to_breakeven_on_trigger")
+                    ),
+                }
+            )
         with self.lock:
             decision_id = str(decision["decision_id"])
             self.active_trades[decision_id] = symbol
@@ -2161,8 +2281,6 @@ class RLExecutionService:
             for order in self._private_items(msg):
                 if order.get("category") not in (None, "", "linear"):
                     continue
-                if str(order.get("orderStatus", "")).lower() != "filled":
-                    continue
                 symbol = str(order.get("symbol") or "").upper()
                 if not symbol:
                     continue
@@ -2176,6 +2294,16 @@ class RLExecutionService:
                     if key:
                         with self.lock:
                             self.order_to_decision[str(key)] = decision_id
+                stop_type = str(order.get("stopOrderType") or "")
+                if stop_type == "PartialStopLoss":
+                    with self.lock:
+                        decision["trailing_stop_order_id"] = order_id or decision.get("trailing_stop_order_id")
+                        trigger_price = to_float(order.get("triggerPrice"))
+                        if trigger_price is not None and trigger_price > 0:
+                            decision["trailing_current_stop"] = trigger_price
+                        decision["stop_order_raw"] = order
+                if str(order.get("orderStatus", "")).lower() != "filled":
+                    continue
                 if not self._is_exit_order(order):
                     if order_id == decision.get("entry_order_id") or order_link_id == decision.get("entry_order_link_id"):
                         decision["entry_filled_at_ms"] = int(to_float(order.get("updatedTime")) or now_ms())
@@ -2205,6 +2333,352 @@ class RLExecutionService:
                 )
         except Exception:
             log.exception("Error in private order callback")
+
+    def _find_partial_stop_order(self, decision: dict[str, Any]) -> dict[str, Any] | None:
+        if self.http is None:
+            return None
+        symbol = str(decision.get("symbol") or "").upper()
+        if not symbol:
+            return None
+        response = self.http.get_open_orders(
+            category="linear",
+            symbol=symbol,
+            openOnly=0,
+        )
+        if int(response.get("retCode", -1)) != 0:
+            raise RuntimeError(
+                f"get_open_orders failed retCode={response.get('retCode')} "
+                f"retMsg={response.get('retMsg')}"
+            )
+        rows = response.get("result", {}).get("list", [])
+        entry_order_id = str(decision.get("entry_order_id") or "")
+        entry_link_id = str(decision.get("entry_order_link_id") or "")
+        position_idx = int(to_float(decision.get("position_idx")) or 0)
+        expected_qty = to_float(decision.get("qty_float") or decision.get("qty"))
+        exit_side = str(decision.get("exit_side") or "")
+        opened_at = int(to_float(decision.get("opened_at_ms")) or 0)
+        candidates: list[tuple[int, float, dict[str, Any]]] = []
+        expected_stop = to_float(
+            decision.get("trailing_current_stop")
+            or (decision.get("setup") or {}).get("stop_loss")
+        )
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            stop_type = str(row.get("stopOrderType") or "")
+            create_type = str(row.get("createType") or "").lower()
+            if stop_type != "PartialStopLoss" and "stoploss" not in create_type:
+                continue
+            if position_idx and int(to_float(row.get("positionIdx")) or 0) != position_idx:
+                continue
+            if exit_side and str(row.get("side") or "") != exit_side:
+                continue
+            created_at = int(to_float(row.get("createdTime")) or 0)
+            if opened_at and created_at and created_at < opened_at - 60_000:
+                continue
+            row_qty = to_float(row.get("qty") or row.get("leavesQty"))
+            if expected_qty is not None and row_qty is not None:
+                tolerance = max(abs(expected_qty) * 1e-6, 1e-12)
+                if abs(row_qty - expected_qty) > tolerance:
+                    continue
+            parent_keys = {
+                str(row.get("parentOrderId") or ""),
+                str(row.get("parentOrderLinkId") or ""),
+            }
+            direct_parent = int(
+                bool(entry_order_id and entry_order_id in parent_keys)
+                or bool(entry_link_id and entry_link_id in parent_keys)
+            )
+            trigger = to_float(row.get("triggerPrice"))
+            distance = abs(trigger - expected_stop) if trigger is not None and expected_stop is not None else math.inf
+            if not direct_parent and expected_stop is not None:
+                tolerance = max(abs(expected_stop) * 1e-7, float(self._instrument_info(symbol)["tick_size"]) * 1.5)
+                if trigger is None or distance > tolerance:
+                    continue
+            candidates.append((direct_parent, -distance, row))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected = candidates[0][2]
+        order_id = str(selected.get("orderId") or "")
+        if order_id:
+            decision_id = str(decision.get("decision_id") or "")
+            with self.lock:
+                decision["trailing_stop_order_id"] = order_id
+                decision["stop_order_raw"] = selected
+                self.order_to_decision[order_id] = decision_id
+        return selected
+
+    def _amend_decision_stop(
+        self,
+        decision: dict[str, Any],
+        stop_price: float,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        if self.http is None:
+            return {"ok": False, "message": "Bybit client unavailable"}
+        symbol = str(decision.get("symbol") or "").upper()
+        direction = str(decision.get("effective_direction") or decision.get("direction") or "").lower()
+        info = self._instrument_info(symbol)
+        tick = float(info["tick_size"])
+        rounded_stop = floor_to_step(stop_price, tick) if direction == "long" else ceil_to_step(stop_price, tick)
+        current_stop = to_float(
+            decision.get("trailing_current_stop")
+            or (decision.get("setup") or {}).get("stop_loss")
+        )
+        if current_stop is not None:
+            improved = rounded_stop > current_stop + tick * 0.5 if direction == "long" else rounded_stop < current_stop - tick * 0.5
+            if not improved:
+                return {
+                    "ok": True,
+                    "updated": False,
+                    "stop_price": current_stop,
+                    "message": f"Stop already at {current_stop:g}",
+                }
+
+        order_id = str(decision.get("trailing_stop_order_id") or "")
+        if not order_id:
+            order = self._find_partial_stop_order(decision)
+            order_id = str((order or {}).get("orderId") or "")
+        if not order_id:
+            return {
+                "ok": False,
+                "pending": True,
+                "message": "Partial stop order is not visible yet; trailing monitor will retry",
+            }
+
+        response = self.http.amend_order(
+            category="linear",
+            symbol=symbol,
+            orderId=order_id,
+            triggerPrice=str(rounded_stop),
+        )
+        if int(response.get("retCode", -1)) != 0:
+            return {
+                "ok": False,
+                "message": (
+                    f"amend_order failed retCode={response.get('retCode')} "
+                    f"retMsg={response.get('retMsg')}"
+                ),
+            }
+        with self.lock:
+            decision["trailing_stop_order_id"] = order_id
+            decision["trailing_current_stop"] = rounded_stop
+            decision["trailing_updates"] = int(decision.get("trailing_updates") or 0) + 1
+            decision["trailing_last_update_at"] = now_iso()
+            decision["trailing_last_update_reason"] = reason
+        log.info(
+            "[%s] decision=%s stop amended to %s reason=%s orderId=%s",
+            symbol,
+            decision.get("decision_id"),
+            rounded_stop,
+            reason,
+            order_id,
+        )
+        return {
+            "ok": True,
+            "updated": True,
+            "stop_price": rounded_stop,
+            "order_id": order_id,
+            "message": f"Stop amended to {rounded_stop:g}",
+        }
+
+    def _last_price(self, symbol: str) -> float:
+        if self.http is None:
+            raise RuntimeError("Bybit client unavailable")
+        response = self.http.get_tickers(category="linear", symbol=symbol)
+        if int(response.get("retCode", -1)) != 0:
+            raise RuntimeError(
+                f"get_tickers failed retCode={response.get('retCode')} "
+                f"retMsg={response.get('retMsg')}"
+            )
+        rows = response.get("result", {}).get("list", [])
+        if not rows:
+            raise RuntimeError(f"No ticker returned for {symbol}")
+        price = to_float(rows[0].get("lastPrice"))
+        if price is None or price <= 0:
+            raise RuntimeError(f"Invalid ticker price for {symbol}")
+        return price
+
+    def _advance_trailing_decision(
+        self,
+        decision: dict[str, Any],
+        market_price: float,
+        *,
+        force_arm: bool = False,
+        reason: str = "market ratchet",
+    ) -> dict[str, Any]:
+        setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
+        direction = str(decision.get("effective_direction") or decision.get("direction") or "").lower()
+        entry = to_float(setup.get("entry"))
+        trigger_price = to_float(decision.get("trail_trigger_price"))
+        trail_distance_pct = to_float(decision.get("trail_distance_pct"))
+        current_stop = to_float(decision.get("trailing_current_stop") or setup.get("stop_loss"))
+        if None in {entry, trigger_price, trail_distance_pct, current_stop}:
+            return {"ok": False, "message": "Trailing decision is missing entry/trigger/distance/stop metadata"}
+
+        effective_market = market_price
+        if force_arm:
+            effective_market = (
+                max(market_price, trigger_price)
+                if direction == "long"
+                else min(market_price, trigger_price)
+            )
+        state = trailing_stop_state(
+            direction=direction,
+            entry=float(entry),
+            market_price=float(effective_market),
+            previous_best=to_float(decision.get("trailing_best_price")),
+            previous_stop=float(current_stop),
+            trigger_price=float(trigger_price),
+            trail_distance_pct=float(trail_distance_pct),
+            move_to_breakeven=bool(decision.get("move_stop_to_breakeven_on_trigger", True)),
+            force_arm=force_arm,
+            was_armed=bool(decision.get("trailing_armed")),
+        )
+        with self.lock:
+            decision["trailing_best_price"] = state["best_price"]
+            if state["armed"] and not decision.get("trailing_armed"):
+                decision["trailing_armed_at"] = now_iso()
+            decision["trailing_armed"] = state["armed"]
+        if not state["armed"]:
+            return {"ok": True, "updated": False, "message": "Trailing trigger not reached"}
+        return self._amend_decision_stop(
+            decision,
+            float(state["stop_price"]),
+            reason=reason,
+        )
+
+    def _update_trailing_once(self) -> None:
+        with self.lock:
+            decisions = [
+                self.decisions[decision_id]
+                for decision_id in self.active_trades
+                if decision_id in self.decisions
+                and self.decisions[decision_id].get("effective_exit_style") == "software_partial_trailing"
+                and not self.decisions[decision_id].get("completed")
+            ]
+        prices: dict[str, float] = {}
+        for decision in decisions:
+            symbol = str(decision.get("symbol") or "").upper()
+            if symbol not in prices:
+                prices[symbol] = self._last_price(symbol)
+            result = self._advance_trailing_decision(decision, prices[symbol])
+            if not result.get("ok") and not result.get("pending"):
+                log.warning(
+                    "[%s] trailing update failed decision=%s: %s",
+                    symbol,
+                    decision.get("decision_id"),
+                    result.get("message"),
+                )
+
+    def _trailing_loop(self) -> None:
+        while True:
+            time.sleep(TRAILING_POLL_SECONDS)
+            try:
+                self._update_trailing_once()
+            except Exception:
+                log.exception("Software trailing update failed")
+
+    def handle_trade_control(self, payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action") or "").strip().lower()
+        if action not in {"set_sl_to_be", "arm_trailing"}:
+            raise ValueError("action must be set_sl_to_be or arm_trailing")
+        decision_id = str(payload.get("decision_id") or "").strip()
+        event_id = str(payload.get("event_id") or "").strip()
+        if not decision_id and event_id:
+            with self.lock:
+                decision_id = str(self.event_to_decision.get(event_id) or "")
+        if not decision_id:
+            symbol = str(payload.get("symbol") or "").strip().upper()
+            direction = str(payload.get("direction") or "").strip().lower()
+            if not symbol or direction not in {"long", "short"}:
+                raise ValueError("decision_id/event_id or symbol/direction is required")
+            with self.lock:
+                candidates = [
+                    self.decisions[candidate_id]
+                    for candidate_id, active_symbol in self.active_trades.items()
+                    if active_symbol == symbol
+                    and candidate_id in self.decisions
+                    and not self.decisions[candidate_id].get("completed")
+                    and str(
+                        self.decisions[candidate_id].get("effective_direction")
+                        or self.decisions[candidate_id].get("direction")
+                        or ""
+                    ).lower() == direction
+                ]
+            if action == "arm_trailing":
+                trailing_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.get("effective_exit_style") == "software_partial_trailing"
+                ]
+                if not trailing_candidates:
+                    return {
+                        "ok": True,
+                        "updated": False,
+                        "message": f"No active software-trailing {symbol} {direction} trades",
+                    }
+                market_price = self._last_price(symbol)
+                results = [
+                    self._advance_trailing_decision(
+                        candidate,
+                        market_price,
+                        force_arm=False,
+                        reason=str(payload.get("reason") or action),
+                    )
+                    for candidate in trailing_candidates
+                ]
+                updated = sum(bool(result.get("updated")) for result in results)
+                armed = sum(bool(candidate.get("trailing_armed")) for candidate in trailing_candidates)
+                return {
+                    "ok": all(bool(result.get("ok")) for result in results),
+                    "updated": bool(updated),
+                    "matched": len(trailing_candidates),
+                    "armed": armed,
+                    "message": (
+                        f"Checked {len(trailing_candidates)} {symbol} {direction} trailing trades; "
+                        f"armed={armed}, stop updates={updated}"
+                    ),
+                    "results": results,
+                }
+            if len(candidates) != 1:
+                raise ValueError(
+                    f"symbol/direction control matched {len(candidates)} active trades; "
+                    "an exact decision_id is required"
+                )
+            decision_id = str(candidates[0].get("decision_id") or "")
+        with self.lock:
+            decision = self.decisions.get(decision_id)
+        if not decision:
+            raise ValueError(f"decision not found: {decision_id}")
+        if decision.get("completed"):
+            return {"ok": True, "updated": False, "message": "Trade is already completed"}
+        if not decision.get("executed"):
+            raise ValueError(f"decision not executed yet: {decision_id}")
+
+        setup = decision.get("setup") if isinstance(decision.get("setup"), dict) else {}
+        entry = to_float(setup.get("entry"))
+        if entry is None or entry <= 0:
+            raise ValueError(f"decision has no valid entry: {decision_id}")
+        reason = str(payload.get("reason") or action)
+        if decision.get("effective_exit_style") == "software_partial_trailing" and action == "arm_trailing":
+            market_price = self._last_price(str(decision.get("symbol") or ""))
+            result = self._advance_trailing_decision(
+                decision,
+                market_price,
+                force_arm=True,
+                reason=reason,
+            )
+        else:
+            result = self._amend_decision_stop(decision, entry, reason=reason)
+        return {
+            **result,
+            "decision_id": decision_id,
+            "event_id": decision.get("event_id"),
+            "message": result.get("message") or reason,
+        }
 
     def _reward_poll_loop(self) -> None:
         while True:
@@ -3238,6 +3712,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             if self.path.rstrip("/") == "/v1/bridge-close":
                 response = self.service.handle_bridge_close(payload)
+                self._send_json(HTTPStatus.OK, response)
+                return
+            if self.path.rstrip("/") == "/v1/trade-control":
+                response = self.service.handle_trade_control(payload)
                 self._send_json(HTTPStatus.OK, response)
                 return
             if self.path.rstrip("/") == "/v1/rewards":

@@ -1,10 +1,12 @@
 node_modules/
 screenshots/
+*.bsp
 bot/logs/
 bot/.env
 bot/.env.funded
 bot/models/*.pkl
 scripts/current.pine
+scripts/.cache/
 temp_*
 *.log
 discovery-log.json

@@ -157,6 +157,10 @@ MATRIX_RL_EXECUTION_QUEUE_SIZE = int(
         os.environ.get("RL_EXECUTION_QUEUE_SIZE", "1000"),
     )
 )
+MATRIX_OPI_BRAIN_TRAIL_PCT = max(
+    0.0001,
+    _env_float("MATRIX_OPI_BRAIN_TRAIL_PCT", 0.004),
+)
 MATRIX_FUNDED_EXECUTION_ENABLED = _env_bool("MATRIX_FUNDED_EXECUTION_ENABLED", False)
 MATRIX_FUNDED_BYBIT_API_KEY = os.environ.get("MATRIX_FUNDED_BYBIT_API_KEY", "").strip()
 MATRIX_FUNDED_BYBIT_API_SECRET = os.environ.get("MATRIX_FUNDED_BYBIT_API_SECRET", "").strip()
@@ -356,6 +360,14 @@ _OPI_FULL_CANDIDATES = {
     ("XLMUSDT", "5m"),
     ("XAUUSDT", "5m"),
 }
+_OPI_BRAIN_CANDIDATES = {
+    (parts[0].upper(), parts[1].lower())
+    for item in os.environ.get(
+        "MATRIX_OPI_BRAIN_CANDIDATES",
+        "BTCUSDT:5m,XLMUSDT:5m,XAUUSDT:5m",
+    ).split(",")
+    if len(parts := item.strip().split(":", 1)) == 2
+}
 _OPI_STRUCTURAL_CANDIDATES = {
     ("move_alert", "XLMUSDT", "30m"),
     ("domino_turn", "XRPUSDT", "3m"),
@@ -442,6 +454,15 @@ def _opi_levels_are_valid(direction: str, entry: float, sl: float, tp: float) ->
     if direction == "long":
         return sl < entry < tp
     return tp < entry < sl
+
+
+def _is_opi_brain_alert(text: str) -> bool:
+    upper = str(text or "").upper()
+    return (
+        ("BOTTOMING" in upper or "BURNING OUT" in upper)
+        and _OPI_TARGET_RE.search(text) is not None
+        and _OPI_SL_RE.search(text) is not None
+    )
 
 
 def _opi_fee_to_stop_risk(entry: float, sl: float) -> float:
@@ -577,7 +598,9 @@ def _parse_opi_signal(clean: str) -> Optional[dict]:
     if full_m:
         symbol = _normalise_symbol(full_m.group("symbol"))
         timeframe = full_m.group("timeframe").lower()
-        if (symbol, timeframe) not in _OPI_FULL_CANDIDATES:
+        is_brain = _is_opi_brain_alert(match_text)
+        candidates = _OPI_BRAIN_CANDIDATES if is_brain else _OPI_FULL_CANDIDATES
+        if (symbol, timeframe) not in candidates:
             return None
         direction = full_m.group("direction").lower()
         entry = _parse_price(full_m.group("entry"))
@@ -594,19 +617,32 @@ def _parse_opi_signal(clean: str) -> Optional[dict]:
         if risk_pct < max(0.0002, MIN_STOP_DISTANCE_PCT) or fee_ratio > MAX_FEE_TO_PRICE_RISK:
             return None
 
+        strategy = "opi_brain" if is_brain else "opi_full"
+        opi_kind = strategy
         sig: dict = {
             "symbol": symbol,
             "signal": direction,
             "entry": entry,
             "sl": sl,
             "tp1": tp,
-            "strategy": "opi_full",
-            "source_format": "opi_matrix_full",
-            "opi_kind": "opi_full",
+            "strategy": strategy,
+            "source_format": "opi_matrix_brain" if is_brain else "opi_matrix_full",
+            "opi_kind": opi_kind,
             "timeframe": timeframe,
             "risk_pct": risk_pct,
             "fee_to_stop_risk": fee_ratio,
         }
+        if is_brain:
+            trigger_pct = abs(tp - entry) / entry
+            sig.update(
+                {
+                    "exit_style": "trigger_trailing",
+                    "trail_trigger_price": tp,
+                    "trail_trigger_pct": trigger_pct,
+                    "trail_distance_pct": MATRIX_OPI_BRAIN_TRAIL_PCT,
+                    "move_stop_to_breakeven_on_trigger": True,
+                }
+            )
         score_m = _OPI_SCORE_RE.search(match_text)
         if score_m:
             try:
@@ -624,7 +660,7 @@ def _parse_opi_signal(clean: str) -> Optional[dict]:
             sig["next_event"] = event_m.group("event").strip()
         return _with_opi_signal_controls(
             sig,
-            key=f"opi|opi_full|{symbol}|{timeframe}|{direction}",
+            key=f"opi|{strategy}|{symbol}|{timeframe}|{direction}",
         )
 
     if domino_m := _OPI_DOMINO_RE.search(match_text):
@@ -1882,6 +1918,7 @@ class MatrixRlSidecarClient:
         self._url = MATRIX_RL_EXECUTION_URL
         base_url = self._url.rsplit("/v1/signals", 1)[0] if "/v1/signals" in self._url else self._url.rstrip("/")
         self._decision_url = f"{base_url}/v1/decisions" if base_url else ""
+        self._trade_control_url = f"{base_url}/v1/trade-control" if base_url else ""
         self._timeout = max(0.1, MATRIX_RL_EXECUTION_TIMEOUT_SECONDS)
         self._queue: queue.Queue[dict] | None = None
         self._dispatch_thread: threading.Thread | None = None
@@ -1969,7 +2006,7 @@ class MatrixRlSidecarClient:
                 feature_payload[f"signal.{name}"] = value
         kind = str(sig.get("opi_kind") or "").strip().lower()
         if kind:
-            for candidate in ("opi_full", "move_alert", "domino_turn", "bias_flip"):
+            for candidate in ("opi_brain", "opi_full", "move_alert", "domino_turn", "bias_flip"):
                 feature_payload[f"signal.opi_kind_{candidate}"] = 1.0 if kind == candidate else 0.0
         feature_payload.update(market_enrichment.get("features") or {})
         feature_columns = list(feature_payload.keys())
@@ -1992,6 +2029,11 @@ class MatrixRlSidecarClient:
                 "timeframe": sig.get("timeframe"),
                 "source_format": sig.get("source_format"),
                 "entry_time": datetime.now(timezone.utc).isoformat(),
+                "exit_style": sig.get("exit_style"),
+                "trail_trigger_price": sig.get("trail_trigger_price"),
+                "trail_trigger_pct": sig.get("trail_trigger_pct"),
+                "trail_distance_pct": sig.get("trail_distance_pct"),
+                "move_stop_to_breakeven_on_trigger": sig.get("move_stop_to_breakeven_on_trigger"),
             },
             "features": feature_payload,
             "feature_columns": feature_columns,
@@ -2063,6 +2105,42 @@ class MatrixRlSidecarClient:
             return None
         return payload if isinstance(payload, dict) else None
 
+    def control_trade(
+        self,
+        *,
+        action: str,
+        decision_id: str | None = None,
+        event_id: str | None = None,
+        symbol: str | None = None,
+        direction: str | None = None,
+        reason: str | None = None,
+    ) -> dict:
+        if not self._trade_control_url:
+            return {"ok": False, "message": "Matrix RL trade-control URL is unavailable"}
+        payload = {
+            "action": action,
+            "decision_id": decision_id,
+            "event_id": event_id,
+            "symbol": symbol,
+            "direction": direction,
+            "reason": reason,
+        }
+        response = requests.post(
+            self._trade_control_url,
+            json=payload,
+            timeout=max(1.0, self._timeout),
+        )
+        if response.status_code >= 300:
+            return {
+                "ok": False,
+                "message": f"RL trade-control HTTP {response.status_code}: {response.text[:200]}",
+            }
+        try:
+            result = response.json()
+        except Exception:
+            result = {}
+        return result if isinstance(result, dict) else {"ok": False, "message": "Invalid RL trade-control response"}
+
     def _dispatch_worker(self) -> None:
         assert self._queue is not None
         while True:
@@ -2130,8 +2208,6 @@ class MatrixSignalBot:
         self._rl_entry_refs: dict[str, dict] = {}
         self._rl_entry_refs_dirty = False
         self._rl_entry_refs_last_save_at = 0.0
-        # Order executor for managing positions (entry, close, SL modifications)
-        self._order_executor = OrderExecutor(HTTP(testnet=False, demo=DEMO))
         self._funded_executor = FundedFixedRiskExecutor()
         self._load_rl_entry_refs_state()
 
@@ -2157,6 +2233,7 @@ class MatrixSignalBot:
             "execution_status": raw.get("execution_status"),
             "symbol": str(raw.get("symbol") or "").upper() or None,
             "direction": str(raw.get("direction") or "").lower() or None,
+            "strategy": str(raw.get("strategy") or "").lower() or None,
             "entry_price": entry_price,
             "updated_at": str(raw.get("updated_at") or ""),
         }
@@ -2317,6 +2394,7 @@ class MatrixSignalBot:
                     "execution_status": decision.get("execution_status"),
                     "symbol": sig.get("symbol"),
                     "direction": sig.get("signal"),
+                    "strategy": sig.get("strategy"),
                     "entry_price": resolved_entry,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
@@ -2644,8 +2722,8 @@ class MatrixSignalBot:
             reason = exit_sig.get("reason", "Exit signal")
             entry_price = exit_sig.get("entry_price")
 
+            ref = self._find_recent_entry_ref(symbol, direction)
             if entry_price is None:
-                ref = self._find_recent_entry_ref(symbol, direction)
                 if ref and ref.get("entry_price"):
                     entry_price = float(ref["entry_price"])
                     log.info(
@@ -2661,24 +2739,19 @@ class MatrixSignalBot:
             log.info("Exit signal detected | action=%s symbol=%s entry_price=%s reason=%s | from=%s", action, symbol, entry_price, reason, event.sender)
 
             if action == "set_sl_to_be":
-                if entry_price is None:
-                    reply_text = (
-                        f"⚠️ {reason}\n{symbol}\n"
-                        "Skipped: no entry reference found for a specific subposition"
-                    )
-                    if MATRIX_POST_REPLY:
-                        await self._send_message(reply_text, room_id=room.room_id, reply_to=event.event_id)
-                    return
-
-                # Set SL to breakeven for the specific subposition only.
+                # Position management belongs to the authenticated RL executor,
+                # which owns the decision-specific partial stop order.
                 exit_result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    self._order_executor.set_stop_to_breakeven,
-                    symbol,
-                    entry_price,
+                    lambda: self._rl_client.control_trade(
+                        action="arm_trailing",
+                        symbol=symbol,
+                        direction=direction,
+                        reason=reason,
+                    ),
                 )
                 message = exit_result.get("message", "")
-                log.info("[%s] SL→BE result: %s", symbol, message)
+                log.info("[%s] RL trail/BE result: %s", symbol, message)
                 reply_text = f"✅ {reason}\n{symbol}\n{message}"
 
             if MATRIX_POST_REPLY:

@@ -178,6 +178,7 @@ services:
       - matrix-rl-exec-bot
     environment:
       MATRIX_RL_EXECUTION_URL: http://matrix-rl-exec-bot:8091/v1/signals
+      MATRIX_OPI_BRAIN_CANDIDATES: BTCUSDT:5m,XLMUSDT:5m,XAUUSDT:5m
       MATRIX_FUNDED_SYMBOLS: XLMUSDT,ADAUSDT
       MATRIX_FUNDED_STRATEGIES: wolfe_channel
       MATRIX_FUNDED_STATUSES: accepted
@@ -219,7 +220,8 @@ services:
       RL_REWARDS_PATH: /app/rl_matrix/rewards.jsonl
       RL_TRAINING_EXAMPLES_PATH: /app/rl_matrix/training_examples.jsonl
       RL_ALLOW_REVERSE_ACTIONS: "false"
-      RL_RISK_MULTIPLIERS: "bandit_ldz=0.65,opi_full=0.75,opi_curl_reversal=0.75"
+      RL_RISK_MULTIPLIERS: "bandit_ldz=0.65,opi_brain=0.75,opi_full=0.75,opi_curl_reversal=0.75"
+      RL_TRAILING_POLL_SECONDS: "2.0"
     volumes:
       - ./bot/logs/rl_matrix:/app/rl_matrix
     logging:
