@@ -84,6 +84,9 @@ Env variables
   ENABLE_WOLFE_WAVE_V2 -- enable separate v2 Wolfe strategy namespace
   WOLFE_WAVE_V2_SYMBOLS -- comma-separated v2 Wolfe symbols
   WOLFE_WAVE_V2_CONFIG_PATH -- JSON config for separate v2 Wolfe strategy
+  WOLFE_RR_GATE_ENABLED -- gate low-RR Wolfe entries after a sub-50% live sample
+  WOLFE_RR_GATE_LOOKBACK_DAYS -- rolling fill window for the RR gate (default 30)
+  WOLFE_RR_GATE_MIN_CLOSED -- minimum closed trades before gating (default 8)
   ENABLE_GGSHOT_227   -- enable GGShot 227 strategy (default false)
   GGSHOT_227_SYMBOLS  -- comma-separated GGShot symbols
   GGSHOT_227_CONFIG_PATH -- JSON config produced from scripts/backtest_ggshot_227.py
@@ -251,6 +254,13 @@ WOLFE_WAVE_V2_CONFIG_PATH = os.environ.get(
     "WOLFE_WAVE_V2_CONFIG_PATH",
     "/app/configs/wolfe_wave_v2_strong_configs.json",
 )
+WOLFE_RR_GATE_ENABLED = os.environ.get("WOLFE_RR_GATE_ENABLED", "true").lower() in ("1", "true", "yes")
+WOLFE_RR_GATE_LOOKBACK_DAYS = int(os.environ.get("WOLFE_RR_GATE_LOOKBACK_DAYS", "30"))
+WOLFE_RR_GATE_MIN_CLOSED = int(os.environ.get("WOLFE_RR_GATE_MIN_CLOSED", "8"))
+WOLFE_RR_GATE_WR_THRESHOLD = float(os.environ.get("WOLFE_RR_GATE_WR_THRESHOLD", "0.50"))
+WOLFE_RR_GATE_FLOOR_R = float(os.environ.get("WOLFE_RR_GATE_FLOOR_R", "1.50"))
+WOLFE_RR_GATE_MARGIN_R = float(os.environ.get("WOLFE_RR_GATE_MARGIN_R", "0.20"))
+WOLFE_RR_GATE_MAX_R = float(os.environ.get("WOLFE_RR_GATE_MAX_R", "2.00"))
 
 ENABLE_GGSHOT_227 = os.environ.get("ENABLE_GGSHOT_227", "false").lower() in ("1", "true", "yes")
 GGSHOT_227_SYMBOLS = parse_symbol_list(os.environ.get("GGSHOT_227_SYMBOLS") or DEFAULT_GGSHOT_227_SYMBOLS)
@@ -817,6 +827,9 @@ class Bot:
         self._wolfe_wave_v2_engine: Optional[WolfeWaveEngine] = None
         self._wolfe_wave_v2_states: dict[str, WolfeWaveState] = {}
         self._wolfe_wave_v2_configs = {}
+        self._wolfe_rr_gate_cache: dict[str, tuple[int, int, float]] = {}
+        self._wolfe_rr_gate_cache_loaded_at = 0.0
+        self._wolfe_rr_gate_cache_mtime = -1.0
         self._ggshot_engine: Optional[GgShotEngine] = None
         self._ggshot_states: dict[str, GgShotState] = {}
         self._ggshot_configs = {}
@@ -1765,6 +1778,17 @@ class Bot:
         except Exception as exc:
             log.warning(f"[risk] Could not save risk state {RISK_STATE_PATH}: {exc}")
 
+    def _configured_wolfe_max_hold_bars(self, symbol: str, strategy: object) -> int | None:
+        strategy_key = str(strategy or "").strip().lower()
+        if strategy_key == "wolfe_wave":
+            cfg = self._wolfe_wave_configs.get(symbol)
+        elif strategy_key == "wolfe_wave_v2":
+            cfg = self._wolfe_wave_v2_configs.get(symbol)
+        else:
+            return None
+        max_hold_bars = self._to_float(getattr(cfg, "max_hold_bars", None))
+        return int(max_hold_bars) if max_hold_bars is not None and max_hold_bars > 0 else None
+
     def _load_active_trade_state(self) -> None:
         if not os.path.exists(ACTIVE_TRADES_STATE_PATH):
             return
@@ -1774,18 +1798,43 @@ class Bot:
             if not isinstance(raw, dict):
                 raise ValueError("active trade state must be a JSON object")
             loaded = 0
+            migrated = 0
             with self._pos_lock:
                 for sym, trade in raw.items():
-                    state = self._states.get(str(sym))
+                    symbol = str(sym)
+                    state = self._states.get(symbol)
                     if state is None or not isinstance(trade, dict):
                         continue
-                    state.active_trade = dict(trade)
+                    active_trade = dict(trade)
+                    strategy = str(active_trade.get("strategy") or "").strip().lower()
+                    if strategy in {"wolfe_wave", "wolfe_wave_v2"}:
+                        changed = False
+                        if not self._to_float(active_trade.get("max_hold_bars")):
+                            configured = self._configured_wolfe_max_hold_bars(symbol, strategy)
+                            if configured is not None:
+                                active_trade["max_hold_bars"] = configured
+                                changed = True
+                        if not active_trade.get("exec_tf"):
+                            active_trade["exec_tf"] = "5m"
+                            changed = True
+                        if not self._to_float(active_trade.get("timeout_at")):
+                            timeout_at = self._strategy_timeout_at_ms(active_trade)
+                            if timeout_at is not None:
+                                active_trade["timeout_at"] = timeout_at
+                                changed = True
+                        if changed:
+                            migrated += 1
+                    state.active_trade = active_trade
                     loaded += 1
+                if migrated:
+                    self._save_active_trade_state_locked()
             if loaded:
                 log.info(
                     f"[state] Loaded {loaded} persisted active trades from "
                     f"{ACTIVE_TRADES_STATE_PATH}"
                 )
+            if migrated:
+                log.info(f"[state] Backfilled max-hold metadata for {migrated} persisted Wolfe trades")
         except Exception as exc:
             log.warning(f"[state] Could not load active trades {ACTIVE_TRADES_STATE_PATH}: {exc}")
 
@@ -3535,6 +3584,91 @@ class Bot:
             **fields,
         )
 
+    def _refresh_wolfe_rr_gate_cache(self) -> None:
+        now = time.time()
+        try:
+            mtime = os.path.getmtime(TRADE_LEDGER_PATH)
+        except OSError:
+            mtime = -1.0
+        if (
+            now - self._wolfe_rr_gate_cache_loaded_at < 300.0
+            and mtime == self._wolfe_rr_gate_cache_mtime
+        ):
+            return
+
+        cutoff_ms = int(
+            (datetime.now(timezone.utc) - timedelta(days=max(1, WOLFE_RR_GATE_LOOKBACK_DAYS))).timestamp()
+            * 1000
+        )
+        counts: dict[str, list[int]] = {
+            "wolfe_wave": [0, 0],
+            "wolfe_wave_v2": [0, 0],
+        }
+        if os.path.exists(TRADE_LEDGER_PATH):
+            try:
+                with open(TRADE_LEDGER_PATH, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        strategy = str(event.get("strategy") or "").strip().lower()
+                        if strategy not in counts or event.get("type") != "fill":
+                            continue
+                        if not self._is_exit_event_name(event.get("event")):
+                            continue
+                        event_ms = self._parse_utc_ms(event.get("ts"))
+                        pnl = self._numeric_float(event.get("closed_pnl"))
+                        if event_ms is None or event_ms < cutoff_ms or pnl is None:
+                            continue
+                        counts[strategy][0] += 1
+                        if pnl > 0:
+                            counts[strategy][1] += 1
+            except Exception as exc:
+                log.warning(f"[wolfe] Could not refresh RR gate statistics: {exc}")
+
+        self._wolfe_rr_gate_cache = {
+            strategy: (closed, wins, wins / closed if closed else 0.0)
+            for strategy, (closed, wins) in counts.items()
+        }
+        self._wolfe_rr_gate_cache_loaded_at = now
+        self._wolfe_rr_gate_cache_mtime = mtime
+
+    def _wolfe_rr_gate_reject_reason(self, sig: dict) -> str | None:
+        if not WOLFE_RR_GATE_ENABLED:
+            return None
+        strategy = str(sig.get("strategy") or "").strip().lower()
+        if strategy not in {"wolfe_wave", "wolfe_wave_v2"}:
+            return None
+        planned_rr = self._to_float(sig.get("target_rr_planned"))
+        if planned_rr is None or planned_rr <= 0:
+            return None
+
+        self._refresh_wolfe_rr_gate_cache()
+        closed, wins, win_rate = self._wolfe_rr_gate_cache.get(strategy, (0, 0, 0.0))
+        if closed < max(1, WOLFE_RR_GATE_MIN_CLOSED) or win_rate >= WOLFE_RR_GATE_WR_THRESHOLD:
+            return None
+
+        if wins <= 0:
+            required_rr = WOLFE_RR_GATE_MAX_R
+        else:
+            breakeven_rr = (1.0 - win_rate) / win_rate
+            required_rr = max(
+                WOLFE_RR_GATE_FLOOR_R,
+                breakeven_rr + WOLFE_RR_GATE_MARGIN_R,
+            )
+        required_rr = min(required_rr, WOLFE_RR_GATE_MAX_R)
+        sig["rolling_strategy_closed"] = closed
+        sig["rolling_strategy_wins"] = wins
+        sig["rolling_strategy_win_rate"] = win_rate
+        sig["rolling_required_rr"] = required_rr
+        if planned_rr + 1e-9 >= required_rr:
+            return None
+        return (
+            f"{strategy} rolling WR {win_rate:.1%} over {closed} closes requires "
+            f"{required_rr:.2f}R; planned RR is {planned_rr:.2f}"
+        )
+
     def _circuit_breaker_reject_reason(self, symbol: str, sig: dict) -> str | None:
         if (
             MAX_DAILY_LOSSES_PER_STRATEGY <= 0
@@ -3884,6 +4018,7 @@ class Bot:
         log.info(
             f"[{trade_state.symbol}] {label} candidate {sig['signal'].upper()} "
             f"score={sig.get('score', float('nan')):.1f} "
+            f"quality={sig.get('research_quality_score', float('nan')):.1f} "
             f"rr={sig.get('target_rr_planned', float('nan')):.2f} "
             f"tf={sig.get('pattern_tf', '-')}"
         )
@@ -4031,6 +4166,14 @@ class Bot:
             weekend_reason = self._session_orb_weekend_reject_reason(sig)
             if weekend_reason:
                 reject_reason = weekend_reason
+                log.info(
+                    f"[{state.symbol}] {sig['signal'].upper()} {sig.get('strategy', 'strategy')} signal skipped "
+                    f"-- {reject_reason}"
+                )
+        if reject_reason is None:
+            rr_gate_reason = self._wolfe_rr_gate_reject_reason(sig)
+            if rr_gate_reason:
+                reject_reason = rr_gate_reason
                 log.info(
                     f"[{state.symbol}] {sig['signal'].upper()} {sig.get('strategy', 'strategy')} signal skipped "
                     f"-- {reject_reason}"
@@ -4703,12 +4846,35 @@ class Bot:
         except (TypeError, ValueError):
             return None
 
-    def _session_orb_timeout_at_ms(self, sig_or_trade: dict) -> int | None:
-        if str(sig_or_trade.get("strategy") or "").lower() != "session_orb_judas_fvg":
+    @staticmethod
+    def _timeframe_minutes(value: object) -> int | None:
+        text = str(value or "").strip().lower()
+        aliases = {
+            "1": 1,
+            "1m": 1,
+            "3": 3,
+            "3m": 3,
+            "5": 5,
+            "5m": 5,
+            "15": 15,
+            "15m": 15,
+            "30": 30,
+            "30m": 30,
+            "60": 60,
+            "1h": 60,
+            "240": 240,
+            "4h": 240,
+        }
+        return aliases.get(text)
+
+    def _strategy_timeout_at_ms(self, sig_or_trade: dict) -> int | None:
+        strategy = str(sig_or_trade.get("strategy") or "").lower()
+        if strategy not in {"session_orb_judas_fvg", "wolfe_wave", "wolfe_wave_v2"}:
             return None
         max_hold_bars = self._to_float(sig_or_trade.get("max_hold_bars"))
         if max_hold_bars is None or max_hold_bars <= 0:
             return None
+        timeframe_minutes = self._timeframe_minutes(sig_or_trade.get("exec_tf")) or 5
         base_ms = self._parse_utc_ms(
             sig_or_trade.get("entry_time")
             or sig_or_trade.get("signal_time")
@@ -4716,9 +4882,9 @@ class Bot:
         )
         if base_ms is None:
             return None
-        return base_ms + int(max_hold_bars * 5 * 60 * 1000)
+        return base_ms + int(max_hold_bars * timeframe_minutes * 60 * 1000)
 
-    def _enforce_session_orb_timeouts(self) -> None:
+    def _enforce_strategy_timeouts(self) -> None:
         now_ms = self._now_ms()
         due: list[tuple[str, dict]] = []
         with self._pos_lock:
@@ -4726,7 +4892,11 @@ class Bot:
                 active_trade = state.active_trade
                 if not active_trade:
                     continue
-                if str(active_trade.get("strategy") or "").lower() != "session_orb_judas_fvg":
+                if str(active_trade.get("strategy") or "").lower() not in {
+                    "session_orb_judas_fvg",
+                    "wolfe_wave",
+                    "wolfe_wave_v2",
+                }:
                     continue
                 timeout_at = int(self._to_float(active_trade.get("timeout_at")) or 0)
                 if timeout_at <= 0 or now_ms < timeout_at:
@@ -4738,7 +4908,7 @@ class Bot:
             if due:
                 self._save_active_trade_state_locked()
         for sym, active_trade in due:
-            ok = self._submit_session_orb_timeout_close(sym, active_trade)
+            ok = self._submit_strategy_timeout_close(sym, active_trade)
             if not ok:
                 with self._pos_lock:
                     current = self._states.get(sym).active_trade if sym in self._states else None
@@ -4747,10 +4917,12 @@ class Bot:
                         current["timeout_close_failed_at"] = self._now_ms()
                         self._save_active_trade_state_locked()
 
-    def _submit_session_orb_timeout_close(self, symbol: str, active_trade: dict) -> bool:
+    def _submit_strategy_timeout_close(self, symbol: str, active_trade: dict) -> bool:
         state = self._states.get(symbol)
         if state is None:
             return False
+        strategy = str(active_trade.get("strategy") or "strategy")
+        strategy_label = strategy.replace("_", " ").title()
         size = None
         pos_side = ""
         try:
@@ -4762,13 +4934,13 @@ class Bot:
                     pos_side = str(pos.get("side") or "")
                     break
         except Exception as exc:
-            log.warning(f"[{symbol}] Session ORB timeout position fetch failed: {exc}")
+            log.warning(f"[{symbol}] {strategy_label} timeout position fetch failed: {exc}")
         if size is None or size <= 0:
             size = self._to_float(active_trade.get("qty"))
             direction = str(active_trade.get("direction") or "").lower()
             pos_side = "Buy" if direction == "long" else "Sell" if direction == "short" else ""
         if size is None or size <= 0:
-            log.warning(f"[{symbol}] Session ORB timeout could not determine position size")
+            log.warning(f"[{symbol}] {strategy_label} timeout could not determine position size")
             return False
         if pos_side == "Buy":
             close_side = "Sell"
@@ -4778,18 +4950,18 @@ class Bot:
             direction = str(active_trade.get("direction") or "").lower()
             close_side = "Sell" if direction == "long" else "Buy" if direction == "short" else ""
         if not close_side:
-            log.warning(f"[{symbol}] Session ORB timeout could not determine close side")
+            log.warning(f"[{symbol}] {strategy_label} timeout could not determine close side")
             return False
-        reason = "Session ORB max-hold timeout"
+        reason = f"{strategy_label} max-hold timeout"
         try:
             cancel_resp = self._http.cancel_all_orders(category="linear", symbol=symbol)
             if cancel_resp.get("retCode", 0) != 0:
-                log.warning(f"[{symbol}] Session ORB timeout cancel_all_orders: {cancel_resp.get('retMsg', '?')}")
+                log.warning(f"[{symbol}] {strategy_label} timeout cancel_all_orders: {cancel_resp.get('retMsg', '?')}")
         except Exception as exc:
-            log.warning(f"[{symbol}] Session ORB timeout cancel_all_orders failed: {exc}")
+            log.warning(f"[{symbol}] {strategy_label} timeout cancel_all_orders failed: {exc}")
         order_link_id = self._make_order_link_id(
             kind="X",
-            strategy=active_trade.get("strategy") or "session_orb_judas_fvg",
+            strategy=strategy,
             symbol=symbol,
             direction=active_trade.get("direction") or close_side,
         )
@@ -4805,11 +4977,11 @@ class Bot:
                 orderLinkId=order_link_id,
             )
         except Exception as exc:
-            log.error(f"[{symbol}] Session ORB timeout close failed: {exc}")
+            log.error(f"[{symbol}] {strategy_label} timeout close failed: {exc}")
             return False
         if order_resp.get("retCode", -1) != 0:
             log.error(
-                f"[{symbol}] Session ORB timeout close rejected "
+                f"[{symbol}] {strategy_label} timeout close rejected "
                 f"(retCode={order_resp.get('retCode')}): {order_resp.get('retMsg', '?')}"
             )
             return False
@@ -4824,9 +4996,9 @@ class Bot:
             }
         self._append_ledger_event(
             "risk",
-            event="session_orb_timeout_close",
+            event="strategy_timeout_close",
             symbol=symbol,
-            strategy=active_trade.get("strategy"),
+            strategy=strategy,
             direction=active_trade.get("direction"),
             reason=reason,
             order_id=order_id,
@@ -4835,17 +5007,17 @@ class Bot:
             qty=qty_to_str(size),
         )
         self._telegram.send_risk_event(
-            "Session ORB timeout close",
+            f"{strategy_label} timeout close",
             fields={
                 "Symbol": symbol,
-                "Strategy": active_trade.get("strategy", "-"),
+                "Strategy": strategy,
                 "Side": close_side,
                 "Qty": qty_to_str(size),
                 "Reason": reason,
             },
         )
         log.warning(
-            f"[{symbol}] Session ORB timeout close submitted "
+            f"[{symbol}] {strategy_label} timeout close submitted "
             f"size={qty_to_str(size)} orderId={order_id or '-'} orderLinkId={order_link_id}"
         )
         return True
@@ -5003,6 +5175,7 @@ class Bot:
                 ],
                 "signal_time": sig.get("signal_time", sig.get("entry_time")),
                 "entry_time": sig.get("entry_time", sig.get("signal_time")),
+                "exec_tf": sig.get("exec_tf"),
                 "strategy_variant": sig.get("variant"),
                 "score": sig.get("score", sig.get("selection_score", sig.get("prob"))),
                 "tp_prices": [leg.get("tp") for leg in placed],
@@ -5166,7 +5339,7 @@ class Bot:
             f"equity={equity:.2f}  available={available_balance:.2f}"
         )
 
-        timeout_at_ms = self._session_orb_timeout_at_ms(sig)
+        timeout_at_ms = self._strategy_timeout_at_ms(sig)
         if self._is_ggshot_bracketed_signal(sig, exit_style):
             self._execute_ggshot_bracketed_trade(
                 state,
@@ -5240,6 +5413,7 @@ class Bot:
                 "exit_style": exit_style,
                 "signal_time": sig.get("signal_time", sig.get("entry_time")),
                 "entry_time": sig.get("entry_time", sig.get("signal_time")),
+                "exec_tf": sig.get("exec_tf"),
                 "strategy_variant": sig.get("variant"),
                 "session": sig.get("session"),
                 "or_minutes": sig.get("or_minutes"),
@@ -5391,7 +5565,7 @@ class Bot:
                         f"(limit={WS_STALE_SECONDS}s); exiting for Docker restart"
                     )
                     raise SystemExit(2)
-            self._enforce_session_orb_timeouts()
+            self._enforce_strategy_timeouts()
             self._sync_positions()
             self._refresh_risk_state()
             self._audit_position_protection()

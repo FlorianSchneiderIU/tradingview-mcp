@@ -1,6 +1,6 @@
 # BTC Astrology/Cycle Reversal Timing Research
 
-Date: 2026-06-13
+Date: 2026-06-14
 
 This is research, not financial advice. The useful question is not whether a chart can be made to look magical after the fact, but whether a mechanically defined timing model improves out-of-sample reversal-window density and trade selection versus calendar baselines and placebo calendars.
 
@@ -18,6 +18,14 @@ The best result is narrower and more practical:
 My current view: astrology/cycle timing is worth researching as a **trade-selection feature**, not as a standalone reversal oracle.
 
 Update after the LTF probability reframing: the best-supported claim is now even more specific. Time/calendar features do contain a small but real-looking OOS signal for **probability of a 5m reversal within the next N candles**. The signal is not strong enough to trade by itself, but it is strong enough to justify a calendar-probability head inside the LTF setup selector.
+
+Update after completed-candle confirmation: the hierarchy is more useful as a
+two-step system than as a direct entry oracle. The pre-candle hierarchy supplies
+the timing prior. After a candidate candle closes, completed price structure
+strongly updates the probability that it contained the parent high or low.
+Calendar features do not improve that posterior. A small short-side 5R retest
+candidate survives validation and the locked test, but no 10R version is
+validated and the sample remains too small for live use.
 
 ## Sources And Context
 
@@ -199,14 +207,16 @@ Test localization, 2025-01 through 2026-05:
 
 | Direction | Cascade percentile | Coverage | Exact-event precision | Lift | Event recall |
 |---|---:|---:|---:|---:|---:|
-| high | 0.80 | 0.694% | 5.233% | 15.07x | 10.47% |
-| high | 0.90 | 0.148% | 8.636% | 24.87x | 3.68% |
-| high | 0.93 | 0.032% | 12.766% | 36.77x | 1.16% |
-| low | 0.80 | 0.997% | 4.723% | 13.60x | 13.57% |
-| low | 0.90 | 0.219% | 5.828% | 16.79x | 3.68% |
-| low | 0.93 | 0.042% | 3.175% | 9.14x | 0.39% |
+| high | 0.80 | 0.704% | 5.163% | 14.87x | 10.47% |
+| high | 0.90 | 0.158% | 10.213% | 29.41x | 4.65% |
+| high | 0.93 | 0.030% | 13.333% | 38.40x | 1.16% |
+| low | 0.80 | 0.928% | 4.931% | 14.20x | 13.18% |
+| low | 0.90 | 0.215% | 6.250% | 18.00x | 3.88% |
+| low | 0.93 | 0.042% | 3.226% | 9.29x | 0.39% |
 
-At the 0.80 threshold, the high-side precision progressed from 36.87% at the 4h layer to 17.81% for 4h + 1h, 9.27% after adding 15m, and 5.23% for the exact four-layer event. Relative to each stage's shrinking base rate, the lift compounded from 2.21x to 4.27x, 8.90x, and 15.07x. The low side showed the same pattern, ending at 13.60x lift.
+These figures are from the corrected pipeline: missing values are imputed from training data only, the future-dependent complete-parent flag is removed, cascade percentiles use the training-era score distribution, and the holding period is exactly 288 bars.
+
+At the 0.80 threshold, high-side lift progressed from 2.17x at the 4h layer to 4.21x for 4h + 1h, 8.79x after adding 15m, and 14.87x for the exact four-layer event. The low side showed the same compounding pattern, ending at 14.20x lift.
 
 This is the strongest result in the project so far: the hierarchy genuinely concentrates nested swing timing OOS. It is not merely four individually decent classifiers placed next to each other.
 
@@ -228,6 +238,323 @@ Conclusion:
 - There is currently no evidence supporting consistent 1:10 to 1:30 trades from this cascade.
 - High-side localization was more stable than low-side localization, but direction selection itself overfit validation.
 - The next execution model should be trained walk-forward on post-window path outcomes instead of selecting a fixed rejection/sweep rule from one validation year.
+
+## Walk-Forward Path Outcome Model
+
+I implemented the next execution layer as a leakage-controlled monthly walk-forward experiment.
+
+Dataset and labels:
+
+- One candidate per predicted 5m reversal window and direction.
+- The predicted 5m candle is allowed to close; decision and entry occur at the next 5m open.
+- Structural stop is beyond the predicted candle extreme, with a minimum 0.5% or 1.0% distance.
+- Separate heads predict whether 1.5R, 2R, 3R, 5R, or 10R is reached before the stop within exactly 288 bars.
+- A target is positive only when the target is actually touched before the stop. Profitable timeouts are not positive labels.
+- Training and validation rows are included only when their complete label path ended before the next fold begins.
+- Validation chooses the score coverage using realized net R after fees and one-position-at-a-time simulation. The month is skipped if validation has no positive configuration.
+
+To provide enough history for a fair 12-month validator, cascade predictions are prequential:
+
+- 2023 predictions come from hierarchical models trained through 2022.
+- 2024 onward predictions come from models trained through 2023.
+- Only these OOS cascade predictions enter the execution learner.
+
+The attractive intermediate result was:
+
+| Configuration | Validation history | Trades | Net R | PF | Max DD |
+|---|---:|---:|---:|---:|---:|
+| Combined cascade + price, both directions, 3R, 0.5% stop | 3 months | 192 | +21.80R | 1.15 | -21.64R |
+| Combined cascade + price, long only, 3R, 0.5% stop | 3 months | 131 | +22.83R | 1.23 | -20.36R |
+| Combined cascade + price, long only, 3R, 0.5% stop | 6 months | 141 | +25.49R | 1.24 | -16.28R |
+
+This did not survive the fair 12-month prequential test:
+
+| Configuration | Trades | Target hits | Net R | PF | Max DD |
+|---|---:|---:|---:|---:|---:|
+| Combined cascade + price, long, 3R, 0.5% stop | 62 | 10 | -28.77R | 0.50 | -32.65R |
+| Combined cascade + price, long, 3R, 1.0% stop | 113 | 16 | -28.61R | 0.69 | -36.52R |
+| Price only inside the cascade-gated universe, long, 3R, 1.0% stop | 97 | 13 | -27.81R | 0.65 | -32.16R |
+
+Model and target robustness checks also failed:
+
+- ExtraTrees at 3R lost 13.73R for combined features and 26.91R for price-only features.
+- A calibrated multi-head model that selected dynamically among 1.5R, 2R, 3R, 5R, and 10R lost 11.46R for combined features.
+- The dynamic cascade-only variant made only +6.52R with PF 1.03 and was not stable enough to treat as evidence.
+- No 5R or 10R variant produced credible target-hit-based profitability. The few superficially positive 10R rows depended on timeout PnL, not 10R targets.
+
+Interpretation:
+
+- Short validation windows adapted favorably to part of 2025 but promoted a regime that failed later.
+- The hierarchy improves the density of exact extremes, but an exact extreme is not automatically a good trade after waiting for the candle close, paying costs, and placing a feasible stop.
+- The model can identify **when an extreme is likely**, but it has not learned **whether price will depart from that extreme far enough to support stable positive R**.
+- The current evidence supports the hierarchy as an alert/localization system, not as an autonomous trading strategy.
+
+## 1m Wyckoff Execution
+
+I replaced the 5m direct entry with a causal 1m Wyckoff entry model. The test uses 1,795,681 Bybit BTCUSDT minute bars from 2023-01-01 through 2026-06-01.
+
+Mechanical setup:
+
+1. A hierarchical high/low cascade window reaches at least the 0.60 percentile on all four layers.
+2. Starting at the predicted 5m candle open, search the next 15 one-minute bars.
+3. Define the local trading range from the preceding 20 completed one-minute bars.
+4. Long spring: price trades below the range low, closes back above it, leaves at least a 25% lower wick, closes in the upper 45% of the candle, and volume is at least the prior 20-bar average.
+5. Short upthrust: the exact mirrored condition above the range high.
+6. Three entry stages are tested:
+   - `spring`: next 1m open after the reclaim candle.
+   - `sos`: next 1m open after price closes beyond the spring/upthrust candle in the reversal direction with at least a 0.10 ATR body.
+   - `test`: next 1m open after a lower-volume retest holds the spring/upthrust extreme.
+7. Stop is beyond the spring/upthrust extreme plus 0.05 ATR, with minimum risk of 0.25% or 0.50%.
+8. Targets are 1.5R, 2R, 3R, 5R, and 10R; maximum hold is 1,440 one-minute bars.
+9. Same-bar collisions are resolved stop-first and costs remain 8 bps round trip.
+
+The candidate cache contains 27,096 setup/stop-policy rows:
+
+- 5,838 immediate spring/upthrust entries.
+- 4,097 SOS/SOW confirmations.
+- 3,613 low-volume tests.
+- Each setup is represented under both stop floors.
+
+Fair 12-month prequential walk-forward results:
+
+| Variant | Trades | Net R | PF | Max DD | Status |
+|---|---:|---:|---:|---:|---|
+| Short, all Wyckoff stages, cascade + Wyckoff, 1.5R, 0.50% stop | 31 | +3.95R | 1.24 | -3.12R | small positive |
+| Short SOS only, cascade + Wyckoff, 1.5R, 0.50% stop | 33 | +2.66R | 1.14 | -6.86R | small positive |
+| Short SOS only, Wyckoff-only ExtraTrees, 1.5R | 28 | +0.02R | 1.00 | -5.70R | flat |
+| Short SOS only, cascade + Wyckoff, 2R | 14 | -8.69R | 0.32 | -7.53R | failed |
+| Short SOS only, cascade + Wyckoff, 3R | 26 | -9.39R | 0.60 | -20.11R | failed |
+
+The small 1.5R result is not robust:
+
+- The matching SOS model lost 5.40R with a 3-month validator.
+- It lost 13.58R with a 6-month validator.
+- ExtraTrees lost 6.09R on the combined 1.5R SOS setup.
+- Dynamic selection across 1.5R to 10R lost 13.66R.
+- Rules-only variants selected on 2024 usually failed badly in 2025-2026.
+
+The rules-only 10R short-test variant at a 0.90 cascade threshold finished test at +6.71R, but only one trade actually reached 10R; most positive contribution came from timeout exits. It does not validate a 10R strategy.
+
+Conclusion:
+
+- Entering on 1m preserves more excursion than waiting for the 5m candle to close, but the tested Wyckoff rules still do not produce stable high-RR expectancy.
+- The only surviving pocket is short-side 1.5R, and its model/validation sensitivity is too high for live use.
+- The implementation is useful as a research and alert layer. It should remain disabled for autonomous trading.
+
+## Richer 1m Context And Excursion Policies
+
+This section tested the wrong execution formulation for the final strategy:
+it tried to improve immediate Wyckoff entries and their exits. It is retained
+as a negative control, but it is superseded by the hot-candle retest experiment
+below.
+
+I tested whether the weak 1m execution result could be rescued by predicting the
+distribution of favorable excursion instead of a single fixed-R target.
+
+New causal features available at the signal close:
+
+- Running daily range, directional position, and daily VWAP distance.
+- Prior-day and prior-week high/low distance and sweep flags.
+- Asia, London, New York, and late-session range, position, and VWAP distance.
+- Rolling 15m, 1h, 4h, and 24h range, return, realized volatility, and trend efficiency.
+- Range/ATR compression and short-term volume impulse.
+- The existing hierarchical cascade, local candle, and Wyckoff-quality features.
+
+Separate heads estimate the probability of reaching 1R, 1.5R, 2R, 3R, 5R,
+and 10R before the structural stop. Probabilities are forced to be monotone.
+Validation then selects either no trade, a fixed 1.5R/2R target, or a partial
+exit with a 5R/10R runner. Runner stops move to breakeven after the partial.
+All folds purge paths whose labels were unresolved at the fold boundary.
+
+The richer feature set did not improve excursion ranking. Mean test AUC was
+approximately 0.48 to 0.51 for the 1R to 5R heads. The sparse 10R head reached
+about 0.55, but its training base rate was only about 3% and it did not produce
+a robust trading result.
+
+Feature comparison, short side, fixed 1.5R, 0.50% minimum stop, 12-month validator:
+
+| Features | Trades | Net R | PF | Max DD | Positive trading months |
+|---|---:|---:|---:|---:|---:|
+| Cascade + local Wyckoff/price | 24 | +4.57R | 1.39 | -2.32R | 8 |
+| Cascade + local + rich context | 12 | +2.23R | 1.38 | -3.48R | 4 |
+| Local Wyckoff/price only | 16 | -1.00R | 0.90 | -3.12R | 3 |
+| Local + rich context, no cascade | 9 | -2.94R | 0.58 | -4.64R | 3 |
+
+The apparently best fixed-target result was not robust:
+
+| Robustness check | Trades | Net R | PF | Max DD |
+|---|---:|---:|---:|---:|
+| Logistic, 12-month validation | 24 | +4.57R | 1.39 | -2.32R |
+| Logistic, 6-month validation | 49 | -11.79R | 0.66 | -17.87R |
+| Logistic, 3-month validation | 27 | -11.46R | 0.45 | -14.88R |
+| ExtraTrees, 12-month validation | 15 | -7.36R | 0.42 | -8.70R |
+| Spring/upthrust entries only, 12-month validation | 45 | +2.31R | 1.09 | -6.81R |
+
+Partial runners degraded the result:
+
+| Policy, rich combined features | Trades | Net R | PF |
+|---|---:|---:|---:|
+| Adaptive policy choice | 15 | +2.11R | 1.20 |
+| Fixed 2R | 13 | +1.07R | 1.13 |
+| 50% at 1.5R, runner to 5R | 16 | -5.55R | 0.52 |
+| 75% at 1.5R, runner to 5R | 9 | -6.19R | 0.24 |
+| 50% at 2R, runner to 10R | 8 | -5.28R | 0.24 |
+
+Conclusion:
+
+- The hierarchical timing cascade still adds information relative to local price action alone.
+- More rolling OHLCV context does not rescue the execution layer and often dilutes the small cascade signal.
+- Fixed 1.5R is less bad than high-RR runners, but its sensitivity to validation length and model family rules out live use.
+- The next meaningful data expansion is event-level microstructure: bid/ask spread and imbalance, aggressive trade delta, liquidation bursts, open-interest change, perp basis, and cross-venue lead/lag. Adding more transformations of the same candles is unlikely to solve the problem.
+
+## Hierarchy-Gated Hot-Candle Retest
+
+The corrected execution hypothesis is:
+
+1. The 4h, 1h, 15m, and 5m hierarchy identifies a specific future 5m reversal interval.
+2. Every completed 1m candle inside that interval is scored for reversal-direction hotness.
+3. Hotness uses only information available at that candle close: displacement, body efficiency, close location, range/body expansion, volume, local structure break, local returns, and the hierarchy state.
+4. The first candle whose inferred probability clears the validation threshold becomes the setup candle. Later hotter candles in the same 5m interval cannot replace it retrospectively.
+5. A limit order is placed at the midpoint of the hot candle body after it closes.
+6. The order expires after 10 one-minute bars. A pending order blocks later orders, even if it never fills.
+7. If filled, the stop is beyond the hot candle extreme plus 0.50 ATR. The maximum hold is 240 minutes.
+8. Fill-bar and later stop/target collisions are resolved stop-first. Targets are not credited on the fill bar because one-minute OHLC does not reveal whether the target occurred before the retest.
+9. Labels are purged using order expiry for unfilled orders and trade exit for filled orders.
+
+The cascade fields are training-era percentiles, not calibrated probabilities.
+For example, `q70` means every hierarchy layer clears its own 70th-percentile
+training score. The monthly validator selects the hierarchy percentile and the
+model-score coverage using only the preceding validation window.
+
+Strict execution geometry was too sparse:
+
+- With `q80`, a 0.02 ATR stop buffer, 8 bps round-trip cost, and maximum friction of 0.25R, only 64 valid order candidates survived the full history.
+- No validation fold had enough resolved fills to support a strategy conclusion.
+
+The discovery pass therefore used `q70` as the minimum hierarchy gate, a 0.50
+ATR buffer, and allowed up to 0.50R modeled friction. Those are research
+settings, not production assumptions.
+
+The best current pocket is a reversal-direction candle, body-midpoint retest,
+logistic hotness model, and fixed 5R target:
+
+| Variant | Trades | Net R | PF | Max DD | Target hits | Positive months |
+|---|---:|---:|---:|---:|---:|---:|
+| Hierarchy + hotness, 6m validator | 38 | +4.49R | 1.13 | -19.65R | 8 | 3 |
+| Hierarchy + hotness, 12m validator | 17 | +1.68R | 1.10 | -11.86R | 4 | 2 |
+| ExtraTrees, 12m validator | 11 | -8.89R | 0.34 | -10.85R | 1 | 1 |
+
+The feature ablation is the most useful finding:
+
+| 5R model, 6m validator | Trades | Net R | PF |
+|---|---:|---:|---:|
+| Hierarchy + hot-candle features | 38 | +4.49R | 1.13 |
+| Hierarchy only | 21 | -8.98R | 0.59 |
+| Hot-candle features only | 29 | -13.55R | 0.56 |
+
+Interpretation:
+
+- The corrected architecture behaves as a layered model: neither timing nor candle hotness is sufficient alone, while their interaction creates a small positive pocket.
+- This is much closer to the intended strategy than the immediate-entry Wyckoff tests.
+- The result is still provisional. Model-family sensitivity, high friction in R, sparse target hits, and drawdown much larger than net profit prevent live use.
+- The next iteration should improve the candle-hotness measurement with 30s/tick sequencing, aggressive trade delta, order-book imbalance, liquidations, open-interest change, and cross-venue confirmation. The hierarchy/retest architecture itself should remain fixed while those features are tested.
+
+## Completed-Candle Hierarchy Confirmation
+
+The preceding hot-candle experiment interpreted the hierarchy as a prediction
+of one future 5m interval. That was not the intended architecture. The corrected
+test evaluates every hierarchy level independently:
+
+1. Before the child candle opens, use the existing hierarchy score as the prior.
+2. After the child candle closes, estimate whether it contained the corresponding parent high or low.
+3. If confirmed, identify a reversal-direction lower-timeframe displacement candle formed inside the completed child.
+4. Place a causal limit retest only after both the hierarchy candle and setup candle have closed.
+
+The four posterior heads are:
+
+| Completed child | Parent extreme | Entry-zone timeframe |
+|---|---|---|
+| 4h | 1d high/low | 15m |
+| 1h | 4h high/low | 5m |
+| 15m | 1h high/low | 1m |
+| 5m | 15m high/low | 1m |
+
+Models train on 2023, gates are selected on 2024, and 2025-01-01 through
+2026-05-31 remains locked test data.
+
+### Posterior discrimination
+
+The full-sample test metrics initially looked almost perfect at the lower
+levels because the final child closes simultaneously with its parent. At that
+point the parent extreme is known, not predicted. The honest comparison
+therefore reports both all children and only children whose parent remains
+open.
+
+| Layer/direction | Prior AP, all | Price posterior AP, all | Prior AP, parent open | Price posterior AP, parent open |
+|---|---:|---:|---:|---:|
+| 4h to 1d low | 0.405 | 0.746 | 0.345 | 0.619 |
+| 4h to 1d high | 0.392 | 0.742 | 0.311 | 0.624 |
+| 1h to 4h low | 0.511 | 0.844 | 0.401 | 0.699 |
+| 1h to 4h high | 0.505 | 0.824 | 0.394 | 0.657 |
+| 15m to 1h low | 0.521 | 0.838 | 0.393 | 0.686 |
+| 15m to 1h high | 0.514 | 0.832 | 0.401 | 0.677 |
+| 5m to 15m low | 0.584 | 0.870 | 0.467 | 0.724 |
+| 5m to 15m high | 0.582 | 0.869 | 0.470 | 0.723 |
+
+This is the strongest classification result in the project, including when the
+parent is still open.
+
+### Feature ablation
+
+The useful posterior update comes from completed price structure:
+
+- `prior scores` alone approximately reproduce the original hierarchy.
+- `completed time/calendar + prior` is flat or worse OOS.
+- `completed price + prior` is best at every layer.
+- Adding completed time/calendar features to completed price usually reduces AP.
+
+The operational model therefore uses the calendar/cycle hierarchy only as the
+pre-candle prior, then updates it with completed-candle price features:
+range/body efficiency, wick structure, close location, volatility and volume,
+returns, trend context, whether a new running parent extreme was made, distance
+from the running parent high/low, and the causal child slot.
+
+### Retest execution
+
+The posterior classification edge does not automatically become a high-RR
+strategy. With 8 bps round-trip cost, stop-first OHLC handling, pending-order
+blocking, and purged labels:
+
+- Most layer/direction/RR combinations either fail validation or fail the locked test.
+- A body-midpoint 15m-to-1h short result looked strong on test, but its
+  parent-open validation subset was negative. It is not retained.
+- Body-open and range-mid retests fail.
+- The only repeatable pocket is parent-closed confirmation on the short side,
+  using the proximal edge of a bearish 1m displacement candle.
+
+At the 1h close, whether the final 15m child contained the hourly high is
+causally known. Replacing the ML posterior with that exact fact produces the
+simpler candidate:
+
+| Variant | Validation trades | Validation net/PF | Test trades | Test net/PF | Max test DD |
+|---|---:|---:|---:|---:|---:|
+| Exact hourly-high confirmation, short, 2R | 17 | +7.12R / 1.75 | 13 | +0.74R / 1.08 | -7.65R |
+| Exact hourly-high confirmation, short, 5R | 14 | +15.35R / 2.44 | 13 | +12.44R / 2.16 | -5.21R |
+
+The 5R rule is:
+
+1. At an hourly close, require the final 15m child to contain the completed hour high.
+2. Require the pre-candle high hierarchy prior to clear the validation-selected gate.
+3. Inside that 15m child, find a sufficiently hot bearish 1m displacement candle.
+4. After it closes, sell a retest of its proximal body edge.
+5. Stop beyond its high plus 0.25 ATR, subject to the 0.50R friction cap.
+6. Target 5R; expire the pending order after 60 minutes; maximum hold is 24 hours.
+
+This is not yet a finished strategy. It has only 13 locked-test trades, all
+test profit is concentrated in 2025, 2026 is slightly negative, the long side
+does not validate, and 10R does not pass validation. The correct conclusion is
+that completed-candle price confirmation is validated as a hierarchy layer,
+while the current retest rule is only a narrow research candidate.
 
 ## Baseline 5m Gate
 
@@ -317,9 +644,9 @@ What failed:
 - 24-bar sweeps overfit validation and failed the untouched test.
 - 6-hour max hold killed the 10R edge; the 24-hour max hold is currently necessary.
 
-## Current Strategy Spec
+## Legacy Strategy Candidate
 
-Use this as the current research candidate:
+The earlier walk-forward 10R candidate used:
 
 1. Each month, train the trade selector on older data.
 2. Use the prior 12 months only to choose the probability/coverage threshold.
@@ -334,7 +661,7 @@ Use this as the current research candidate:
 11. Skip overlapping trades.
 12. Pause new trades for the rest of the month after -6R realized monthly strategy loss.
 
-The current candidate is a **walk-forward, time-aware liquidity-sweep selector**, not a pure astrology strategy.
+That result is now considered provisional. The later audit found that the older walk-forward framework did not purge unresolved path labels at every fold boundary and did not carry all execution state across monthly boundaries. It should not be treated as the current validated strategy until rebuilt on the corrected prequential framework.
 
 ## Why This Is Still Not Proven
 
@@ -352,16 +679,15 @@ The direct reversal-window evidence argues against strong astrology-only predict
 
 Before considering live use:
 
-1. Replace static cascade execution selection with monthly walk-forward training and threshold selection.
-2. Train a post-window path model: probability of reaching 1.5R, 2R, 3R, 5R, and 10R before invalidation, conditional on the cascade.
-3. Feed the new `P(reversal in next 6/12 candles)` calendar heads into the execution selector and compare them against the parent-extreme cascade.
-4. Run placebo ensembles: 20 shifted calendars, randomized cycle periods, and random event calendars with equal frequency.
+1. Treat cascade windows as alerts and collect 1m or 30s execution data around them.
+2. Test market-structure shift, FVG retest, volume impulse, and order-flow entries inside the predicted window.
+3. Refit the hierarchical heads prequentially at every monthly or quarterly boundary instead of using yearly folds.
+4. Run placebo ensembles: shifted calendars, randomized cycle periods, and equal-frequency random event calendars.
 5. Test ETH and SOL as validation assets, not discovery assets.
-6. Replace 5m execution with 1m and then 30s if data is available.
-7. Test market-structure shift, FVG retest, volume impulse, and order-flow entries inside the predicted 5m window.
-8. Add funding, spread, latency, partial fills, and exact exchange maker/taker fee assumptions.
-9. Verify the monthly walk-forward process in paper/live forward mode.
-10. Test alternate pivot definitions: fractal pivots, ATR directional-change pivots, liquidity-sweep pivots, and HTF swing-failure pivots.
+6. Add spread, latency, partial fills, funding, and exact exchange maker/taker fee assumptions.
+7. Test whether entering before the predicted 5m candle closes can retain more excursion without unacceptable false starts.
+8. Test alternate parent-extreme definitions that require post-extreme displacement, not merely being the absolute candle high or low.
+9. Add event-level trade/order-book data, open interest, liquidations, perp basis, and cross-venue lead/lag before expanding the OHLCV feature set again.
 
 ## Artifacts
 
@@ -372,6 +698,11 @@ Before considering live use:
 - LTF calendar-bin script: `scripts/research_btc_ltf_calendar_bins.py`
 - Hierarchical parent-extreme script: `scripts/research_btc_hierarchical_reversal.py`
 - Hierarchical cascade backtest: `scripts/research_btc_hierarchical_cascade_backtest.py`
+- Hierarchical path walk-forward: `scripts/research_btc_hierarchical_path_walkforward.py`
+- Hierarchical 1m Wyckoff execution: `scripts/research_btc_hierarchical_wyckoff_1m.py`
+- Hierarchical 1m excursion/runner research: `scripts/research_btc_hierarchical_excursion_runner.py`
+- Hierarchy-gated 1m hot-candle retest: `scripts/research_btc_hierarchical_hot_retest_1m.py`
+- Completed-candle hierarchy confirmation: `scripts/research_btc_hierarchical_completed_confirmation.py`
 - Full timing JSON: `scripts/astro_cycle_timing_results.json`
 - Top windows CSV: `scripts/astro_cycle_top_windows.csv`
 - LTF probability JSON/CSV:
@@ -390,10 +721,37 @@ Before considering live use:
   - `scripts/hierarchical_reversal_strict_logit_feature_ablation.json`
   - `scripts/hierarchical_reversal_strict_logit_feature_ablation.csv`
 - Hierarchical cascade outputs:
-  - `scripts/hierarchical_cascade_feeaware_directional.json`
-  - `scripts/hierarchical_cascade_feeaware_directional_localization.csv`
-  - `scripts/hierarchical_cascade_feeaware_directional_variants.csv`
-  - `scripts/hierarchical_cascade_feeaware_directional_trades.csv`
+  - `scripts/hierarchical_cascade_corrected.json`
+  - `scripts/hierarchical_cascade_corrected_localization.csv`
+  - `scripts/hierarchical_cascade_corrected_variants.csv`
+  - `scripts/hierarchical_cascade_corrected_trades.csv`
+- Hierarchical path outputs:
+  - `scripts/hierarchical_path_walkforward_primary_logit.json`
+  - `scripts/hierarchical_path_walkforward_rr3_direction_6m.json`
+  - `scripts/hierarchical_path_walkforward_dynamic_logit_3m_corrected.json`
+  - `scripts/hierarchical_path_walkforward_long_12m_prequential.json`
+- 1m Wyckoff outputs:
+  - `scripts/hierarchical_wyckoff_1m_lowrr_12m.json`
+  - `scripts/hierarchical_wyckoff_1m_highrr_12m.json`
+  - `scripts/hierarchical_wyckoff_1m_sos_short_12m.json`
+  - `scripts/hierarchical_wyckoff_1m_static_variants.csv`
+- 1m excursion/runner outputs:
+  - `scripts/hierarchical_excursion_runner_fixed15_features_summary.csv`
+  - `scripts/hierarchical_excursion_runner_policy_compare_summary.csv`
+  - `scripts/hierarchical_excursion_runner_basefixed15_v6_summary.csv`
+  - `scripts/hierarchical_excursion_runner_basefixed15_v3_summary.csv`
+  - `scripts/hierarchical_excursion_runner_basefixed15_et_summary.csv`
+  - `scripts/hierarchical_excursion_runner_basefixed15_spring_summary.csv`
+- Hot-candle retest outputs:
+  - `scripts/hierarchical_hot_retest_1m_reversal_model_focused_summary.csv`
+  - `scripts/hierarchical_hot_retest_1m_reversal_model_v6_summary.csv`
+  - `scripts/hierarchical_hot_retest_1m_reversal_model_et_summary.csv`
+  - `scripts/hierarchical_hot_retest_1m_reversal_ablation_summary.csv`
+- Completed-candle confirmation outputs:
+  - `scripts/hierarchical_completed_confirmation_posteriors_diagnostics.csv`
+  - `scripts/hierarchical_completed_confirmation_l15_states_mid_summary.csv`
+  - `scripts/hierarchical_completed_confirmation_l15_states_proximal_summary.csv`
+  - `scripts/hierarchical_completed_confirmation_l15_closed_proximal_rr_summary.csv`
 - Meta result JSONs:
   - `scripts/astro_meta_strategy_results_12_10r.json`
   - `scripts/astro_meta_strategy_results_12_20r.json`

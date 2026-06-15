@@ -1487,6 +1487,40 @@ class RLExecutionService:
             scopes,
         )
 
+    @staticmethod
+    def _wolfe_setup_key(payload: dict[str, Any]) -> str | None:
+        strategy = str(payload.get("strategy") or "").strip().lower()
+        if strategy not in {"wolfe_wave", "wolfe_wave_v2"}:
+            return None
+        setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
+        raw_signal = payload.get("raw_signal") if isinstance(payload.get("raw_signal"), dict) else {}
+        entry_time = str(setup.get("entry_time") or raw_signal.get("entry_time") or "").strip()
+        symbol = str(payload.get("symbol") or "").strip().upper()
+        direction = str(payload.get("direction") or "").strip().lower()
+        if not symbol or direction not in {"long", "short"} or not entry_time:
+            return None
+        return f"wolfe_wave|{symbol}|{direction}|{entry_time}"
+
+    def _find_funded_wolfe_duplicate_locked(self, payload: dict[str, Any]) -> str | None:
+        setup_key = self._wolfe_setup_key(payload)
+        if setup_key is None:
+            return None
+        for decision_id, decision in reversed(self.decisions.items()):
+            existing_payload = (
+                decision.get("payload")
+                if isinstance(decision.get("payload"), dict)
+                else {}
+            )
+            if self._wolfe_setup_key(existing_payload) != setup_key:
+                continue
+            if decision.get("executed") or decision.get("execution_status") in {
+                "queued",
+                "running",
+                "executed",
+            }:
+                return decision_id
+        return None
+
     def _requeue_pending_executions(self) -> None:
         pending: list[str] = []
         with self.lock:
@@ -1717,18 +1751,38 @@ class RLExecutionService:
         }
 
         with self.lock:
+            duplicate_id = self._find_funded_wolfe_duplicate_locked(payload)
+            if duplicate_id:
+                decision["execution_status"] = "skipped"
+                decision["skip_reason"] = (
+                    "duplicate Wolfe setup already funded by decision "
+                    f"{duplicate_id}"
+                )
+                decision["duplicate_of_decision_id"] = duplicate_id
             self.decisions[decision_id] = decision
             self.event_to_decision[event_id] = decision_id
-        try:
-            self.execution_queue.put_nowait(decision_id)
-            decision["queued_at"] = now_iso()
-        except queue.Full:
-            decision["execution_status"] = "queue_full"
-            decision["skip_reason"] = f"execution queue full ({EXECUTION_QUEUE_SIZE})"
+        if not duplicate_id:
+            try:
+                self.execution_queue.put_nowait(decision_id)
+                decision["queued_at"] = now_iso()
+            except queue.Full:
+                decision["execution_status"] = "queue_full"
+                decision["skip_reason"] = f"execution queue full ({EXECUTION_QUEUE_SIZE})"
 
         with self.lock:
             self._save_runtime_state_locked()
         append_jsonl(DECISIONS_PATH, decision)
+        if duplicate_id:
+            log.info(
+                "[%s] RL Wolfe execution skipped as duplicate strategy=%s "
+                "direction=%s decision=%s duplicate_of=%s",
+                decision.get("symbol") or "-",
+                decision.get("strategy") or "-",
+                decision.get("source_direction") or "-",
+                decision_id,
+                duplicate_id,
+            )
+            return self._decision_response(decision)
         log.info(
             "[%s] RL signal queued status=%s strategy=%s direction=%s effective=%s action=%+.3f risk=%.3f decision=%s",
             decision.get("symbol") or "-",

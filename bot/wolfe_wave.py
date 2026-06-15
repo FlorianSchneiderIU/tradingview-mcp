@@ -14,12 +14,15 @@ import pandas as pd
 
 from scripts.backtest_wolfe_wave import (
     WolfeConfig,
+    add_indicators,
     bybit_symbol,
+    calculate_wolfe_research_quality,
     ensure_ohlcv_frame,
     fee_aware_stop_price,
     fee_to_price_risk,
     find_wolfe_signals,
     normalize_timeframe,
+    resample_ohlc,
 )
 from turtle_soup import fetch_warmup_bars_interval, parse_symbol_list
 
@@ -90,6 +93,14 @@ def load_wolfe_wave_configs(
     else:
         log.warning(f"[wolfe] Config not found at {path}; using built-in BTC defaults")
 
+    profile_payload = raw.get("_quality_profile", {}) if isinstance(raw, dict) else {}
+    if not isinstance(profile_payload, dict):
+        profile_payload = {}
+    inherited_quality = {
+        "research_quality_profile": str(profile_payload.get("name") or "off"),
+        "research_quality_mode": str(profile_payload.get("mode") or "shadow"),
+    }
+
     out: dict[str, WolfeConfig] = {}
     for symbol in symbols:
         normalized = bybit_symbol(symbol)
@@ -106,6 +117,7 @@ def load_wolfe_wave_configs(
             cfg = WolfeConfig.from_mapping(
                 {
                     **DEFAULT_WOLFE_WAVE_CONFIG.__dict__,
+                    **inherited_quality,
                     **payload,
                     "exec_tf": WOLFE_WAVE_INTERVAL,
                 }
@@ -118,6 +130,7 @@ def load_wolfe_wave_configs(
             f"[wolfe] {normalized}: config loaded pattern_tf={cfg.pattern_tf} "
             f"pivots={cfg.pivot_method}/{cfg.pivot_source} min_score={cfg.min_score:.1f} "
             f"trend={cfg.trend_filter} regime={cfg.regime_filter} "
+            f"research_quality={cfg.research_quality_profile}/{cfg.research_quality_mode} "
             f"fee_aware_stop={cfg.fee_aware_stop} max_fee_risk={cfg.max_fee_to_price_risk:.1%} "
             f"directions={'L' if cfg.allow_longs else '-'}{'S' if cfg.allow_shorts else '-'}"
         )
@@ -150,6 +163,78 @@ class WolfeWaveEngine:
         self.strategy_name = strategy_name
         self.min_bars = int(os.environ.get("WOLFE_WAVE_MIN_BARS", "3000"))
 
+    def _research_quality_features(
+        self,
+        *,
+        signal,
+        frame: pd.DataFrame,
+        cfg: WolfeConfig,
+        planned_rr: float,
+    ) -> dict[str, float | str]:
+        profile = str(cfg.research_quality_profile or "off").strip().lower()
+        if profile in {"", "off", "none"}:
+            return {}
+        if profile != "wolfe_mtf_v1":
+            log.warning(
+                f"[wolfe] Unknown research quality profile "
+                f"{cfg.research_quality_profile!r}; ignoring"
+            )
+            return {}
+
+        pattern = add_indicators(
+            resample_ohlc(frame, cfg.pattern_tf),
+            cfg.atr_length,
+            cfg.ema_length,
+            cfg.rsi_length,
+        )
+        p5_index = int(signal.pivots[-1].idx)
+        p5_rsi = (
+            float(pattern["rsi"].iloc[p5_index])
+            if 0 <= p5_index < len(pattern)
+            else math.nan
+        )
+        hourly = add_indicators(
+            resample_ohlc(frame, "1h"),
+            cfg.atr_length,
+            cfg.ema_length,
+            cfg.rsi_length,
+        )
+        recent_atr = pd.to_numeric(hourly["atr"], errors="coerce").dropna().tail(100)
+        atr_percentile_1h = (
+            float(recent_atr.rank(pct=True).iloc[-1])
+            if len(recent_atr) >= 50
+            else math.nan
+        )
+        p5_volume_ratio = float(signal.p5_volume_ratio)
+        required = (
+            p5_rsi,
+            atr_percentile_1h,
+            p5_volume_ratio,
+            float(signal.p5_break_atr),
+            float(signal.symmetry_ratio),
+        )
+        if not all(math.isfinite(value) for value in required):
+            return {
+                "research_quality_profile": profile,
+                "research_quality_mode": str(cfg.research_quality_mode or "shadow"),
+            }
+        return {
+            "research_quality_profile": profile,
+            "research_quality_mode": str(cfg.research_quality_mode or "shadow"),
+            "p5_rsi": round(p5_rsi, 6),
+            "atr_percentile_1h": round(atr_percentile_1h, 6),
+            **calculate_wolfe_research_quality(
+                strategy_name=self.strategy_name,
+                direction=str(signal.direction),
+                planned_rr=float(planned_rr),
+                p5_rsi=p5_rsi,
+                p5_break_atr=float(signal.p5_break_atr),
+                atr_percentile_1h=atr_percentile_1h,
+                p5_volume_ratio=p5_volume_ratio,
+                symmetry_ratio=float(signal.symmetry_ratio),
+            ),
+        }
+
     def _signal_payload(
         self,
         signal,
@@ -163,10 +248,12 @@ class WolfeWaveEngine:
         fee_risk: float | None = None,
         entry_risk_pct: float | None = None,
         stop_adjusted_for_fee: bool | None = None,
+        max_hold_bars: int | None = None,
     ) -> dict:
         planned_rr = float(signal.target_rr_planned if target_rr_planned is None else target_rr_planned)
         return {
             "strategy": self.strategy_name,
+            "event_key": signal.event_key,
             "signal": signal.direction,
             "entry": entry,
             "model_entry": float(signal.entry_price),
@@ -180,10 +267,12 @@ class WolfeWaveEngine:
             "prob": signal.score / 100.0,
             "threshold": threshold / 100.0,
             "entry_time": signal.entry_time.isoformat(),
+            "exec_tf": WOLFE_WAVE_INTERVAL,
             "pattern_tf": signal.pattern_tf,
             "pivot_method": signal.pivot_method,
             "trend_context": signal.trend_context,
             "target_rr_planned": planned_rr,
+            "max_hold_bars": None if max_hold_bars is None else int(max_hold_bars),
             "fee_to_price_risk": None if fee_risk is None else float(fee_risk),
             "entry_risk_pct": None if entry_risk_pct is None else float(entry_risk_pct),
             "stop_adjusted_for_fee": bool(signal.stop_adjusted_for_fee if stop_adjusted_for_fee is None else stop_adjusted_for_fee),
@@ -341,7 +430,25 @@ class WolfeWaveEngine:
             fee_risk=live_fee_risk,
             entry_risk_pct=entry_risk_pct,
             stop_adjusted_for_fee=bool(signal.stop_adjusted_for_fee or live_stop_adjusted),
+            max_hold_bars=state.config.max_hold_bars,
         )
+        quality_features = self._research_quality_features(
+            signal=signal,
+            frame=frame,
+            cfg=state.config,
+            planned_rr=live_rr,
+        )
+        if quality_features:
+            payload.update(quality_features)
+            numeric_quality = {
+                key: value
+                for key, value in quality_features.items()
+                if isinstance(value, (int, float)) and math.isfinite(float(value))
+            }
+            payload["feature_snapshot"].update(numeric_quality)
+            for key in numeric_quality:
+                if key not in payload["feature_columns"]:
+                    payload["feature_columns"].append(key)
         if signal.score < state.config.min_score:
             payload["rejected"] = True
             payload["reject_reason"] = (

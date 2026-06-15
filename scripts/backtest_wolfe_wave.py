@@ -357,6 +357,72 @@ def add_indicators(df: pd.DataFrame, atr_length: int, ema_length: int, rsi_lengt
     return out
 
 
+def _clip01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def calculate_wolfe_research_quality(
+    *,
+    strategy_name: str,
+    direction: str,
+    planned_rr: float,
+    p5_rsi: float,
+    p5_break_atr: float,
+    atr_percentile_1h: float,
+    p5_volume_ratio: float,
+    symmetry_ratio: float,
+) -> dict[str, float]:
+    rr_component = _clip01((planned_rr - 1.2) / (2.5 - 1.2))
+    signed_rsi_exhaustion = 50.0 - p5_rsi if direction == "long" else p5_rsi - 50.0
+    rsi_component = _clip01(signed_rsi_exhaustion / 15.0)
+    overshoot_component = _clip01((2.0 - p5_break_atr) / 1.0)
+    volume_component = _clip01((p5_volume_ratio - 0.5) / 1.0)
+    if 0.10 <= atr_percentile_1h <= 0.90:
+        atr_component = 1.0
+    else:
+        nearest_boundary = min(
+            abs(atr_percentile_1h - 0.10),
+            abs(atr_percentile_1h - 0.90),
+        )
+        atr_component = _clip01(1.0 - nearest_boundary / 0.10)
+    symmetry_component = _clip01((2.0 - symmetry_ratio) / 0.6)
+
+    if strategy_name == "wolfe_wave_v2":
+        weights = {
+            "rr": 0.25,
+            "p5_rsi": 0.22,
+            "p5_overshoot": 0.15,
+            "atr_1h": 0.18,
+            "p5_volume": 0.10,
+            "symmetry": 0.10,
+        }
+    else:
+        weights = {
+            "rr": 0.30,
+            "p5_rsi": 0.20,
+            "p5_overshoot": 0.20,
+            "atr_1h": 0.20,
+            "p5_volume": 0.10,
+            "symmetry": 0.0,
+        }
+    components = {
+        "research_quality_rr": rr_component,
+        "research_quality_p5_rsi": rsi_component,
+        "research_quality_p5_overshoot": overshoot_component,
+        "research_quality_atr_1h": atr_component,
+        "research_quality_p5_volume": volume_component,
+        "research_quality_symmetry": symmetry_component,
+    }
+    score = 100.0 * sum(
+        weights[name] * components[f"research_quality_{name}"]
+        for name in weights
+    )
+    return {
+        "research_quality_score": round(score, 3),
+        **{key: round(value, 6) for key, value in components.items()},
+    }
+
+
 def high_before_low(open_value: float, high_value: float, low_value: float) -> bool:
     return abs(open_value - high_value) < abs(open_value - low_value)
 
@@ -426,6 +492,8 @@ class WolfeConfig:
     p4_contrary_min_swing_atr: float = 0.50
     min_v2_quality: float = 0.0
     v2_score_weight: float = 0.0
+    research_quality_profile: str = "off"
+    research_quality_mode: str = "shadow"
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> "WolfeConfig":
@@ -478,7 +546,9 @@ class WolfeSignal:
 
     @property
     def event_key(self) -> str:
-        pivot_blob = "-".join(f"{p.kind}{p.idx}" for p in self.pivots)
+        # Pivot indices move when the live rolling frame drops its oldest bar.
+        # Timestamps keep the same Wolfe pattern stable across evaluations.
+        pivot_blob = "-".join(f"{p.kind}{p.time.isoformat()}" for p in self.pivots)
         return f"{self.symbol}|{self.pattern_tf}|{self.direction}|{self.entry_time.isoformat()}|{pivot_blob}"
 
 

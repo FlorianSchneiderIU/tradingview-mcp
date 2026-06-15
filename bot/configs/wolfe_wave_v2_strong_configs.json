@@ -1,4 +1,8 @@
 {
+  "_quality_profile": {
+    "mode": "shadow",
+    "name": "wolfe_mtf_v1"
+  },
   "ADAUSDT": {
     "allow_longs": true,
     "allow_shorts": true,

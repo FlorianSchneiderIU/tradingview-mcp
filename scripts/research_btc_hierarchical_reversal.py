@@ -100,6 +100,12 @@ def clean_features(frame: pd.DataFrame) -> pd.DataFrame:
     return out.fillna(medians).fillna(0.0).astype(float)
 
 
+def clean_features_from_train(frame: pd.DataFrame, train_mask: np.ndarray) -> pd.DataFrame:
+    out = frame.replace([np.inf, -np.inf], np.nan).copy()
+    medians = out.loc[train_mask].median(numeric_only=True)
+    return out.fillna(medians).fillna(0.0).astype(float)
+
+
 def parse_str_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -398,8 +404,6 @@ def price_context_features(frame: pd.DataFrame, spec: LayerSpec) -> pd.DataFrame
     out["parent_is_first_child"] = (slot == 0).astype(float)
     out["parent_is_last_child"] = (slot == spec.children_per_parent - 1).astype(float)
 
-    complete = completed_parent_mask(frame, spec.parent_tf, spec.children_per_parent)
-    out["parent_complete_group"] = complete.astype(float)
     return out
 
 
@@ -408,7 +412,7 @@ def build_features(frame: pd.DataFrame, spec: LayerSpec) -> tuple[pd.DataFrame, 
     calendar = calendar_features(frame["open_time"]).reset_index(drop=True)
     cycles = fixed_cycle_features(frame["open_time"], harmonics=2).reset_index(drop=True)
     features = pd.concat([price, calendar, cycles], axis=1)
-    features = clean_features(features).astype(np.float32)
+    features = features.replace([np.inf, -np.inf], np.nan).astype(np.float32)
     groups = {
         "price": list(price.columns),
         "time": list(calendar.columns) + list(cycles.columns),
@@ -429,7 +433,8 @@ def evaluate_model(
     extreme_indices: np.ndarray,
     horizon_bars: int,
 ) -> dict[str, Any]:
-    x = features.loc[:, columns].to_numpy(dtype=np.float32, copy=False)
+    clean = clean_features_from_train(features.loc[:, columns], masks["train"])
+    x = clean.to_numpy(dtype=np.float32, copy=False)
     y_train = y[masks["train"]].astype(int)
     y_val = y[masks["validation"]].astype(int)
     y_test = y[masks["test"]].astype(int)

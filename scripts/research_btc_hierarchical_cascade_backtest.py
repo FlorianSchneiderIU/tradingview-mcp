@@ -22,6 +22,7 @@ from scripts.research_btc_hierarchical_reversal import (  # noqa: E402
     add_indicators,
     balanced_weights,
     build_features,
+    clean_features_from_train,
     default_layers,
     fit_model,
     future_extreme_label,
@@ -65,8 +66,9 @@ def fit_layer_score_frame(
     if feature_set not in groups:
         raise ValueError(f"Unknown feature set {feature_set!r}; available={sorted(groups)}")
     columns = groups[feature_set]
-    x = features.loc[:, columns].to_numpy(dtype=np.float32, copy=False)
     masks = horizon_masks(frame["open_time"], spec.child_tf, 1, train_end, validation_end, end)
+    clean = clean_features_from_train(features.loc[:, columns], masks["train"])
+    x = clean.to_numpy(dtype=np.float32, copy=False)
     extremes = parent_extreme_indices(frame, spec.parent_tf, spec.children_per_parent)
 
     score_frame = pd.DataFrame(
@@ -91,8 +93,8 @@ def fit_layer_score_frame(
         model = make_model(model_name, seed)
         fit_model(model, x[masks["train"]], y[masks["train"]], balanced_weights(y[masks["train"]]))
         raw = predict_probability(model, x)
-        val_raw = raw[masks["validation"]]
-        pct = percentile_against(val_raw, raw)
+        train_raw = raw[masks["train"]]
+        pct = percentile_against(train_raw, raw)
         score_frame[f"{direction}_raw"] = raw
         score_frame[f"{direction}_pct"] = pct
         diagnostics["directions"][direction] = {
@@ -353,7 +355,7 @@ def simulate_trade(
         return None
 
     cost_r = (cost_bps_round_trip / 10_000.0) * entry / risk
-    end_idx = min(len(frame) - 1, entry_idx + max_hold_bars)
+    end_idx = min(len(frame) - 1, entry_idx + max_hold_bars - 1)
     exit_idx = end_idx
     exit_reason = "timeout"
     exit_price = float(frame["close"].iloc[end_idx])
@@ -635,8 +637,18 @@ def tune_trade_variants(
                                 }
                             )
     table = pd.DataFrame(rows).sort_values(
-        ["objective", "validation_net_r", "test_net_r"],
-        ascending=[False, False, False],
+        [
+            "objective",
+            "validation_net_r",
+            "validation_profit_factor",
+            "entry_style",
+            "min_risk_pct",
+            "rr",
+            "threshold",
+            "direction_scope",
+            "require_directional",
+        ],
+        ascending=[False, False, False, True, True, True, True, True, True],
     )
     if table.empty or not np.isfinite(float(table.iloc[0]["objective"])):
         return table, {}, []
