@@ -120,6 +120,9 @@ services:
       RL_TRAINING_EXAMPLES_PATH: /app/rl/training_examples.jsonl
       RL_ALLOW_REVERSE_ACTIONS: "true"
       RL_RISK_MULTIPLIERS: "session_orb_judas_fvg:rejected=0.35,session_orb_judas_fvg:accepted=0.70,million_moves=0.50,wolfe_wave:rejected=0.70,wolfe_wave_v2:rejected=0.70"
+      RL_WOLFE_CHECKPOINT_ENABLED: "true"
+      RL_WOLFE_CHECKPOINT_CHAT_ID: "-1002342104003"
+      RL_WOLFE_CHECKPOINTS: "50,150,200,300"
     volumes:
       - ./bot/logs/rl:/app/rl
     logging:

@@ -59,6 +59,21 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return default
+    values: set[int] = set()
+    for item in raw.replace(";", ",").split(","):
+        try:
+            value = int(item.strip())
+        except ValueError:
+            continue
+        if value > 0:
+            values.add(value)
+    return tuple(sorted(values)) or default
+
+
 def env_float_map(name: str) -> dict[str, float]:
     raw = os.environ.get(name, "")
     out: dict[str, float] = {}
@@ -90,6 +105,13 @@ TRAINING_EXAMPLES_PATH = os.environ.get(
     os.path.join(LOG_DIR, "training_examples.jsonl"),
 )
 HEARTBEAT_STATE_PATH = os.environ.get("RL_HEARTBEAT_STATE_PATH", os.path.join(LOG_DIR, "heartbeat_state.json"))
+WOLFE_CHECKPOINT_ENABLED = env_bool("RL_WOLFE_CHECKPOINT_ENABLED", False)
+WOLFE_CHECKPOINT_CHAT_ID = os.environ.get("RL_WOLFE_CHECKPOINT_CHAT_ID", "").strip()
+WOLFE_CHECKPOINT_STATE_PATH = os.environ.get(
+    "RL_WOLFE_CHECKPOINT_STATE_PATH",
+    os.path.join(LOG_DIR, "wolfe_quality_checkpoint_state.json"),
+)
+WOLFE_CHECKPOINTS = env_int_tuple("RL_WOLFE_CHECKPOINTS", (50, 150, 200, 300))
 PRETRAIN_PATH = os.environ.get("RL_PRETRAIN_PATH", "").strip()
 PRETRAIN_ON_START = env_bool("RL_PRETRAIN_ON_START", False)
 EXECUTION_QUEUE_SIZE = env_int("RL_EXECUTION_QUEUE_SIZE", 2000)
@@ -379,6 +401,81 @@ def append_jsonl(path: str, row: dict[str, Any]) -> None:
         fh.write(json.dumps(jsonable(row), sort_keys=True) + "\n")
 
 
+def wolfe_quality_result(row: dict[str, Any]) -> dict[str, Any] | None:
+    strategy = str(row.get("strategy") or "").strip().lower()
+    if strategy not in {"wolfe_wave", "wolfe_wave_v2"}:
+        return None
+    if row.get("reversed_trade") is True:
+        return None
+    features = row.get("source_features")
+    reward = row.get("reward")
+    if not isinstance(features, dict) or not isinstance(reward, dict):
+        return None
+    quality = to_float(features.get("research_quality_score"))
+    actual_r = to_float(reward.get("reward_actual_r"))
+    pnl = to_float(reward.get("closed_pnl"))
+    if quality is None or actual_r is None or pnl is None:
+        return None
+    return {
+        "decision_id": str(row.get("decision_id") or ""),
+        "completed_at": str(row.get("completed_at") or reward.get("received_at") or ""),
+        "strategy": strategy,
+        "source_status": str(row.get("source_status") or "").strip().lower(),
+        "quality": quality,
+        "actual_r": actual_r,
+        "pnl": pnl,
+    }
+
+
+def summarize_wolfe_quality_results(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
+        count = len(items)
+        rs = [float(item["actual_r"]) for item in items]
+        pnls = [float(item["pnl"]) for item in items]
+        wins = sum(1 for value in rs if value > 0)
+        gross_profit = sum(value for value in rs if value > 0)
+        gross_loss = -sum(value for value in rs if value < 0)
+        return {
+            "count": count,
+            "wins": wins,
+            "win_rate": wins / count if count else 0.0,
+            "accepted": sum(1 for item in items if item.get("source_status") == "accepted"),
+            "rejected": sum(1 for item in items if item.get("source_status") == "rejected"),
+            "net_r": sum(rs),
+            "avg_r": sum(rs) / count if count else 0.0,
+            "pnl": sum(pnls),
+            "profit_factor": gross_profit / gross_loss if gross_loss > 0 else None,
+        }
+
+    def with_buckets(items: list[dict[str, Any]]) -> dict[str, Any]:
+        result = summarize(items)
+        buckets = {
+            "lt75": [item for item in items if float(item["quality"]) < 75.0],
+            "75to92": [
+                item
+                for item in items
+                if 75.0 <= float(item["quality"]) <= 92.0
+            ],
+            "gt92": [item for item in items if float(item["quality"]) > 92.0],
+        }
+        result["buckets"] = {name: summarize(bucket) for name, bucket in buckets.items()}
+        result["top_bottom_delta_r"] = (
+            result["buckets"]["gt92"]["avg_r"] - result["buckets"]["lt75"]["avg_r"]
+            if result["buckets"]["gt92"]["count"] and result["buckets"]["lt75"]["count"]
+            else None
+        )
+        return result
+
+    completed = sorted(str(row.get("completed_at") or "") for row in rows if row.get("completed_at"))
+    return {
+        "total": with_buckets(rows),
+        "old": with_buckets([row for row in rows if row.get("strategy") == "wolfe_wave"]),
+        "v2": with_buckets([row for row in rows if row.get("strategy") == "wolfe_wave_v2"]),
+        "first_completed_at": completed[0] if completed else "",
+        "last_completed_at": completed[-1] if completed else "",
+    }
+
+
 class TelegramNotifier:
     def __init__(self, *, token: str, chat_id: str) -> None:
         self.token = token
@@ -408,9 +505,9 @@ class TelegramNotifier:
             return "-"
         return f"{number:.{digits}f}"
 
-    def send_lines(self, lines: list[str]) -> None:
+    def send_lines(self, lines: list[str]) -> bool:
         if not self.enabled:
-            return
+            return False
         try:
             payload: dict[str, object] = {
                 "chat_id": self.chat_id,
@@ -431,8 +528,11 @@ class TelegramNotifier:
                     resp.status_code,
                     self._redact(resp.text[:200], self.token),
                 )
+                return False
+            return True
         except Exception as exc:
             log.warning("[telegram] sendMessage failed: %s", self._redact(exc, self.token))
+            return False
 
 
 class ContextualRiskAgent:
@@ -1435,9 +1535,26 @@ class RLExecutionService:
         self.execution_queue: queue.Queue[str] = queue.Queue(maxsize=max(1, EXECUTION_QUEUE_SIZE))
         self.started_at = now_iso()
         self.telegram = TelegramNotifier(token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_CHAT_ID)
+        self.wolfe_checkpoint_telegram = TelegramNotifier(
+            token=TELEGRAM_BOT_TOKEN,
+            chat_id=WOLFE_CHECKPOINT_CHAT_ID,
+        )
         self.last_daily_heartbeat_key = ""
+        self.wolfe_checkpoint_sent: set[int] = set()
+        self.wolfe_checkpoint_rows: list[dict[str, Any]] = []
+        self.wolfe_checkpoint_seen_ids: set[str] = set()
+        self.wolfe_checkpoint_file_offset = 0
+        self.wolfe_checkpoint_lock = threading.Lock()
         self._load_runtime_state()
         self._load_heartbeat_state()
+        self._load_wolfe_checkpoint_state()
+        if WOLFE_CHECKPOINT_ENABLED:
+            log.info(
+                "Wolfe quality checkpoints enabled  target=%s checkpoints=%s state=%s",
+                WOLFE_CHECKPOINT_CHAT_ID or "missing",
+                ",".join(str(value) for value in WOLFE_CHECKPOINTS),
+                WOLFE_CHECKPOINT_STATE_PATH,
+            )
         self._bootstrap_signal_history_from_decisions()
         threading.Thread(target=self._execution_worker, daemon=True, name="rl-execution-worker").start()
         self._requeue_pending_executions()
@@ -1568,6 +1685,209 @@ class RLExecutionService:
             os.replace(tmp_path, HEARTBEAT_STATE_PATH)
         except Exception as exc:
             log.warning("Could not save RL heartbeat state %s: %s", HEARTBEAT_STATE_PATH, exc)
+
+    def _load_wolfe_checkpoint_state(self) -> None:
+        if not WOLFE_CHECKPOINT_ENABLED or not os.path.exists(WOLFE_CHECKPOINT_STATE_PATH):
+            return
+        try:
+            with open(WOLFE_CHECKPOINT_STATE_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            sent: set[int] = set()
+            for value in data.get("sent_checkpoints", []):
+                try:
+                    checkpoint = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if checkpoint in WOLFE_CHECKPOINTS:
+                    sent.add(checkpoint)
+            self.wolfe_checkpoint_sent = sent
+            log.info(
+                "Loaded Wolfe checkpoint state from %s  sent=%s",
+                WOLFE_CHECKPOINT_STATE_PATH,
+                ",".join(str(value) for value in sorted(self.wolfe_checkpoint_sent)) or "-",
+            )
+        except Exception as exc:
+            log.warning(
+                "Could not load Wolfe checkpoint state %s: %s",
+                WOLFE_CHECKPOINT_STATE_PATH,
+                exc,
+            )
+
+    def _save_wolfe_checkpoint_state(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(WOLFE_CHECKPOINT_STATE_PATH) or ".", exist_ok=True)
+            tmp_path = f"{WOLFE_CHECKPOINT_STATE_PATH}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "sent_checkpoints": sorted(self.wolfe_checkpoint_sent),
+                        "updated_at": now_iso(),
+                    },
+                    fh,
+                    indent=2,
+                    sort_keys=True,
+                )
+            os.replace(tmp_path, WOLFE_CHECKPOINT_STATE_PATH)
+        except Exception as exc:
+            log.warning(
+                "Could not save Wolfe checkpoint state %s: %s",
+                WOLFE_CHECKPOINT_STATE_PATH,
+                exc,
+            )
+
+    def _refresh_wolfe_checkpoint_rows(self) -> None:
+        if not os.path.exists(TRAINING_EXAMPLES_PATH):
+            return
+        try:
+            file_size = os.path.getsize(TRAINING_EXAMPLES_PATH)
+            if file_size < self.wolfe_checkpoint_file_offset:
+                self.wolfe_checkpoint_rows = []
+                self.wolfe_checkpoint_seen_ids = set()
+                self.wolfe_checkpoint_file_offset = 0
+            with open(TRAINING_EXAMPLES_PATH, "rb") as fh:
+                fh.seek(self.wolfe_checkpoint_file_offset)
+                for raw_line in fh:
+                    try:
+                        row = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    result = wolfe_quality_result(row)
+                    if result is None:
+                        continue
+                    decision_id = str(result.get("decision_id") or "")
+                    if decision_id and decision_id in self.wolfe_checkpoint_seen_ids:
+                        continue
+                    if decision_id:
+                        self.wolfe_checkpoint_seen_ids.add(decision_id)
+                    self.wolfe_checkpoint_rows.append(result)
+                self.wolfe_checkpoint_file_offset = fh.tell()
+        except Exception as exc:
+            log.warning(
+                "Could not refresh Wolfe quality checkpoints from %s: %s",
+                TRAINING_EXAMPLES_PATH,
+                exc,
+            )
+
+    @staticmethod
+    def _checkpoint_pf(value: object, count: int) -> str:
+        if count <= 0:
+            return "-"
+        parsed = to_float(value)
+        return f"{parsed:.2f}" if parsed is not None else "inf"
+
+    @staticmethod
+    def _checkpoint_bucket_line(label: str, bucket: dict[str, Any]) -> str:
+        return (
+            f"{label} n={int(bucket.get('count', 0))} "
+            f"avg={float(bucket.get('avg_r', 0.0)):+.2f}R "
+            f"WR={float(bucket.get('win_rate', 0.0)):.0%}"
+        )
+
+    def _wolfe_checkpoint_lines(
+        self,
+        checkpoint: int,
+        summary: dict[str, Any],
+    ) -> list[str]:
+        labels = {
+            50: "sanity check",
+            150: "preliminary review",
+            200: "first evaluation",
+            300: "sizing review",
+        }
+        total = summary["total"]
+        old = summary["old"]
+        v2 = summary["v2"]
+        first_at = str(summary.get("first_completed_at") or "")
+        elapsed_days = 0
+        try:
+            first_dt = datetime.fromisoformat(first_at.replace("Z", "+00:00"))
+            elapsed_days = max(0, (datetime.now(timezone.utc) - first_dt).days)
+        except ValueError:
+            pass
+
+        def strategy_line(label: str, bucket: dict[str, Any]) -> str:
+            return (
+                f"<b>{label}</b> n={int(bucket.get('count', 0))} | "
+                f"{float(bucket.get('net_r', 0.0)):+.2f}R | "
+                f"avg {float(bucket.get('avg_r', 0.0)):+.2f}R | "
+                f"WR {float(bucket.get('win_rate', 0.0)):.0%} | "
+                f"PF {self._checkpoint_pf(bucket.get('profit_factor'), int(bucket.get('count', 0)))}"
+            )
+
+        lines = [
+            f"<b>[WOLFE QUALITY] {checkpoint} ORIGINAL-SIDE CLOSES</b>",
+            f"{escape(labels.get(checkpoint, 'checkpoint').title())} | live window {elapsed_days}d",
+            (
+                f"<b>Total</b> n={int(total.get('count', 0))} | "
+                f"{float(total.get('net_r', 0.0)):+.2f}R | "
+                f"PnL {float(total.get('pnl', 0.0)):+.2f} USDT | "
+                f"A/R {int(total.get('accepted', 0))}/{int(total.get('rejected', 0))}"
+            ),
+            strategy_line("Old", old),
+            escape(
+                "  "
+                + " | ".join(
+                    [
+                        self._checkpoint_bucket_line("<75", old["buckets"]["lt75"]),
+                        self._checkpoint_bucket_line("75-92", old["buckets"]["75to92"]),
+                        self._checkpoint_bucket_line(">92", old["buckets"]["gt92"]),
+                    ]
+                )
+            ),
+            strategy_line("V2", v2),
+            escape(
+                "  "
+                + " | ".join(
+                    [
+                        self._checkpoint_bucket_line("<75", v2["buckets"]["lt75"]),
+                        self._checkpoint_bucket_line("75-92", v2["buckets"]["75to92"]),
+                        self._checkpoint_bucket_line(">92", v2["buckets"]["gt92"]),
+                    ]
+                )
+            ),
+        ]
+        deltas = []
+        for label, bucket in (("old", old), ("v2", v2)):
+            delta = to_float(bucket.get("top_bottom_delta_r"))
+            deltas.append(f"{label} {delta:+.2f}R" if delta is not None else f"{label} n/a")
+        lines.append(f"Top-low expectancy: <code>{escape(' | '.join(deltas))}</code>")
+        lines.append(
+            f"V2 validation sample: <code>{int(v2.get('count', 0))}/40"
+            f"{' ready' if int(v2.get('count', 0)) >= 40 else ' pending'}</code>"
+        )
+        return lines
+
+    def _maybe_send_wolfe_quality_checkpoints(self) -> None:
+        if (
+            not WOLFE_CHECKPOINT_ENABLED
+            or not WOLFE_CHECKPOINTS
+            or not self.wolfe_checkpoint_telegram.enabled
+        ):
+            return
+        with self.wolfe_checkpoint_lock:
+            self._refresh_wolfe_checkpoint_rows()
+            closed = len(self.wolfe_checkpoint_rows)
+            due = [
+                checkpoint
+                for checkpoint in WOLFE_CHECKPOINTS
+                if checkpoint <= closed and checkpoint not in self.wolfe_checkpoint_sent
+            ]
+            if not due:
+                return
+            summary = summarize_wolfe_quality_results(self.wolfe_checkpoint_rows)
+            for checkpoint in due:
+                if not self.wolfe_checkpoint_telegram.send_lines(
+                    self._wolfe_checkpoint_lines(checkpoint, summary)
+                ):
+                    break
+                self.wolfe_checkpoint_sent.add(checkpoint)
+                self._save_wolfe_checkpoint_state()
+                log.info(
+                    "Wolfe quality checkpoint sent checkpoint=%d scored_closes=%d target=%s",
+                    checkpoint,
+                    closed,
+                    WOLFE_CHECKPOINT_CHAT_ID,
+                )
 
     def _load_runtime_state(self) -> None:
         if not os.path.exists(STATE_PATH):
@@ -3296,6 +3616,10 @@ class RLExecutionService:
                 self._maybe_send_daily_heartbeat()
             except Exception:
                 log.exception("RL heartbeat failed")
+            try:
+                self._maybe_send_wolfe_quality_checkpoints()
+            except Exception:
+                log.exception("Wolfe quality checkpoint monitor failed")
 
     def _closed_pnl_row_matches_decision(self, row: dict[str, Any], decision: dict[str, Any]) -> bool:
         row_keys = [
@@ -3514,6 +3838,10 @@ class RLExecutionService:
             self._save_runtime_state_locked()
         append_jsonl(REWARDS_PATH, reward_payload)
         append_jsonl(TRAINING_EXAMPLES_PATH, training_example)
+        try:
+            self._maybe_send_wolfe_quality_checkpoints()
+        except Exception:
+            log.exception("Wolfe quality checkpoint monitor failed after reward")
         log.info(
             "[%s] RL reward decision=%s pnl=%.4f reward_default_r=%.4f source=%s",
             decision.get("symbol"),
