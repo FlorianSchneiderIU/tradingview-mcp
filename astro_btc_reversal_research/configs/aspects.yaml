@@ -1,0 +1,136 @@
+# Aspect / ephemeris configuration (proposal section 25).
+mode:
+  coordinate_system: geocentric
+  zodiac: tropical
+  apparent: true
+
+# Bodies available from the reused Skyfield ephemeris (DE421). All 10 core bodies.
+bodies:
+  - sun
+  - moon
+  - mercury
+  - venus
+  - mars
+  - jupiter
+  - saturn
+  - uranus
+  - neptune
+  - pluto
+
+# Optional extended points (Lilith/Chiron/Nodes) require pyswisseph - out of scope for now.
+optional_points: []
+
+aspects:
+  # Signed-phase targets used for exact-event detection (0/90/180/270 distinct).
+  hard: [0, 90, 180, 270]
+  major: [0, 60, 90, 120, 180]
+  gann_extended: [30, 45, 72, 135, 144, 150]
+  # Folded separation angles used for M2 discovery (270 folds to 90).
+  discovery: [0, 30, 45, 60, 90, 120, 135, 150, 180]
+
+orb:
+  exact_event_arcminutes: 10
+  feature_orb_degrees: [0.25, 0.5, 1.0, 2.0]
+  # Default per-bar membership orb for M2 discovery (degrees), per timeframe.
+  discovery_orb_degrees:
+    1h: 1.0
+    4h: 2.0
+    1d: 3.0
+
+special_candidates:
+  dark_pivot:
+    body_1: moon
+    body_2: pluto
+    aspects: [0, 90, 180, 270]
+
+# Reversal-window half-widths (in candles) for window-based scoring (proposal section 22).
+windows:
+  1h: {tight: 2, medium: 6, wide: 12}
+  4h: {tight: 1, medium: 2, wide: 4}
+  1d: {tight: 1, medium: 3, wide: 7}
+
+# Data defaults: reuse the offline 15m Bybit cache (2021-2026) and resample up.
+data:
+  symbol: BTCUSDT
+  base_interval: 15m
+  start: "2021-01-01"
+  end: "2026-06-01"
+
+# Out-of-sample holdout: reported, never used to select the "best" aspect.
+holdout_start: "2025-01-01"
+
+# Reproducibility.
+random_seed: 42
+random_calendar_draws: 1000
+shifted_calendar_offsets_days: [3, 7, 13, 21, 37, 83]
+
+# Milestone 2 discovery controls.
+discovery:
+  random_draws: 200          # random-subset draws per (pair, aspect) hypothesis
+  min_in_window_bars: 30     # skip hypotheses with too few in-aspect candles
+  fdr_alpha: 0.05            # Benjamini-Hochberg false-discovery-rate level
+  pivot_threshold_atr:       # ATR directional-change threshold per timeframe
+    1h: 2.0
+    4h: 2.0
+    1d: 2.0
+  window_kind: medium        # which of windows.{tight,medium,wide} to score
+
+# Milestone 3 ML pivot-window models.
+ml:
+  n_folds: 4                 # walk-forward OOS blocks over the dev period
+  pivot_threshold_atr:
+    1h: 2.0
+    4h: 2.0
+    1d: 2.0
+  horizons:                  # forward "pivot within N candles" target horizon
+    1h: 12
+    4h: 6
+    1d: 3
+  models: [logistic_l2, hgb]
+  feature_sets: [price_only, calendar_only, lunar_only, astro_only, astro_cycle, astro_plus_price, full]
+  k_fracs: [0.01, 0.05, 0.10]
+  run_shifted_placebo: true  # confirm real astro beats a ~37d-shifted placebo
+
+# Calendar event-study search (precision framing): find sparse astro calendars
+# whose firings reliably contain a pivot within the window.
+calendar:
+  random_draws: 500
+  min_event_count: 5         # ignore calendars that fire too rarely to assess
+  fdr_alpha: 0.05
+  pivot_threshold_atr:       # reversal-grade pivots (multi-day cadence) so baseline < 1
+    1h: 5.0                   # ~1.75d apart  (base ~0.23)
+    4h: 4.0                   # ~4.3d apart   (base ~0.18)
+    1d: 3.0                   # ~14d apart    (base ~0.16)
+  window_kind: medium        # tolerance window from windows.{tight,medium,wide}
+  confluence_min_counts: [2, 3, 4]
+  confluence_aspects: [0, 90, 180]   # hard aspects for confluence counting
+
+# Direction-conditional calendar search (astro + price context, proposal H5/Dark Pivot).
+# Fire only when price dumped/pumped into the aspect; baseline = random same-context bars.
+conditional:
+  random_draws: 1000
+  min_event_count: 5
+  fdr_alpha: 0.05
+  dump_threshold_atr: 1.0    # |move into event| >= this many ATR
+  dump_lookback:             # bars over which the move is measured
+    1h: 24
+    4h: 6
+    1d: 2
+  window_kind: medium
+
+# High-RR reversal strategy (Milestone 4): HTF dump gate -> LTF sweep/reclaim long.
+strategy:
+  ltf_interval: 1h
+  htf_interval: 1d
+  htf_dump_lookback: 2       # daily bars for the 'dump into the bottom zone'
+  htf_dump_threshold_atr: 1.0
+  hold_days: 4              # stay alert for longs this many days after a daily dump
+  stop_buffer_atr: 0.1     # stop below the swept low, in LTF ATR
+  max_hold_bars: 72        # give a trade up to ~3 days (1h bars) to resolve
+  cost_bps_round_trip: 8.0 # taker fees + slippage, round trip
+  rr_values: [2, 3, 5]
+  excursion_rr: 50         # large target to measure max-R available (no real exit)
+  sweep_lookback: 48       # LTF bars defining a 'significant' swing low (~2d on 1h)
+  require_displacement: true
+  disp_body_atr: 0.5       # reclaim candle body >= this * ATR
+  disp_close_frac: 0.5     # reclaim candle closes in the top half of its range

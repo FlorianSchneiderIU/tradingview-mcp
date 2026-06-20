@@ -15,6 +15,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Eligibility floors (see summarize()). Aligned with bot/train_dt.py gates.
+GG_PF_FLOOR = 1.15
+GG_MIN_PROFITABLE_SYMBOL_FRAC = 0.5
+
 from scripts.backtest_turtle_soup import parse_utc_datetime  # noqa: E402
 from scripts.backtest_wolfe_wave import BYBIT_URL, fetch_bybit_klines  # noqa: E402
 from scripts.experiment_pine_strategy_candidates import (  # noqa: E402
@@ -627,7 +631,20 @@ def summarize(configs: list[GgConfig], aggs: dict[str, ConfigAgg], min_oos_trade
             + 0.15 * min(row["oos_profit_factor"], 3.0)
             - 0.015 * row["oos_max_dd_r"]
         )
-        row["eligible"] = bool(row["oos_trades"] >= min_oos_trades and row["train_trades"] >= min_oos_trades * 2)
+        # Eligibility now also enforces profit-factor and net-positive floors on
+        # BOTH train and OOS, plus broad symbol coverage. This rejects the
+        # "great OOS PF on a thin, single-regime sample" overfit signature
+        # (e.g. PF 4.34 on 41 trades) that the trade-count-only gate let through.
+        n_symbols = max(len(agg.by_symbol), 1)
+        row["eligible"] = bool(
+            row["oos_trades"] >= min_oos_trades
+            and row["train_trades"] >= min_oos_trades * 2
+            and row["train_profit_factor"] >= GG_PF_FLOOR
+            and row["oos_profit_factor"] >= GG_PF_FLOOR
+            and row["train_net_r"] > 0.0
+            and row["oos_net_r"] > 0.0
+            and row["profitable_symbols"] >= math.ceil(GG_MIN_PROFITABLE_SYMBOL_FRAC * n_symbols)
+        )
         rows.append(row)
     return pd.DataFrame(rows).sort_values(["eligible", "score", "oos_net_r"], ascending=[False, False, False])
 

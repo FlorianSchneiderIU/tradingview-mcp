@@ -1,0 +1,117 @@
+{
+  "config": {
+    "symbol": "BTCUSDT",
+    "timeframe": "1d",
+    "start": "2021-01-01",
+    "end": "2026-06-01",
+    "body_1": "moon",
+    "body_2": "pluto",
+    "aspects": [
+      0,
+      90,
+      180,
+      270
+    ],
+    "dump_lookback": 2,
+    "dump_threshold_atr": 1.0,
+    "expansion_horizon": 3,
+    "expansion_target_atr": 1.0,
+    "expansion_buffer_atr": 0.1,
+    "event_window_bars": 1,
+    "pivot_threshold_atr": 2.0,
+    "holdout_start": "2025-01-01 00:00:00+00:00",
+    "random_seed": 42
+  },
+  "data": {
+    "bars": 1978,
+    "first_open": "2021-01-01T00:00:00+00:00",
+    "last_close": "2026-06-01T23:59:59.999000+00:00",
+    "n_aspect_events": 289,
+    "n_dump_days": 210
+  },
+  "expansion_test": {
+    "n_event": 92,
+    "n_baseline": 118,
+    "rate_event": 0.20652173913043478,
+    "rate_baseline": 0.19491525423728814,
+    "lift": 1.059546313799622,
+    "rate_diff": 0.01160648489314664,
+    "ci_event": [
+      0.13043478260869565,
+      0.29347826086956524
+    ],
+    "ci_baseline": [
+      0.1271186440677966,
+      0.2711864406779661
+    ],
+    "diff_ci": [
+      -0.1007737656595431,
+      0.12048636698599853
+    ],
+    "binomial_p": 0.4303147064013582,
+    "mfe_mae": {
+      "mean_mfe_r": 1.662088478873089,
+      "mean_mae_r": 1.9252987046058476,
+      "median_max_r": 1.2631295452991493,
+      "share_ge_1r": 0.5978260869565217,
+      "share_ge_2r": 0.33695652173913043
+    }
+  },
+  "random_calendar": {
+    "n_draws": 1000,
+    "n_valid_draws": 1000,
+    "min_spacing_bars": 7,
+    "null_mean": 0.1994776667906005,
+    "empirical_p": 0.4225774225774226
+  },
+  "shifted_calendar": [
+    {
+      "offset_days": 3,
+      "offset_bars": 3,
+      "n": 89,
+      "rate": 0.19101123595505617
+    },
+    {
+      "offset_days": 7,
+      "offset_bars": 7,
+      "n": 97,
+      "rate": 0.2268041237113402
+    },
+    {
+      "offset_days": 13,
+      "offset_bars": 13,
+      "n": 87,
+      "rate": 0.20689655172413793
+    },
+    {
+      "offset_days": 21,
+      "offset_bars": 21,
+      "n": 97,
+      "rate": 0.23711340206185566
+    },
+    {
+      "offset_days": 37,
+      "offset_bars": 37,
+      "n": 87,
+      "rate": 0.1724137931034483
+    },
+    {
+      "offset_days": 83,
+      "offset_bars": 83,
+      "n": 99,
+      "rate": 0.24242424242424243
+    }
+  ],
+  "holdout": {
+    "n_event_dev": 56,
+    "rate_event_dev": 0.21428571428571427,
+    "n_event_holdout": 36,
+    "rate_event_holdout": 0.19444444444444445
+  },
+  "pivot_proximity": {
+    "n_pivots": 235,
+    "event_pivot_share": 0.17301038062283736,
+    "baseline_pivot_share": 0.17644084934277046,
+    "lift": 0.9805574007792903
+  }
+}

@@ -180,6 +180,11 @@ MAX_OPEN     = int(os.environ.get("MAX_OPEN_POSITIONS", "5"))
 MAX_DAILY_DD = float(os.environ.get("MAX_DAILY_DD", "0.05"))
 MAX_WEEKLY_DD = float(os.environ.get("MAX_WEEKLY_DD", "0.0"))
 TP1_PARTIAL_PCT = float(os.environ.get("TP1_PARTIAL_PCT", "0.5"))
+# Fraction of R to lock in on the runner when the SL is moved after TP1. 0.0 ==
+# pure breakeven (legacy behaviour). Set to e.g. 0.3 to keep a positive floor on
+# the runner instead of letting it give everything back. Mirrors the lock-in used
+# in indicators.sim_trail so backtest expectancy matches live.
+BREAKEVEN_LOCKIN_R = float(os.environ.get("BREAKEVEN_LOCKIN_R", "0.0"))
 
 # Correlation cluster (from research/correlation_research.py, 16 months of 15m data):
 # 18 of 19 coins form a single densely correlated cluster (149/171 pairs at corr >= 0.60).
@@ -2102,6 +2107,7 @@ class Bot:
             reason=reason,
             order_id=order_id,
             order_link_id=sig.get("order_link_id"),
+            tg_message_id=sig.get("tg_message_id"),
             signal_time=sig.get("signal_time", sig.get("entry_time")),
             entry_time=sig.get("entry_time", sig.get("signal_time")),
             strategy_variant=sig.get("variant"),
@@ -2391,17 +2397,32 @@ class Bot:
                     saved = pickle.load(fh)
                 state.dt_model     = saved["model"]
                 state.dt_threshold = float(saved["threshold"])
+                # Sync the validated exit profile (sl/tp1/trail) from the model
+                # artifact when present, so live execution matches exactly what
+                # the walk-forward + holdout validation accepted. Falls back to
+                # the config values for legacy models that don't carry them.
+                synced = []
+                for k in ("sl", "tp1", "trail"):
+                    if saved.get(k) is not None:
+                        if float(saved[k]) != float(state.cfg.get(k, "nan") or "nan"):
+                            synced.append(f"{k}:{state.cfg.get(k)}->{saved[k]}")
+                        state.cfg[k] = float(saved[k])
                 state.dt_meta = {
                     "path": model_path,
                     "trained_on": saved.get("trained_on"),
                     "oos_dt_sh": saved.get("oos_dt_sh"),
+                    "oos_avg_r": saved.get("oos_avg_r"),
+                    "holdout_pf": saved.get("holdout_pf"),
+                    "holdout_avg_r": saved.get("holdout_avg_r"),
                     "threshold": saved.get("threshold"),
                 }
                 log.info(
                     f"  {sym}: DT model loaded  "
                     f"threshold={state.dt_threshold:.2f}  "
                     f"trained_on={saved.get('trained_on', '?')} bars  "
-                    f"oos_dt_sh={saved.get('oos_dt_sh', '?')}"
+                    f"holdout_pf={saved.get('holdout_pf', '?')} "
+                    f"holdout_avg_r={saved.get('holdout_avg_r', '?')}"
+                    + (f"  synced[{','.join(synced)}]" if synced else "")
                 )
                 loaded += 1
             except Exception as exc:
@@ -3376,6 +3397,7 @@ class Bot:
         strategies: dict[str, dict[str, object]] = {}
         recent_partial_exits: dict[tuple[str, str], tuple[str, int, str]] = {}
         exit_groups: dict[str, dict[str, object]] = {}
+        context_by_key: dict[str, dict[str, object]] = {}
 
         def strategy_stats(strategy: object) -> dict[str, object]:
             key = self._strategy_key(strategy)
@@ -3401,6 +3423,91 @@ class Bot:
             else:
                 target["breakeven"] = int(target["breakeven"]) + 1
 
+        def infer_context_from_order_link(value: object) -> dict[str, object]:
+            text = str(value or "").strip()
+            if not text:
+                return {}
+            parts = text.split("-")
+            if len(parts) < 5 or parts[0] not in {"E", "X"}:
+                return {}
+            strategy_by_code = {
+                "MM": "million_moves",
+                "ORB": "session_orb_judas_fvg",
+                "WW": "wolfe_wave",
+                "GG": "ggshot_227",
+            }
+            context: dict[str, object] = {
+                "trade_id": text,
+                "order_link_id": text,
+            }
+            strategy = strategy_by_code.get(parts[1].upper())
+            if strategy:
+                context["strategy"] = strategy
+            direction = {"L": "long", "S": "short"}.get(parts[-3].upper())
+            if direction:
+                context["direction"] = direction
+            return context
+
+        def event_context_keys(event: dict) -> list[str]:
+            keys: list[str] = []
+            for key in (
+                "order_id",
+                "order_link_id",
+                "entry_order_id",
+                "entry_order_link_id",
+                "trade_id",
+            ):
+                value = str(event.get(key) or "").strip()
+                if value and value not in keys:
+                    keys.append(value)
+            raw = event.get("order_raw") if isinstance(event.get("order_raw"), dict) else {}
+            for key in ("orderId", "orderLinkId", "parentOrderId", "parentOrderLinkId"):
+                value = str(raw.get(key) or "").strip()
+                if value and value not in keys:
+                    keys.append(value)
+            return keys
+
+        def remember_event_context(event: dict) -> None:
+            event_type = event.get("type")
+            if event_type == "signal":
+                context = {
+                    "strategy": event.get("strategy"),
+                    "direction": event.get("direction"),
+                    "symbol": event.get("symbol"),
+                    "trade_id": event.get("order_link_id") or event.get("order_id"),
+                    "order_link_id": event.get("order_link_id"),
+                }
+                keys = [event.get("order_id"), event.get("order_link_id")]
+            elif event_type == "fill" and str(event.get("strategy") or "").strip():
+                context = {
+                    "strategy": event.get("strategy"),
+                    "direction": event.get("direction"),
+                    "symbol": event.get("symbol"),
+                    "trade_id": event.get("trade_id") or event.get("entry_order_link_id"),
+                    "order_link_id": event.get("entry_order_link_id") or event.get("order_link_id"),
+                }
+                keys = event_context_keys(event)
+            else:
+                return
+            clean_context = {key: value for key, value in context.items() if value not in (None, "")}
+            if not clean_context:
+                return
+            for key in keys:
+                text = str(key or "").strip()
+                if text:
+                    context_by_key[text] = clean_context
+
+        def lookup_event_context(event: dict) -> dict[str, object]:
+            for key in event_context_keys(event):
+                context = context_by_key.get(key)
+                if context:
+                    return context
+            for key in event_context_keys(event):
+                context = infer_context_from_order_link(key)
+                if context:
+                    return context
+            return {}
+
         def event_fill_time_ms(event: dict) -> int:
             try:
                 return int(float(event.get("fill_time_ms") or 0))
@@ -3424,6 +3531,10 @@ class Bot:
             strategy = event.get("strategy")
             if str(strategy or "").strip():
                 return strategy
+            context = lookup_event_context(event)
+            strategy = context.get("strategy")
+            if str(strategy or "").strip():
+                return strategy
             descriptor = " ".join(
                 str(event.get(key) or "")
                 for key in ("event", "stop_order_type", "create_type", "order_link_id")
@@ -3441,7 +3552,13 @@ class Bot:
             return strategy
 
         def fill_group_key(event: dict, strategy: object) -> str:
-            trade_id = str(event.get("trade_id") or "").strip()
+            context = lookup_event_context(event)
+            trade_id = str(
+                event.get("trade_id")
+                or context.get("trade_id")
+                or context.get("order_link_id")
+                or ""
+            ).strip()
             if trade_id:
                 return f"trade:{trade_id}"
             symbol = str(event.get("symbol") or "").upper()
@@ -3470,6 +3587,7 @@ class Bot:
         if not os.path.exists(TRADE_LEDGER_PATH):
             stats["strategies"] = strategies
             return stats
+        day_events: list[dict] = []
         try:
             with open(TRADE_LEDGER_PATH, "r", encoding="utf-8") as fh:
                 for line in fh:
@@ -3480,42 +3598,44 @@ class Bot:
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if self._ledger_event_day(event) != day_key:
+                    remember_event_context(event)
+                    if self._ledger_event_day(event) == day_key:
+                        day_events.append(event)
+            for event in day_events:
+                event_type = event.get("type")
+                if event_type == "signal":
+                    update_signal(stats, event.get("status"))
+                    update_signal(strategy_stats(event.get("strategy")), event.get("status"))
+                elif event_type == "fill":
+                    if not self._is_exit_event_name(event.get("event")):
                         continue
-                    event_type = event.get("type")
-                    if event_type == "signal":
-                        update_signal(stats, event.get("status"))
-                        update_signal(strategy_stats(event.get("strategy")), event.get("status"))
-                    elif event_type == "fill":
-                        if not self._is_exit_event_name(event.get("event")):
-                            continue
-                        pnl = self._numeric_float(event.get("closed_pnl"))
-                        if pnl is None:
-                            continue
-                        strategy = resolve_fill_strategy(event)
-                        partial_tp = is_partial_tp(event)
-                        group_key = fill_group_key(event, strategy)
-                        group = exit_groups.setdefault(
-                            group_key,
-                            {
-                                "strategy": strategy,
-                                "pnl": 0.0,
-                                "has_partial": False,
-                                "has_final": False,
-                            },
-                        )
-                        if str(strategy or "").strip():
-                            group["strategy"] = strategy
-                        group["pnl"] = float(group.get("pnl") or 0.0) + pnl
-                        group["has_partial"] = bool(group.get("has_partial")) or partial_tp
-                        group["has_final"] = bool(group.get("has_final")) or not partial_tp
-                        add_exit_pnl(stats, pnl)
-                        add_exit_pnl(strategy_stats(strategy), pnl)
-                        if partial_tp and str(strategy or "").strip():
-                            recent_partial_exits[(
-                                str(event.get("symbol") or "").upper(),
-                                str(event.get("direction") or "").lower(),
-                            )] = (str(strategy), event_fill_time_ms(event), group_key)
+                    pnl = self._numeric_float(event.get("closed_pnl"))
+                    if pnl is None:
+                        continue
+                    strategy = resolve_fill_strategy(event)
+                    partial_tp = is_partial_tp(event)
+                    group_key = fill_group_key(event, strategy)
+                    group = exit_groups.setdefault(
+                        group_key,
+                        {
+                            "strategy": strategy,
+                            "pnl": 0.0,
+                            "has_partial": False,
+                            "has_final": False,
+                        },
+                    )
+                    if str(strategy or "").strip():
+                        group["strategy"] = strategy
+                    group["pnl"] = float(group.get("pnl") or 0.0) + pnl
+                    group["has_partial"] = bool(group.get("has_partial")) or partial_tp
+                    group["has_final"] = bool(group.get("has_final")) or not partial_tp
+                    add_exit_pnl(stats, pnl)
+                    add_exit_pnl(strategy_stats(strategy), pnl)
+                    if partial_tp and str(strategy or "").strip():
+                        recent_partial_exits[(
+                            str(event.get("symbol") or "").upper(),
+                            str(event.get("direction") or "").lower(),
+                        )] = (str(strategy), event_fill_time_ms(event), group_key)
         except Exception as exc:
             log.warning(f"[heartbeat] Could not read ledger {TRADE_LEDGER_PATH}: {exc}")
         for group in exit_groups.values():
@@ -4790,7 +4910,19 @@ class Bot:
         if entry is None or entry <= 0:
             return
         tick = float(state.info.get("tick_size", 0.0) or 0.0)
+        # Lock in a fraction of R on the runner instead of pure breakeven when
+        # BREAKEVEN_LOCKIN_R > 0. Direction-aware: the floor sits above entry for
+        # longs, below entry for shorts.
         be_stop = round_to_step(entry, tick)
+        if BREAKEVEN_LOCKIN_R > 0:
+            sl0 = self._to_float(active_trade.get("sl"))
+            direction = str(active_trade.get("direction") or "").lower()
+            if sl0 is not None and sl0 > 0 and direction in ("long", "short"):
+                risk = abs(entry - sl0)
+                if risk > 0:
+                    lock = BREAKEVEN_LOCKIN_R * risk
+                    be_stop = round_to_step(
+                        entry + lock if direction == "long" else entry - lock, tick)
         if self._is_ggshot_bracketed_trade(active_trade):
             if not self._move_ggshot_bracketed_stops_to_breakeven(
                 symbol,
@@ -5217,6 +5349,7 @@ class Bot:
             },
         )
         if tg_message_id is not None:
+            notify_sig["tg_message_id"] = tg_message_id
             with self._pos_lock:
                 if state.active_trade is not None:
                     state.active_trade["tg_message_id"] = tg_message_id
@@ -5457,6 +5590,7 @@ class Bot:
             },
         )
         if tg_message_id is not None:
+            notify_sig["tg_message_id"] = tg_message_id
             with self._pos_lock:
                 if state.active_trade is not None:
                     state.active_trade["tg_message_id"] = tg_message_id

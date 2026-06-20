@@ -59,9 +59,15 @@ ACTIVE_TRADES_PATH = os.environ.get(
     "ACTIVE_TRADES_STATE_PATH",
     os.path.join(os.environ.get("LOG_DIR", "/app/logs"), "active_trades.json"),
 )
+TRADE_LEDGER_PATH = os.environ.get(
+    "TRADE_LEDGER_PATH",
+    os.path.join(os.environ.get("LOG_DIR", "/app/logs"), "trade_ledger.jsonl"),
+)
 
 # ── In-memory dedup set ────────────────────────────────────────────────────────
 _notified: set[str] = set()
+_ledger_context_mtime: float = -1.0
+_ledger_context_by_key: dict[str, dict] = {}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -129,6 +135,123 @@ def _read_active_trades() -> dict:
 
 
 # ── Fill classification (mirrors bot.py logic) ─────────────────────────────────
+
+def _strategy_from_order_link_id(value: object) -> dict:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    parts = text.split("-")
+    if len(parts) < 5 or parts[0] not in {"E", "X"}:
+        return {}
+    strategy_by_code = {
+        "MM": "million_moves",
+        "ORB": "session_orb_judas_fvg",
+        "WW": "wolfe_wave",
+        "GG": "ggshot_227",
+    }
+    strategy = strategy_by_code.get(parts[1].upper())
+    direction = {"L": "long", "S": "short"}.get(parts[-3].upper())
+    out: dict = {"trade_id": text, "order_link_id": text}
+    if strategy:
+        out["strategy"] = strategy
+    if direction:
+        out["direction"] = direction
+    return out
+
+
+def _order_context_keys(order: dict) -> list[str]:
+    keys: list[str] = []
+    for key in ("orderId", "orderLinkId", "parentOrderId", "parentOrderLinkId"):
+        value = str(order.get(key) or "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    return keys
+
+
+def _remember_ledger_context(keys: list[object], context: dict) -> None:
+    clean_context = {k: v for k, v in context.items() if v not in (None, "")}
+    if not clean_context:
+        return
+    for key in keys:
+        text = str(key or "").strip()
+        if text:
+            _ledger_context_by_key[text] = clean_context
+
+
+def _refresh_ledger_context_cache() -> None:
+    global _ledger_context_mtime, _ledger_context_by_key
+    try:
+        mtime = os.path.getmtime(TRADE_LEDGER_PATH)
+    except OSError:
+        return
+    if mtime == _ledger_context_mtime:
+        return
+    previous = _ledger_context_by_key
+    _ledger_context_by_key = {}
+    try:
+        with open(TRADE_LEDGER_PATH, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event_type = event.get("type")
+                if event_type == "signal":
+                    context = {
+                        "strategy": event.get("strategy"),
+                        "direction": event.get("direction"),
+                        "symbol": event.get("symbol"),
+                        "trade_id": event.get("order_link_id") or event.get("order_id"),
+                        "order_link_id": event.get("order_link_id"),
+                        "tg_message_id": event.get("tg_message_id"),
+                    }
+                    _remember_ledger_context(
+                        [event.get("order_id"), event.get("order_link_id")],
+                        context,
+                    )
+                    continue
+                if event_type != "fill" or not str(event.get("strategy") or "").strip():
+                    continue
+                raw = event.get("order_raw") if isinstance(event.get("order_raw"), dict) else {}
+                context = {
+                    "strategy": event.get("strategy"),
+                    "direction": event.get("direction"),
+                    "symbol": event.get("symbol"),
+                    "trade_id": event.get("trade_id") or event.get("entry_order_link_id"),
+                    "order_link_id": event.get("entry_order_link_id") or event.get("order_link_id"),
+                }
+                _remember_ledger_context(
+                    [
+                        event.get("order_id"),
+                        event.get("order_link_id"),
+                        event.get("entry_order_id"),
+                        event.get("entry_order_link_id"),
+                        event.get("trade_id"),
+                        raw.get("orderId"),
+                        raw.get("orderLinkId"),
+                        raw.get("parentOrderId"),
+                        raw.get("parentOrderLinkId"),
+                    ],
+                    context,
+                )
+        _ledger_context_mtime = mtime
+    except Exception as exc:
+        _ledger_context_by_key = previous
+        log.warning(f"Could not read trade ledger context {TRADE_LEDGER_PATH}: {exc}")
+
+
+def _lookup_ledger_context(order: dict) -> dict:
+    _refresh_ledger_context_cache()
+    for key in _order_context_keys(order):
+        context = _ledger_context_by_key.get(key)
+        if context:
+            return dict(context)
+    for key in _order_context_keys(order):
+        context = _strategy_from_order_link_id(key)
+        if context:
+            return context
+    return {}
+
 
 def _clean_stop_order_type(value: object) -> str:
     text = str(value or "").strip()
@@ -219,8 +342,11 @@ def _on_order(msg: dict) -> None:
             if len(_notified) > 1000:
                 _notified = set(list(_notified)[-500:])
 
-            # Enrich with trade context from shared active_trades.json
+            # active_trades.json can be cleared before this separate process sees
+            # the TP/SL fill, so prefer order-specific context from the ledger.
             trade          = _read_active_trades().get(symbol, {})
+            ledger_trade   = _lookup_ledger_context(order)
+            trade          = {**trade, **ledger_trade}
             strategy       = trade.get("strategy")
             direction      = trade.get("direction")
             tg_message_id  = trade.get("tg_message_id")  # reply-to the original signal message

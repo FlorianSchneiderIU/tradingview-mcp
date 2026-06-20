@@ -19,6 +19,17 @@ EMA_LEN       = 200;  SMA_LEN = 13;  ATR_LEN = 14
 VOL_WIN       = 20;   ATR_PCTILE_WIN = 100
 ATR_LO        = 10;   ATR_HI = 90;   VOL_THR = 1.05
 
+# Trading-cost defaults for sim_trail (per side, in basis points). Match the
+# live taker fee (bot.py TAKER_FEE_RATE=0.00055 = 5.5 bps) and the slippage
+# convention in scripts/backtest_wolfe_wave.py.
+DEFAULT_FEE_BPS_SIDE      = 5.5
+DEFAULT_SLIPPAGE_BPS_SIDE = 1.0
+
+# After TP1 fills, lock in this fraction of R on the runner instead of moving the
+# stop to pure breakeven. Pure breakeven let the runner give everything back,
+# which (with small tp1) made expectancy negative even at low stop-out rates.
+DEFAULT_LOCKIN_R = 0.3
+
 FEATURE_NAMES = [
     "atr_pctile", "vol_ratio",  "ema200_dist", "ema200_slope",
     "body_ratio",  "sma13_dist", "hour_utc",    "direction",
@@ -302,12 +313,30 @@ def extract_live_feature_vector(bars: list[dict],
 
 def sim_trail(close, high, low, sbull_raw, sbear_raw,
               atr14, atr_pct, vol_rat,
-              sl_mult, tp1_r, trail_mult, signal_mask=None):
-    """Identical to _sim_trail in million_moves_v43_multi.py."""
+              sl_mult, tp1_r, trail_mult, signal_mask=None,
+              fee_bps_side=0.0, slippage_bps_side=0.0, lockin_r=0.0):
+    """Identical to _sim_trail in million_moves_v43_multi.py, plus optional
+    round-trip trading-cost modeling.
+
+    fee_bps_side / slippage_bps_side default to 0.0 so existing callers keep
+    their costless behavior. When set, a round-trip cost (entry + exit, both
+    legs of fees and slippage) is deducted from each trade's R-multiple:
+
+        round_trip_rate = (2*fee_bps_side + 2*slippage_bps_side) / 10_000
+        cost_r          = round_trip_rate * entry_price / risk
+
+    Because cost_r scales inversely with `risk` (the stop distance in price),
+    tight-SL configs are penalized the most — which is exactly the live failure
+    mode. This mirrors the cost convention in scripts/backtest_wolfe_wave.py.
+    """
     n = len(close)
+    round_trip_rate = max(
+        (2.0 * float(fee_bps_side) + 2.0 * float(slippage_bps_side)) / 10_000.0,
+        0.0,
+    )
     r_list = []; trades = []
     active = False; is_long = False; entry = 0.0
-    sl_ = tp1 = 0.0; risk = 1.0
+    sl_ = tp1 = 0.0; risk = 1.0; cost_r = 0.0
     tp1_hit = False; trail_sl = 0.0; acc_r = 0.0; entry_i = 0
 
     for i in range(1, n):
@@ -316,47 +345,49 @@ def sim_trail(close, high, low, sbull_raw, sbear_raw,
         if active:
             if is_long:
                 if not tp1_hit and h_ >= tp1:
-                    acc_r += 0.5 * tp1_r; trail_sl = entry; tp1_hit = True
+                    acc_r += 0.5 * tp1_r; trail_sl = entry + lockin_r * risk; tp1_hit = True
                 if tp1_hit:
                     if not math.isnan(atr_):
                         cand = h_ - trail_mult * atr_
                         if cand > trail_sl: trail_sl = cand
                     if l_ <= trail_sl:
-                        tot = acc_r + 0.5 * max(0.0, (trail_sl - entry) / risk)
+                        tot = acc_r + 0.5 * max(0.0, (trail_sl - entry) / risk) - cost_r
                         r_list.append(tot)
                         trades.append({"entry_i": entry_i, "exit_i": i, "r": tot, "reason": "Trail"})
                         active = False; continue
                 else:
                     if l_ <= sl_:
-                        r_list.append(-1.0)
-                        trades.append({"entry_i": entry_i, "exit_i": i, "r": -1.0, "reason": "SL"})
+                        tot = -1.0 - cost_r
+                        r_list.append(tot)
+                        trades.append({"entry_i": entry_i, "exit_i": i, "r": tot, "reason": "SL"})
                         active = False
             else:
                 if not tp1_hit and l_ <= tp1:
-                    acc_r += 0.5 * tp1_r; trail_sl = entry; tp1_hit = True
+                    acc_r += 0.5 * tp1_r; trail_sl = entry - lockin_r * risk; tp1_hit = True
                 if tp1_hit:
                     if not math.isnan(atr_):
                         cand = l_ + trail_mult * atr_
                         if cand < trail_sl: trail_sl = cand
                     if h_ >= trail_sl:
-                        tot = acc_r + 0.5 * max(0.0, (entry - trail_sl) / risk)
+                        tot = acc_r + 0.5 * max(0.0, (entry - trail_sl) / risk) - cost_r
                         r_list.append(tot)
                         trades.append({"entry_i": entry_i, "exit_i": i, "r": tot, "reason": "Trail"})
                         active = False; continue
                 else:
                     if h_ >= sl_:
-                        r_list.append(-1.0)
-                        trades.append({"entry_i": entry_i, "exit_i": i, "r": -1.0, "reason": "SL"})
+                        tot = -1.0 - cost_r
+                        r_list.append(tot)
+                        trades.append({"entry_i": entry_i, "exit_i": i, "r": tot, "reason": "SL"})
                         active = False
 
         if active and is_long and sbear_raw[i]:
             rem = 0.5 if tp1_hit else 1.0
-            tot = acc_r + rem * (c_ - entry) / risk
+            tot = acc_r + rem * (c_ - entry) / risk - cost_r
             r_list.append(tot); trades.append({"entry_i": entry_i, "exit_i": i, "r": tot, "reason": "Rev"})
             active = False
         if active and not is_long and sbull_raw[i]:
             rem = 0.5 if tp1_hit else 1.0
-            tot = acc_r + rem * (entry - c_) / risk
+            tot = acc_r + rem * (entry - c_) / risk - cost_r
             r_list.append(tot); trades.append({"entry_i": entry_i, "exit_i": i, "r": tot, "reason": "Rev"})
             active = False
 
@@ -368,16 +399,18 @@ def sim_trail(close, high, low, sbull_raw, sbear_raw,
                 if signal_mask is not None and not signal_mask[i]: continue
                 sl_ = l_ - atr_ * sl_mult; risk = max(c_ - sl_, 1e-10)
                 entry = c_; is_long = True; tp1 = c_ + tp1_r * risk
+                cost_r = round_trip_rate * entry / risk
                 tp1_hit = False; trail_sl = sl_; acc_r = 0.0; active = True; entry_i = i
             elif sbear_raw[i]:
                 if signal_mask is not None and not signal_mask[i]: continue
                 sl_ = h_ + atr_ * sl_mult; risk = max(sl_ - c_, 1e-10)
                 entry = c_; is_long = False; tp1 = c_ - tp1_r * risk
+                cost_r = round_trip_rate * entry / risk
                 tp1_hit = False; trail_sl = sl_; acc_r = 0.0; active = True; entry_i = i
 
     if active:
         cl  = close[-1]; rem = 0.5 if tp1_hit else 1.0
-        tot = acc_r + rem * ((cl - entry) if is_long else (entry - cl)) / risk
+        tot = acc_r + rem * ((cl - entry) if is_long else (entry - cl)) / risk - cost_r
         r_list.append(tot)
         trades.append({"entry_i": entry_i, "exit_i": n - 1, "r": tot, "reason": "Open"})
 
