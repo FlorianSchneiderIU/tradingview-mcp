@@ -2,8 +2,10 @@ node_modules/
 screenshots/
 *.bsp
 bot/logs/
+bot/logs_dca/
 bot/.env
 bot/.env.funded
+bot/.env.dca
 bot/models/*.pkl
 scripts/current.pine
 scripts/.cache/

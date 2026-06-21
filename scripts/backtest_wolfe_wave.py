@@ -502,6 +502,11 @@ class WolfeConfig:
     max_favor_pos_htf: float = 1.0
     htf_extension_tf: str = "4h"
     htf_extension_lookback: int = 180
+    # DCA second leg at the stop (see docs/wolfe_dca_implementation_plan.md): when a
+    # trade would be stopped, add a leg at SL, retarget the combined position to the
+    # first entry E, and place a combined hard stop at SL - dca_stop_frac_k * R.
+    dca_enabled: bool = False
+    dca_stop_frac_k: float = 0.25
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> "WolfeConfig":
@@ -1586,8 +1591,49 @@ def run_backtest(
                     exit_idx, exit_price, exit_reason = idx, target, "target"
                     break
 
-        gross_r = (exit_price - entry) / risk if sig.direction == "long" else (entry - exit_price) / risk
-        net_r = gross_r - _cost_r(entry, risk, cfg)
+        if cfg.dca_enabled and exit_reason in ("stop", "stop_same_bar"):
+            # Path B: DCA leg2 fills at SL on bar exit_idx. Combined target = first
+            # entry E; combined hard stop = SL - k*R. Outcome in units of per-leg R:
+            #   bounce to E -> leg1 0 + leg2 +1R = +1R;  stop -> -(1+2k)R.
+            long = sig.direction == "long"
+            k = float(cfg.dca_stop_frac_k)
+            sl2 = stop - k * risk if long else stop + k * risk
+            sl_bar = exit_idx
+            cap = min(len(frame) - 1, sl_bar + max(1, int(cfg.max_hold_bars)))
+            combined_r = None
+            dca_idx = cap
+            dca_reason = "dca_timeout"
+            for m in range(sl_bar, cap + 1):
+                rowm = frame.iloc[m]
+                om = float(rowm["open"]); hm = float(rowm["high"]); lm = float(rowm["low"])
+                if long:
+                    btgt = hm >= entry; bstp = lm <= sl2
+                else:
+                    btgt = lm <= entry; bstp = hm >= sl2
+                if btgt and bstp:
+                    if high_before_low(om, hm, lm) == long:
+                        bstp = False
+                    else:
+                        btgt = False
+                if btgt:
+                    combined_r = 1.0; dca_reason = "dca_bounce"; dca_idx = m; break
+                if bstp:
+                    combined_r = -(1.0 + 2.0 * k); dca_reason = "dca_stop"; dca_idx = m; break
+            if combined_r is None:
+                cl = float(frame["close"].iloc[cap])
+                leg1 = (cl - entry) / risk if long else (entry - cl) / risk
+                leg2 = (cl - stop) / risk if long else (stop - cl) / risk
+                combined_r = leg1 + leg2
+            gross_r = combined_r
+            net_r = combined_r - 2.0 * _cost_r(entry, risk, cfg)
+            exit_idx = dca_idx
+            exit_reason = dca_reason
+            exit_price = (entry if dca_reason == "dca_bounce"
+                          else sl2 if dca_reason == "dca_stop"
+                          else float(frame["close"].iloc[dca_idx]))
+        else:
+            gross_r = (exit_price - entry) / risk if sig.direction == "long" else (entry - exit_price) / risk
+            net_r = gross_r - _cost_r(entry, risk, cfg)
         trades.append(
             WolfeTrade(
                 symbol=symbol,

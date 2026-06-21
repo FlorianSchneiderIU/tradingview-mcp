@@ -78,7 +78,15 @@ def fetch_missing(symbols, since):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default="2022-01-01")
+    ap.add_argument("--dca-k", type=float, default=0.0,
+                    help="If >0, enable DCA second leg with combined stop SL-(k*R).")
+    ap.add_argument("--out", default=OUT_PATH, help="Output config path.")
     args = ap.parse_args()
+    out_path = args.out
+    if args.dca_k > 0:
+        SHARED["dca_enabled"] = True
+        SHARED["dca_stop_frac_k"] = float(args.dca_k)
+        print(f"DCA ENABLED: k={args.dca_k} -> combined stop SL-{args.dca_k}R, target=first entry")
 
     dep = json.load(open(DEP_PATH))
     universe = [k for k in dep if not k.startswith("_")]
@@ -144,14 +152,16 @@ def main():
                               "validation": {k: round(v,3) for k,v in va_m.items()},
                               "oos_holdout": {k: round(v,3) for k,v in oo_m.items()}},
                "oos_holdout_included": {k: round(v,3) for k,v in inc_m.items()},
+               "dca_enabled": bool(SHARED.get("dca_enabled", False)),
+               "dca_stop_frac_k": SHARED.get("dca_stop_frac_k"),
                "fetch_failed": [s for s, _ in failed],
            }}
     for sym in include:
         e = dict(SHARED); e["mintick"] = dep[sym].get("mintick", 0.01)
         e["_oos_holdout"] = {k: round(v, 3) for k, v in per_sym[sym].items()}
         out[sym] = e
-    json.dump(out, open(OUT_PATH, "w"), indent=2, sort_keys=True)
-    print(f"\nwrote {OUT_PATH}: {len(include)} included symbols (of {len(used)} validated)")
+    json.dump(out, open(out_path, "w"), indent=2, sort_keys=True)
+    print(f"\nwrote {out_path}: {len(include)} included symbols (of {len(used)} validated)")
 
 
 if __name__ == "__main__":

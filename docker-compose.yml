@@ -165,6 +165,42 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Capitulation Spring strategy sidecar.
+  # Listens to Bybit 5m klines for a basket of perps, detects the deep-sweep
+  # Wyckoff spring + early-week + negative-funding-flush long setup, forwards
+  # accepted signals to the RL sidecar, and (when enabled) executes a scaled
+  # 4R/12R/30R exit on a separate Bybit Demo account. Execution OFF by default.
+  capitulation-spring-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python capitulation_spring_bot.py
+    container_name: capitulation-spring-bot
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env
+    depends_on:
+      - rl-exec-bot
+    environment:
+      LOG_DIR: /app/logs
+      CAPITULATION_LOG_DIR: /app/logs
+      CAPITULATION_LEDGER_PATH: /app/logs/capitulation_spring_signals.jsonl
+      CAPITULATION_RL_EXECUTION_URL: http://rl-exec-bot:8090/v1/signals
+      CAPITULATION_RL_EXECUTION_TIMEOUT_SECONDS: "1.0"
+      # Execute on DEMO by default (forward test the full fill/exit path). Provide demo
+      # keys via CAPITULATION_BYBIT_API_KEY/SECRET in bot/.env; if absent the bot
+      # degrades to signal+RL-forward only. Going LIVE requires CAPITULATION_BYBIT_DEMO
+      # =false AND CAPITULATION_LIVE_CONFIRM=true (guarded).
+      CAPITULATION_TRADING_ENABLED: "true"
+      CAPITULATION_BYBIT_DEMO: "true"
+    volumes:
+      - ./bot/logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Matrix signal listener/forwarder.
   # Joins a Matrix room, parses signal messages, and forwards them to the
   # matrix-dedicated RL sidecar for execution and reward handling.
@@ -289,3 +325,32 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ── Wolfe DCA bot (STANDALONE — separate Bybit Demo account) ────────────────
+  # Self-contained runner (bot/wolfe_dca_bot.py): reuses the shared Wolfe detection,
+  # executes + POLL-monitors the DCA second-leg structure entirely on its own. It
+  # never touches the production mm-bot's positions/state. Own demo account
+  # (bot/.env.dca), own ledger (bot/logs_dca/wolfe_dca_ledger.jsonl).
+  # Start with:  docker compose up -d --build wolfe-dca-bot
+  wolfe-dca-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python wolfe_dca_bot.py
+    container_name: wolfe-dca-bot
+    restart: unless-stopped
+    profiles: ["dca"]         # not started by a plain `up`; use `up -d wolfe-dca-bot`
+    env_file:
+      - ./bot/.env.dca        # SEPARATE demo account keys + settings (see .env.dca.example)
+    environment:
+      LOG_DIR: /app/logs
+      WOLFE_DCA_CONFIG_PATH: /app/configs/wolfe_wave_shared_v1_dca_configs.json
+      WOLFE_DCA_LEDGER_PATH: /app/logs/wolfe_dca_ledger.jsonl
+    volumes:
+      - ./bot/configs:/app/configs:ro
+      - ./bot/logs_dca:/app/logs        # ISOLATED ledger/state (separate from mm-bot)
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

@@ -113,6 +113,7 @@ def main() -> None:
             accepted += 1
         print(f"  {str(b['_t'])[:16]}  {sig.get('signal'):5} entry={sig.get('entry'):g} "
               f"score={score if score is None else round(float(score),1)} vs min_score={cfg.min_score:g}  "
+              f"exit_style={sig.get('exit_style')} dca_k={sig.get('dca_k')}  "
               f"rr={sig.get('target_rr_planned')}  -> {decision}"
               + (f"  [{sig.get('reject_reason')}]" if is_rej else ""))
 
