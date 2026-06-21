@@ -151,3 +151,51 @@ ltf_structure:
   rr_values: [10, 20, 30]
   excursion_rr: 60         # measure full max-R available
   near_low_window_bars: 288  # 'near a weekly low' = within +/- ~1 day (5m bars)
+
+# Multi-symbol deep-sweep-spring basket (breadth for ~1 setup/week).
+basket_spring:
+  interval: 15m
+  start: "2022-01-01"
+  end: "2026-06-01"
+  spring_lookback: 1440    # 15d on 15m (deep liquidity sweep); 2880 = 30d
+  wick_frac: 0.5
+  close_pos: 0.5
+  stop_buffer_atr: 0.05
+  max_hold_bars: 1344      # ~14 days on 15m
+  cost_bps_round_trip: 11.0
+  rr_values: [20, 30]
+  excursion_rr: 60
+  week_frac_max: 0.4       # early-week gate (use null to disable)
+
+# *** THE EDGE *** Capitulation Spring (run_basket_capitulation.py):
+# deep-sweep 15m Wyckoff spring (early-week) on any basket symbol, FILTERED to moments
+# of unusually negative funding (funding_z <= threshold = shorts crowded after a flush
+# = contrarian-bullish capitulation). ~1 trade/week, 20-30R, positive net of costs and
+# on the 2025+ holdout. Monotonic in funding_z; positive funding falsifies (loses).
+capitulation:
+  funding_z_thr: -1.0      # ~1.05 trades/wk, +0.48R@20R, holdout +0.91. Use -1.5 for
+                           # higher conviction (~0.66/wk, +0.72R, holdout +0.91).
+  oi_z_thr: -1.0           # OI-flush gate (weaker alone; funding is the signal)
+  oi_interval: 4h
+
+# When does the weekly low/high print within the week, and is it retested?
+weekly_timing:
+  interval: 15m
+  retest_tol_frac: 0.10    # retest = back within 10% of the weekly range of the extreme
+  move_away_frac: 0.25     # price must first leave the zone by 25% of the weekly range
+  min_week_bars: 400       # skip incomplete weeks (full = 672 fifteen-min bars)
+
+# Retest-entry strategy: long on the mid-week retest of the established weekly low.
+retest_strategy:
+  ltf_interval: 5m
+  spring_lookback: 288     # local spring sweep window (~1 day on 5m)
+  wick_frac: 0.5
+  close_pos: 0.5
+  move_away_pct: 0.015     # price must rally >=1.5% off the weekly low to 'establish' it
+  retest_tol_pct: 0.005    # retest = spring low within 0.5% of the established low
+  est_max_frac: 0.40       # only if the weekly low was established in the first 40% of week
+  stop_buffer_atr: 0.05
+  max_hold_bars: 4032      # ~14 days on 5m
+  cost_bps_round_trip: 11.0
+  rr_values: [20, 30]
+  excursion_rr: 60

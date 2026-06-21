@@ -41,6 +41,10 @@ def main() -> int:
     p.add_argument("--end", default=None)
     p.add_argument("--spring-lookback", type=int, default=None,
                    help="override: bars defining the swept low (e.g. 2016=7d, 8640=30d on 5m)")
+    p.add_argument("--week-frac-max", type=float, default=None,
+                   help="gate springs to the first fraction of the week (e.g. 0.4 = Mon-Wed)")
+    p.add_argument("--dows", default=None,
+                   help="gate springs to these days of week, e.g. '0,4' for Mon+Fri")
     p.add_argument("--outdir", type=Path, default=data.REPORTS_DIR)
     args = p.parse_args()
 
@@ -59,6 +63,18 @@ def main() -> int:
 
     _, lows, _ = lts.htf_pivots(daily, s["htf_threshold_atr"])
     spring = lts.spring_long_signals(ltf, s["spring_lookback"], s["wick_frac"], s["close_pos"])
+
+    # Optional time-of-week gate (the seasonal window from run_weekly_timing.py).
+    from astro_reversal import weekly_timing as wt
+    dow_arr, frac_arr = wt.time_of_week(ltf)
+    week_gate = np.ones(len(ltf), dtype=bool)
+    if args.week_frac_max is not None:
+        week_gate &= frac_arr < args.week_frac_max
+    if args.dows is not None:
+        keep = {int(x) for x in args.dows.split(",") if x.strip() != ""}
+        week_gate &= np.isin(dow_arr, list(keep))
+    spring = spring & week_gate
+
     near_low = lts.near_times_mask(ltf, [d["time"] for d in lows], s["near_low_window_bars"])
 
     masks = {
@@ -100,6 +116,8 @@ def main() -> int:
                    "spring_lookback": s["spring_lookback"], "stop_buffer_atr": s["stop_buffer_atr"],
                    "max_hold_bars": s["max_hold_bars"], "cost_bps_round_trip": s["cost_bps_round_trip"],
                    "rr_values": s["rr_values"], "near_low_window_bars": s["near_low_window_bars"],
+                   "spring_lookback": s["spring_lookback"],
+                   "week_frac_max": args.week_frac_max, "dows": args.dows,
                    "holdout_start": str(holdout_start)},
         "data": {"ltf_bars": len(ltf), "daily_bars": len(daily), "n_weekly_lows": len(lows),
                  "n_springs": int(spring.sum())},

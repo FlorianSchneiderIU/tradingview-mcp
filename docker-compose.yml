@@ -123,6 +123,9 @@ services:
       RL_WOLFE_CHECKPOINT_ENABLED: "true"
       RL_WOLFE_CHECKPOINT_CHAT_ID: "-1002342104003"
       RL_WOLFE_CHECKPOINTS: "50,150,200,300"
+      # Only count Wolfe closes from the HTF-gate deploy boundary onward, so the
+      # 50/150/200/300 checkpoints measure the gated strategy in isolation.
+      RL_WOLFE_CHECKPOINT_SINCE: "2026-06-21T05:26:00+00:00"
     volumes:
       - ./bot/logs/rl:/app/rl
     logging:

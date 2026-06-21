@@ -494,6 +494,14 @@ class WolfeConfig:
     v2_score_weight: float = 0.0
     research_quality_profile: str = "off"
     research_quality_mode: str = "shadow"
+    # HTF over-extension gate (validated in scripts/wolfe_mtf_research.py): skip
+    # entries where price is already stretched >= this fraction of its recent swing
+    # range on `htf_extension_tf`, in the trade's direction. 1.0 == gate off.
+    # Direction-aware: for a short, "stretched" = near the top of the range; for a
+    # long, near the bottom. Over-extended HTF reversals fail more often.
+    max_favor_pos_htf: float = 1.0
+    htf_extension_tf: str = "4h"
+    htf_extension_lookback: int = 180
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> "WolfeConfig":
@@ -1247,6 +1255,28 @@ def _target_from_epa(
     return round_to_mintick(target_raw, cfg.mintick), float(rr)
 
 
+def _htf_extension_context(exec_frame: pd.DataFrame, cfg: WolfeConfig):
+    """Build the HTF swing-position context used by the over-extension gate.
+
+    Returns (close_time_ns: np.ndarray, position: np.ndarray) on htf_extension_tf,
+    where position = (close - swing_low) / (swing_high - swing_low) over
+    htf_extension_lookback bars, or None when the gate is disabled. Uses completed
+    HTF bars only (the gate looks up the last bar with close_time <= entry_time).
+    """
+    if float(cfg.max_favor_pos_htf) >= 1.0:
+        return None
+    htf = resample_ohlc(exec_frame, normalize_timeframe(cfg.htf_extension_tf))
+    if htf.empty:
+        return None
+    L = max(int(cfg.htf_extension_lookback), 2)
+    hi = htf["high"].rolling(L, min_periods=max(10, L // 3)).max()
+    lo = htf["low"].rolling(L, min_periods=max(10, L // 3)).min()
+    rng = (hi - lo)
+    pos = ((htf["close"] - lo) / rng.where(rng > 1e-12, np.nan)).clip(0.0, 1.0)
+    ct = pd.to_datetime(htf["close_time"], utc=True).astype("int64").to_numpy()
+    return ct, pos.to_numpy(dtype=float)
+
+
 def _find_entry(
     *,
     symbol: str,
@@ -1256,6 +1286,7 @@ def _find_entry(
     exec_df: pd.DataFrame,
     exec_times: pd.DatetimeIndex | None,
     cfg: WolfeConfig,
+    htf_ctx=None,
 ) -> WolfeSignal | None:
     p5 = pivots[-1]
     if p5.confirm_idx >= len(pattern):
@@ -1270,6 +1301,17 @@ def _find_entry(
     for entry_idx in range(start, end + 1):
         row = exec_df.iloc[entry_idx]
         entry_time = pd.Timestamp(row["close_time"]).tz_convert("UTC")
+        # HTF over-extension gate: skip if price is already stretched in the
+        # trade's direction near the extreme of its recent HTF swing range.
+        if htf_ctx is not None:
+            ct_h, pos_h = htf_ctx
+            j = int(np.searchsorted(ct_h, entry_time.value, "right")) - 1
+            if j >= 0:
+                ph = pos_h[j]
+                if math.isfinite(ph):
+                    favor_pos = ph if direction == "short" else (1.0 - ph)
+                    if favor_pos >= float(cfg.max_favor_pos_htf):
+                        continue
         close = float(row["close"])
         x_seconds = timestamp_seconds(entry_time)
         line13 = line_value(line13_m, line13_b, x_seconds)
@@ -1391,6 +1433,7 @@ def find_wolfe_signals(
     pattern = add_indicators(pattern, cfg.atr_length, cfg.ema_length, cfg.rsi_length)
     pivots = find_pivots(pattern, cfg)
     exec_times = _exec_time_index(exec_frame)
+    htf_ctx = _htf_extension_context(exec_frame, cfg)
     signals: list[WolfeSignal] = []
     seen_entries: set[tuple[int, str]] = set()
 
@@ -1407,6 +1450,7 @@ def find_wolfe_signals(
             exec_df=exec_frame,
             exec_times=exec_times,
             cfg=cfg,
+            htf_ctx=htf_ctx,
         )
         if signal is None:
             continue

@@ -34,11 +34,15 @@ SHARED = {"allow_longs":True,"allow_shorts":True,"atr_length":14,"ema_length":20
 "one_trade_at_a_time":True,"pivot_confirm_window":3,"pivot_method":"fractal","pivot_source":"close",
 "pivot_window":12,"regime_filter":"none","require_reclaim":True,"require_reclaim_vs_p5":True,
 "risk_fraction":0.01,"rsi_length":14,"stop_atr_buffer":0.3,"target_projection_bars":30,
-"trend_filter":"rsi","zigzag_atr_mult":1.0}
+"trend_filter":"rsi","zigzag_atr_mult":1.0,
+# HTF over-extension gate (validated): skip reversals already stretched >=80% of the
+# recent 4h swing range in the trade direction. Lifts OOS WR/PF, keeps ~77% of signals.
+"max_favor_pos_htf":0.8,"htf_extension_tf":"4h","htf_extension_lookback":180}
 
 TRAIN_END = pd.Timestamp("2024-12-01", tz="UTC")
 VAL_END   = pd.Timestamp("2025-06-01", tz="UTC")
-MIN_HOLDOUT_TRADES = 10   # per-symbol inclusion floor on the held-out year
+MIN_HOLDOUT_TRADES = 10   # (reporting only) held-out trade count threshold
+MIN_TOTAL_TRADES   = 30   # per-symbol inclusion floor on TOTAL trades (whole period)
 
 
 def met(r):
@@ -83,7 +87,7 @@ def main():
     print(f"Fetched {len(fetched)} new, {len(failed)} failed.\n", flush=True)
 
     # Validate shared config across every universe symbol that now has data.
-    allt, per_sym = [], {}
+    allt, per_sym, per_sym_total = [], {}, {}
     used = []
     for sym in universe:
         path = os.path.join(DATA, f"{sym.lower()}_5m_bybit.csv")
@@ -100,6 +104,7 @@ def main():
                 allt.append(t)
                 oos = t[t.entry_time >= VAL_END]["r_multiple_net"]
                 per_sym[sym] = met(oos)
+                per_sym_total[sym] = len(t)
         except Exception as exc:  # noqa: BLE001
             print(f"  validate {sym} ERR {exc}", flush=True)
 
@@ -112,16 +117,17 @@ def main():
     for lbl, m in [("train(<24-12)", tr_m), ("val(24-12..25-06)", va_m), ("OOS held-out(>=25-06)", oo_m)]:
         print(f"  {lbl:24} n={m['n']:5d} win={m['win']:.1%} PF={m['pf']:.2f} avg_r={m['avg']:+.3f} netR={m['net']:+.1f}")
 
-    # Include by SAMPLE SIZE only (held-out trades >= floor). We deliberately do
-    # NOT filter by held-out sign: dropping symbols because they were negative in
-    # the holdout would contaminate the holdout (curve-fitting). A negative-on-
-    # holdout but fine-on-train symbol is kept; its negativity is treated as noise.
-    include = [s for s in used if per_sym.get(s, {}).get("n", 0) >= MIN_HOLDOUT_TRADES]
-    drop_thin = [s for s in used if per_sym.get(s, {}).get("n", 0) < MIN_HOLDOUT_TRADES]
-    drop_neg = [s for s in include if per_sym[s]["net"] <= 0]  # reported only, NOT dropped
-    print(f"\nper-symbol held-out: include={len(include)} (by sample>= {MIN_HOLDOUT_TRADES})  "
-          f"drop(thin)={len(drop_thin)}  [of included, {len(drop_neg)} happen to be net-neg on holdout, kept]")
-    print("  worst held-out symbols:", sorted(((per_sym[s]['net'], s) for s in used if per_sym.get(s,{}).get('n',0)>=MIN_HOLDOUT_TRADES))[:8])
+    # Include by TOTAL trade count (a symbol participates if it has enough trades
+    # over the whole period). We deliberately do NOT gate on the held-out window:
+    # filtering by held-out count or sign contaminates the holdout (curve-fitting),
+    # and would wrongly drop liquid majors (e.g. BTC) whose held-out frequency is
+    # low after the over-extension gate. Negative-on-holdout symbols are kept (noise).
+    include = [s for s in used if per_sym_total.get(s, 0) >= MIN_TOTAL_TRADES]
+    drop_thin = [s for s in used if per_sym_total.get(s, 0) < MIN_TOTAL_TRADES]
+    drop_neg = [s for s in include if per_sym.get(s, {}).get("net", 0) <= 0]  # reported only
+    print(f"\nper-symbol inclusion: include={len(include)} (by TOTAL trades>= {MIN_TOTAL_TRADES})  "
+          f"drop(thin)={len(drop_thin)}  [of included, {len(drop_neg)} net-neg on holdout, kept]")
+    print("  worst held-out symbols:", sorted(((per_sym[s]['net'], s) for s in include if s in per_sym))[:8])
 
     # Recompute pooled OOS restricted to the INCLUDE set (the deployable portfolio).
     inc_oos = pooled[(pooled.entry_time >= VAL_END) & (pooled.symbol.isin(include))]["r_multiple_net"]
@@ -131,7 +137,7 @@ def main():
     out = {"_quality_profile": {"mode": "shadow", "name": "wolfe_mtf_v1"},
            "_validation": {
                "method": "pooled walk-forward; held-out year >=2025-06 (incl. live-failure window)",
-               "selected_on": "shared params (not per-symbol); symbols included if held-out trades>=%d and net>0" % MIN_HOLDOUT_TRADES,
+               "selected_on": "shared params (not per-symbol); symbols included if TOTAL trades>=%d (held-out window not used for inclusion)" % MIN_TOTAL_TRADES,
                "universe_symbols": len(used),
                "included_symbols": len(include),
                "pooled_all": {"train": {k: round(v,3) for k,v in tr_m.items()},

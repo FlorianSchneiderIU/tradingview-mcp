@@ -112,6 +112,23 @@ WOLFE_CHECKPOINT_STATE_PATH = os.environ.get(
     os.path.join(LOG_DIR, "wolfe_quality_checkpoint_state.json"),
 )
 WOLFE_CHECKPOINTS = env_int_tuple("RL_WOLFE_CHECKPOINTS", (50, 150, 200, 300))
+
+
+def _parse_iso_utc(value: object) -> "datetime | None":
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+# Only count Wolfe closes completed at/after this UTC timestamp toward the
+# checkpoints. Set to the deploy boundary so 50/150/200/300 measure the NEW
+# (gated) strategy in isolation rather than mixing in pre-fix loose-config trades.
+WOLFE_CHECKPOINT_SINCE = _parse_iso_utc(os.environ.get("RL_WOLFE_CHECKPOINT_SINCE", ""))
 PRETRAIN_PATH = os.environ.get("RL_PRETRAIN_PATH", "").strip()
 PRETRAIN_ON_START = env_bool("RL_PRETRAIN_ON_START", False)
 EXECUTION_QUEUE_SIZE = env_int("RL_EXECUTION_QUEUE_SIZE", 2000)
@@ -469,6 +486,8 @@ def summarize_wolfe_quality_results(rows: list[dict[str, Any]]) -> dict[str, Any
     completed = sorted(str(row.get("completed_at") or "") for row in rows if row.get("completed_at"))
     return {
         "total": with_buckets(rows),
+        # Accepted-only = the main gated strategy (excludes RL-sidecar rejected trades).
+        "accepted": with_buckets([row for row in rows if row.get("source_status") == "accepted"]),
         "old": with_buckets([row for row in rows if row.get("strategy") == "wolfe_wave"]),
         "v2": with_buckets([row for row in rows if row.get("strategy") == "wolfe_wave_v2"]),
         "first_completed_at": completed[0] if completed else "",
@@ -1754,6 +1773,10 @@ class RLExecutionService:
                     result = wolfe_quality_result(row)
                     if result is None:
                         continue
+                    if WOLFE_CHECKPOINT_SINCE is not None:
+                        ts = _parse_iso_utc(result.get("completed_at"))
+                        if ts is not None and ts < WOLFE_CHECKPOINT_SINCE:
+                            continue
                     decision_id = str(result.get("decision_id") or "")
                     if decision_id and decision_id in self.wolfe_checkpoint_seen_ids:
                         continue
@@ -1795,6 +1818,7 @@ class RLExecutionService:
             300: "sizing review",
         }
         total = summary["total"]
+        accepted = summary["accepted"]
         old = summary["old"]
         v2 = summary["v2"]
         first_at = str(summary.get("first_completed_at") or "")
@@ -1823,6 +1847,7 @@ class RLExecutionService:
                 f"PnL {float(total.get('pnl', 0.0)):+.2f} USDT | "
                 f"A/R {int(total.get('accepted', 0))}/{int(total.get('rejected', 0))}"
             ),
+            strategy_line("Accepted (gated)", accepted),
             strategy_line("Old", old),
             escape(
                 "  "

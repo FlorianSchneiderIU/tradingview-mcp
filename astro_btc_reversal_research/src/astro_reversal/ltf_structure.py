@@ -57,6 +57,28 @@ def spring_long_signals(
     return spring.fillna(False).to_numpy(dtype=bool)
 
 
+def upthrust_short_signals(
+    frame: pd.DataFrame,
+    lookback: int,
+    wick_frac: float = 0.5,
+    close_pos: float = 0.5,
+) -> np.ndarray:
+    """Wyckoff upthrust (short): the mirror of a spring. Bar sweeps ABOVE the highest
+    high of the prior ``lookback`` bars then reclaims below it (close back under) with
+    a clear upper-wick rejection."""
+    low = frame["low"]
+    high = frame["high"]
+    close = frame["close"]
+    open_ = frame["open"]
+    prev_high = high.shift(1).rolling(lookback, min_periods=lookback).max()
+    sweep = (high > prev_high) & (close < prev_high)
+    rng = (high - low).replace(0.0, np.nan)
+    upper_wick = (high - np.maximum(open_, close)) / rng
+    closed_low = (high - close) / rng
+    up = sweep & (upper_wick >= wick_frac) & (closed_low >= close_pos)
+    return up.fillna(False).to_numpy(dtype=bool)
+
+
 def near_times_mask(frame: pd.DataFrame, times, window_bars: int) -> np.ndarray:
     """Mark bars within +/- window_bars of any timestamp in `times`."""
     n = len(frame)

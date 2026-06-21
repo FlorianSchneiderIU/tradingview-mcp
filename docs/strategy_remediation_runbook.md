@@ -173,6 +173,25 @@ Then paper-gate per Phase 4 before restoring size. If you instead keep the
 per-symbol `wolfe_wave_configs.json`, at minimum raise every `min_score=48`
 entry to >=58 — those loose symbols are the residual risk.
 
+### HTF over-extension gate (shipped improvement)
+
+MTF research (`scripts/wolfe_mtf_research.py`) tested whether RSI/fib context on
+15m/1h/4h/1d can cluster out losers. The user's "stretched = better" hypothesis was
+**refuted** — the data shows the opposite: Wolfe reversals fail MORE when price is
+already maximally extended on the higher timeframes (favor_pos_4h Q4 = PF 1.22 worst;
+mid-range = best). The validated fix is an **exclusion** gate, implemented in the
+shared `find_wolfe_signals` (`max_favor_pos_htf`, `htf_extension_tf`,
+`htf_extension_lookback`): skip entries where price is already >=80% of its recent
+4h swing range in the trade's direction.
+
+Held-out (>=2025-06) pooled, through the engine gate (not a post-hoc filter):
+PF 1.57 -> **1.68**, WR 45.4% -> **46.8%**, avg_r +0.34 -> **+0.40**, keeps ~77% of
+signals. For a slot-capped book (`MAX_OPEN=5`) that's a clear win — better setups fill
+the slots. Config regenerated with the gate (53 symbols; inclusion now by TOTAL trades
+>=30 so liquid majors like BTC aren't dropped when the gate thins their held-out
+count). Deployed via image rebuild (gate code in `scripts/backtest_wolfe_wave.py`) +
+restart; verified live: 53 symbols, BTC present, min_score 66, v2 off.
+
 ### v2 evaluated and rejected
 
 Ran the same pooled held-out pass with Wolfe's v2 structural scoring turned ON

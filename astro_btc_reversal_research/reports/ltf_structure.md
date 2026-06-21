@@ -1,15 +1,15 @@
 # Multi-TF Structure Edge: 5m Wyckoff Springs at Weekly Lows
 
 **BTCUSDT** LTF 5m / HTF 1d | 2021-01-01 -> 2026-06-01
-Weekly lows (daily zigzag >= 3.0 ATR): 55 | 5m springs: 333 | stop 0.05 ATR below spring | costs 11.0 bps RT | 'near low' = +/-288 5m bars.
+Weekly lows (daily zigzag >= 3.0 ATR): 55 | 5m springs: 78 | stop 0.05 ATR below spring | costs 11.0 bps RT | 'near low' = +/-288 5m bars.
 
 ## Max-R available after a spring (excursion pass)
 
 | Book | signals | avg MFE R | reach 5R | 10R | 20R | 30R |
 |---|---|---|---|---|---|---|
-| all_springs | 333 | 3.813 | 0.144 | 0.082 | 0.037 | 0.029 |
-| near_weekly_low | 66 | 8.625 | 0.240 | 0.200 | 0.140 | 0.100 |
-| away_from_low | 267 | 2.980 | 0.127 | 0.061 | 0.020 | 0.015 |
+| all_springs | 78 | 4.900 | 0.193 | 0.140 | 0.053 | 0.035 |
+| near_weekly_low | 17 | 11.590 | 0.308 | 0.308 | 0.154 | 0.154 |
+| away_from_low | 61 | 2.870 | 0.156 | 0.089 | 0.022 | 0.000 |
 
 ## Fixed-RR P&L net of costs (expectancy = avg R)
 
@@ -17,25 +17,25 @@ Weekly lows (daily zigzag >= 3.0 ATR): 55 | 5m springs: 333 | stop 0.05 ATR belo
 
 | Book | Trades | Win rate | Avg R | Net R | PF | MaxDD R | Holdout avg R |
 |---|---|---|---|---|---|---|---|
-| all_springs | 246 | 0.089 | -0.331 | -81.4 | 0.710 | -80.3 | -0.361 |
-| near_weekly_low | 50 | 0.220 | 1.034 | 51.7 | 2.069 | -11.3 | 2.488 |
-| away_from_low | 199 | 0.065 | -0.579 | -115.2 | 0.506 | -114.1 | -0.750 |
+| all_springs | 57 | 0.140 | 0.329 | 18.8 | 1.318 | -14.7 | 0.624 |
+| near_weekly_low | 13 | 0.308 | 2.037 | 26.5 | 3.234 | -5.1 | 3.893 |
+| away_from_low | 45 | 0.089 | -0.198 | -8.9 | 0.816 | -19.1 | -0.382 |
 
 ### Target 20R
 
 | Book | Trades | Win rate | Avg R | Net R | PF | MaxDD R | Holdout avg R |
 |---|---|---|---|---|---|---|---|
-| all_springs | 245 | 0.078 | -0.040 | -9.8 | 0.966 | -54.2 | 0.280 |
-| near_weekly_low | 50 | 0.220 | 2.719 | 135.9 | 3.812 | -11.3 | 5.818 |
-| away_from_low | 198 | 0.051 | -0.545 | -107.9 | 0.543 | -109.4 | -0.471 |
+| all_springs | 57 | 0.123 | 0.760 | 43.3 | 1.720 | -24.2 | 1.616 |
+| near_weekly_low | 13 | 0.308 | 4.125 | 53.6 | 5.524 | -5.1 | 8.049 |
+| away_from_low | 45 | 0.067 | -0.255 | -11.5 | 0.768 | -30.1 | -0.363 |
 
 ### Target 30R
 
 | Book | Trades | Win rate | Avg R | Net R | PF | MaxDD R | Holdout avg R |
 |---|---|---|---|---|---|---|---|
-| all_springs | 245 | 0.073 | 0.123 | 30.2 | 1.106 | -56.4 | 0.621 |
-| near_weekly_low | 50 | 0.220 | 3.419 | 170.9 | 4.536 | -11.3 | 7.318 |
-| away_from_low | 198 | 0.045 | -0.499 | -98.9 | 0.583 | -116.9 | -0.215 |
+| all_springs | 57 | 0.105 | 0.743 | 42.3 | 1.690 | -27.8 | 2.205 |
+| near_weekly_low | 13 | 0.308 | 5.663 | 73.6 | 7.211 | -5.1 | 10.549 |
+| away_from_low | 45 | 0.044 | -0.722 | -32.5 | 0.360 | -31.3 | -0.363 |
 
 ## Reading guide
 
