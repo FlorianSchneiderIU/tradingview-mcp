@@ -134,3 +134,20 @@ strategy:
   require_displacement: true
   disp_body_atr: 0.5       # reclaim candle body >= this * ATR
   disp_close_frac: 0.5     # reclaim candle closes in the top half of its range
+
+# Multi-TF structure study: 5m Wyckoff springs around weekly lows, 1:20-1:30 RR.
+ltf_structure:
+  ltf_interval: 5m
+  htf_interval: 1d
+  htf_threshold_atr: 3.0   # daily zigzag -> 'weekly' pivots (~14d cadence)
+  spring_lookback: 4320    # 5m bars defining the swept low. TRADEABLE EDGE needs a
+                           # DEEP sweep: 4320=15d (avgR>0, holdout +0.6@30R), 8640=30d
+                           # (avgR +0.44@30R). 288=1d shows NO edge - depth is the signal.
+  wick_frac: 0.5           # spring lower-wick fraction (rejection)
+  close_pos: 0.5           # spring closes in the top half of its range
+  stop_buffer_atr: 0.05    # stop just below the spring low (tight)
+  max_hold_bars: 4032      # let a runner develop up to ~14 days (5m bars)
+  cost_bps_round_trip: 11.0
+  rr_values: [10, 20, 30]
+  excursion_rr: 60         # measure full max-R available
+  near_low_window_bars: 288  # 'near a weekly low' = within +/- ~1 day (5m bars)

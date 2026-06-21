@@ -16,14 +16,30 @@ sweep+reclaim of a significant prior low with a displacement candle (the "reacti
 enter with a tight stop below the swept low, and target a high RR. It reports the full
 R-distribution, fixed-RR P&L net of costs, gated-vs-ungated, per-year + holdout.
 
-**Result: no tradeable edge.** Net-negative at every RR and every year; the dump gate
-makes it *worse* than sweeps alone (knife-catching), and the Moon-Pluto overlay adds
-nothing. The reason is structural, not a tuning artifact: after the trigger only ~31%
-of setups reach 2R and ~19% reach 3R (avg MFE ≈ avg MAE), so expectancy
-≈ 0.31·2 − 0.69 ≈ −0.07 at 2R *before* costs — negative at any target/stop. BTC daily
-bottom-catching via dumps + LTF sweeps did not carry positive expectancy in 2021–2026.
-The harness (and its R-distribution diagnostic) is reusable to vet any future trigger;
-the one component with measured lift remains the M3 **price-only** probability model.
+That 1h/2-5R version finds **no edge** (net-negative every year; the dump gate makes it
+worse). But that frontier was wrong: 2-5R needs a ~33% win rate. The real approach is
+**1m/5m precision** — a tiny stop and a *weekly-swing* target, i.e. 1:20-1:30 RR, which
+only needs a ~5-8% win rate.
+
+`run_ltf_structure.py` tests that: HTF weekly pivots (daily zigzag) + **5m Wyckoff
+springs** (sweep of a significant low + reclaim with rejection), tight stop below the
+spring, measured to 10/20/30R. Findings (2021-2026, costs incl.):
+
+- Springs in general have **no edge** (avg R < 0 at every RR) — same as the 1h test.
+- Springs **at a weekly low** run to 20R far more often (9.7% vs 5.0%) and are strongly
+  positive (+1.5R avg @20R, positive in 4/5 years) — but "weekly low" there is hindsight.
+- The **tradeable, real-time version**: require the spring to sweep a **deep
+  (15-30 day) low** — a major liquidity grab that *is* the weekly-low proxy. This is
+  net-positive with a clean monotonic dose-response in sweep depth: 30R avg R goes
+  −0.20 (4d) → +0.12 (15d) → +0.44 (30d), with holdout (2025+) avg R +0.5-0.6.
+  `run_ltf_structure.py --spring-lookback 8640`.
+
+So there **is** a high-RR edge, and it matches the trader: time the weekly low via a
+deep liquidity sweep, confirm with a 5m Wyckoff spring, tiny stop, 20-30R target. It is
+fat-tailed (~8% win rate, PF 1.2-1.4, modest sample), so size small and expect long
+droughts. A generic ML model over structural features (`run_spring_model.py`) did NOT
+beat random at finding these springs — **sweep depth itself is the one feature that
+carries the signal.** The astro/Dark-Pivot timing remains useless and is not part of this.
 
 ## The core question (precision, not classification)
 
@@ -158,6 +174,8 @@ src/astro_reversal/
   calendar_search.py          # PRIMARY: event-study calendar precision + conditional search
   dark_pivot_replica.py       # faithful replication of the public 'Dark Pivot' claim
   strategy.py                 # M4 dump gate + LTF sweep/reclaim long backtest engine
+  ltf_structure.py            # weekly pivots + 5m Wyckoff springs (the EDGE lives here)
+  spring_model.py             # real-time features + reach-20R labels for the spring model
   features_ml.py              # M3 price features + ablation feature-sets
   labels_ml.py                # M3 forward bottom/top/pivot-within-N targets
   walk_forward.py             # M3 expanding folds + embargo + holdout split
@@ -171,6 +189,8 @@ run_calendar_search.py        # calendar precision search CLI (primary)
 run_conditional_calendar.py   # astro + price-context (dump->bottom / pump->top) search
 run_dark_pivot_replica.py     # replicate public "Dark Pivot 77%" claim vs base rate
 run_reversal_strategy.py      # M4 high-RR dump->sweep long backtest (costs, holdout)
+run_ltf_structure.py          # 5m Wyckoff springs at weekly lows -> the high-RR edge
+run_spring_model.py           # walk-forward model to find weekly-low springs in real time
 run_pivot_diagnostic.py       # pivot count/cadence/base-rate sweep
 tests/                        # aspect events, pivots, stats, walk-forward, calendar, no-leakage
 reports/                      # generated artifacts
