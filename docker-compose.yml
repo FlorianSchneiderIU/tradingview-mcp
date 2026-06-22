@@ -119,7 +119,7 @@ services:
       RL_REWARDS_PATH: /app/rl/rewards.jsonl
       RL_TRAINING_EXAMPLES_PATH: /app/rl/training_examples.jsonl
       RL_ALLOW_REVERSE_ACTIONS: "true"
-      RL_RISK_MULTIPLIERS: "session_orb_judas_fvg:rejected=0.35,session_orb_judas_fvg:accepted=0.70,million_moves=0.50,wolfe_wave:rejected=0.70,wolfe_wave_v2:rejected=0.70"
+      RL_RISK_MULTIPLIERS: "million_moves=0.50,wolfe_wave:rejected=0.70,wolfe_wave_v2:rejected=0.70"
       RL_WOLFE_CHECKPOINT_ENABLED: "true"
       RL_WOLFE_CHECKPOINT_CHAT_ID: "-1002342104003"
       RL_WOLFE_CHECKPOINTS: "50,150,200,300"
@@ -312,6 +312,75 @@ services:
       - ./bot/configs:/app/configs:ro
       - ./bot/models:/app/models:rw
 
+  # ── Bybit liquidity heatmap service ─────────────────────────────────────────
+  # Streams order books over WebSocket for the fixed HEATMAP_SYMBOLS universe
+  # (set in bot/.env.heatmap), aggregates each book into a price-bin x time
+  # heatmap + depth bands, and persists both to a SQLite DB on the shared
+  # ./bot/heatmap_data bind mount (survives restarts AND rebuilds). Other bots
+  # read it over the compose network, e.g.
+  #   http://heatmap-bot:8110/v1/heatmap/BTCUSDT/latest
+  # Public market data only — no API keys needed.
+  heatmap-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python heatmap_bot.py
+    container_name: heatmap-bot
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env.heatmap
+    environment:
+      # NOTE: HEATMAP_SYMBOLS is intentionally NOT set here so the fixed universe
+      # comes from bot/.env.heatmap (compose `environment` would override env_file).
+      HEATMAP_API_HOST: 0.0.0.0
+      HEATMAP_API_PORT: "8110"
+      HEATMAP_DB_PATH: /app/data/heatmap.db
+      HEATMAP_CONFIG_PATH: /app/configs/heatmap_configs.json
+      HEATMAP_DEPTH: "200"
+      HEATMAP_SNAPSHOT_INTERVAL_SECONDS: "10"
+      HEATMAP_RETENTION_HOURS: "168"
+      LOG_DIR: /app/logs
+    ports:
+      - "8110:8110"
+    volumes:
+      - ./bot/configs:/app/configs:ro
+      # Named volume (lives on the Docker VM's fast ext4 fs, not the slow host bind
+      # mount) — persists across rebuilds & restarts; removed only by `down -v`.
+      - heatmap_data:/app/data
+      - ./bot/logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── Heatmap Telegram bot ────────────────────────────────────────────────────
+  # Long-polls Telegram. When a WHITELISTED user id asks for a universe coin
+  # (e.g. "/heatmap BTCUSDT" or just "BTC"), it fetches that coin's 2D grid from
+  # heatmap-bot's REST API, renders it to a PNG, and replies with the image.
+  # Talks only to Telegram + heatmap-bot (no Bybit / no exchange access).
+  heatmap-telegram-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python heatmap_telegram_bot.py
+    container_name: heatmap-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - ./bot/.env.heatmap
+    environment:
+      HEATMAP_API_URL: http://heatmap-bot:8110
+      LOG_DIR: /app/logs
+    depends_on:
+      - heatmap-bot
+    volumes:
+      - ./bot/logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   relay-bot:
     build:
       context: ./relay
@@ -354,3 +423,8 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+# Named volumes — persist across container rebuilds/restarts; survive `down`,
+# removed only by `docker compose down -v`.
+volumes:
+  heatmap_data:    # heatmap-bot SQLite DB (fast Docker-VM fs; shared via the REST API)

@@ -200,18 +200,30 @@ class DcaExecutor:
         self._detect_idx()
         self.enabled = True
         threading.Thread(target=self._poller, name="wolfe-dca-poller", daemon=True).start()
-        log.info("Execution ENABLED on Bybit %s (%s mode, long_idx=%d short_idx=%d)",
-                 "DEMO" if TRADING_DEMO else "LIVE", "hedge" if HEDGE_MODE else "one-way",
+        log.info("Execution ENABLED on Bybit %s (%s mode detected, long_idx=%d short_idx=%d)",
+                 "DEMO" if TRADING_DEMO else "LIVE", "hedge" if self.long_idx == 1 else "one-way",
                  self.long_idx, self.short_idx)
 
     def _detect_idx(self) -> None:
-        try:
-            rows = self.http.get_positions(category=CATEGORY, settleCoin="USDT").get("result", {}).get("list", [])
+        # Probe by SYMBOL (not settleCoin): get_positions(symbol=...) returns the position
+        # slot(s) reflecting the account's mode even with NO open position — one-way -> a
+        # single row with positionIdx 0; hedge -> rows with idx 1 and 2. (settleCoin only
+        # returns OPEN positions, so on a fresh account it's empty and detection is blind.)
+        for probe in ("BTCUSDT", "ETHUSDT"):
+            try:
+                rows = self.http.get_positions(category=CATEGORY, symbol=probe).get("result", {}).get("list", [])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("position-mode probe %s failed: %s", probe, exc)
+                continue
             pidxs = {int(r.get("positionIdx", 0)) for r in rows}
+            if not pidxs:
+                continue
             if pidxs == {0}:
                 self.long_idx = self.short_idx = 0
-        except Exception as exc:  # noqa: BLE001
-            log.warning("position-mode detect failed (%s); using HEDGE_MODE=%s", exc, HEDGE_MODE)
+            elif 1 in pidxs or 2 in pidxs:
+                self.long_idx, self.short_idx = 1, 2
+            return
+        log.warning("position-mode auto-detect inconclusive; falling back to HEDGE_MODE=%s", HEDGE_MODE)
 
     def _info(self, symbol: str) -> dict[str, Any]:
         if symbol not in self.info_cache:
@@ -313,12 +325,24 @@ class DcaExecutor:
                 "sl2": sl2, "target_t": t_lvl, "leg2_id": leg2_id}
 
     def _ensure_leverage(self, symbol: str, max_lev: float) -> None:
-        try:
-            self.http.set_leverage(category=CATEGORY, symbol=symbol,
-                                   buyLeverage=qty_to_str(max_lev), sellLeverage=qty_to_str(max_lev))
-        except Exception as exc:  # noqa: BLE001
-            if "not modified" not in str(exc).lower():
-                log.debug("[%s] set_leverage: %s", symbol, exc)
+        # Leverage is only an enabler — we size by risk, so the exact value doesn't matter,
+        # it just has to be high enough for our (small) notional and accepted by the account.
+        # The instrument's leverageFilter.maxLeverage can exceed the account's risk-limit /
+        # demo cap ("leverage higher than max"), so try max then fall back to lower values
+        # until one is accepted. NEVER block the trade on a leverage failure.
+        candidates = sorted({min(c, max_lev) for c in (max_lev, 25.0, 10.0, 5.0) if min(c, max_lev) >= 1.0},
+                            reverse=True)
+        for lev in candidates:
+            try:
+                self.http.set_leverage(category=CATEGORY, symbol=symbol,
+                                       buyLeverage=qty_to_str(lev), sellLeverage=qty_to_str(lev))
+                return
+            except Exception as exc:  # noqa: BLE001
+                if "not modified" in str(exc).lower() or "110043" in str(exc):
+                    return                                   # already at this leverage — fine
+                continue                                     # too high for the account — try lower
+        log.warning("[%s] could not set leverage (tried %s); proceeding at current leverage",
+                    symbol, candidates)
 
     def _tg(self, lines: list[str]) -> None:
         if self.telegram is not None:

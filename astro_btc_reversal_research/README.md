@@ -162,6 +162,28 @@ deep-sweep *first touch* (a V-bottom: sweep + immediate reclaim → run) is the 
 waiting for a retest filters those out and keeps the weaker lows that break. On BTC
 2021-2026, weekly-low retests break more often than they hold at tight-stop precision.
 
+### Fibonacci in time + price (no edge)
+
+`run_fib_time.py` / `run_fib_confluence.py` test whether a pivot/spring at a Fibonacci
+*time* projection (swing-ratio level) and/or *price* level (retracement/extension of the
+prior swing) outperforms — with the decisive control being a **matched non-Fibonacci
+placebo** (ordinary ratios). Result: **no Fibonacci-specific effect**. Swing-ratio
+Fib-time lift (~1.12) is *equal to* the non-Fib placebo (~1.14, fib-vs-nonfib p≈0.80);
+on the 5m spring, `fib_both` (time AND price) reach-20R = `nonfib_both` (0.40 vs 0.40).
+The apparent `fib_zone` lift is an artifact of small offsets (1,2,3,5,8) hugging the
+anchor pivot.
+
+Re-tested on the trader's terms (absolute profitability, scaled exit net of costs, no
+placebo as the criterion — just "is the double-Fib subset profitable and better than
+trading every spring?"): on BTC alone fib_both looked good in-sample (+0.52R) but its
+holdout was breakeven on 15 trades. Across the 18-symbol basket (4,745 springs, 299
+fib_both holdout trades) fib_both is **breakeven, not profitable** — avg R −0.03,
+holdout +0.04. It is the best of the Fib books and modestly better than unfiltered
+springs (−0.16), so the confluence is a mild quality nudge, but it does not reach
+profitability on its own, and the BTC positive was small-sample luck. Conclusion holds
+whether you use the placebo control or pure profitability: Fib time/price/confluence is
+not a tradeable edge; the reversal edge stays the deep-sweep spring + funding flush.
+
 ### Do prior weeks predict this week's window? (no)
 
 `run_weekly_sequence.py` tests whether conditioning on the previous 1-3 weeks'

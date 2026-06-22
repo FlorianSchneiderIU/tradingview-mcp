@@ -1,0 +1,72 @@
+{
+  "_comment": "Tunables for heatmap_bot.py (3-layer Bybit liquidity/liquidation service). Every key can be overridden by the matching HEATMAP_* env var (env wins). The tracked universe is the fixed HEATMAP_SYMBOLS list from bot/.env.heatmap; leave `symbols` empty here unless pinning it in this file.",
+  "_layers": {
+    "1_orderbook": "Observable order-book resting liquidity. WS L2 book, binned around mid, with a lifetime filter (ob_min_lifetime_seconds) to drop spoof levels.",
+    "2_actual": "Real Bybit allLiquidation prints (ground truth). Stored as events.",
+    "3_predictive": "Coinglass-style estimate: per candle, dOI sizes new notional, split long/short by taker-imbalance proxy, spread over leverage buckets; liq prices off MARK price; cohorts decay on dOI<0 and are consumed when mark price crosses them. Computed per timeframe.",
+    "4_volume_profile": "Buy/sell (delta) volume profile from the publicTrade stream (taker buy vs sell notional per geometric price bin, hourly buckets). Seeded from klines (total only). Windows: rolling 4h/24h/7d + session-anchored daily/weekly. Yields POC, value area, HVNs, and delta-dominant long/short levels."
+  },
+  "_fields": {
+    "leverages": "Leverage buckets for the predictive model.",
+    "leverage_weights": "Relative weight per bucket (normalized). Must match leverages length.",
+    "maintenance_margin_rate": "Approx maintenance margin used in the liq-price formula.",
+    "use_open_interest": "true = size new positions from dOI (preferred); false = use candle turnover.",
+    "ob_min_lifetime_seconds": "Order-book levels younger than this are treated as spoof and excluded.",
+    "timeframes": "Predictive timeframes: interval (kline), oi_interval (open-interest), lookback_hours."
+  },
+  "symbols": [],
+  "universe_size": 50,
+
+  "orderbook_enabled": true,
+  "depth": 200,
+  "ob_snapshot_interval_seconds": 10,
+  "ob_bin_bps": 5.0,
+  "ob_range_pct": 0.02,
+  "ob_min_lifetime_seconds": 3.0,
+  "ob_retention_hours": 72,
+
+  "liquidations_enabled": true,
+  "liq_retention_hours": 720,
+
+  "predictive_enabled": true,
+  "leverages": [2, 3, 5, 10, 20, 25, 50, 75, 100],
+  "leverage_weights": [0.05, 0.07, 0.12, 0.22, 0.24, 0.12, 0.10, 0.05, 0.03],
+  "maintenance_margin_rate": 0.005,
+  "use_open_interest": true,
+  "pred_bin_pct": 0.001,
+  "pred_update_interval_seconds": 60,
+  "timeframes": {
+    "5m": {"interval": "5", "oi_interval": "5min", "lookback_hours": 72},
+    "15m": {"interval": "15", "oi_interval": "15min", "lookback_hours": 168},
+    "1h": {"interval": "60", "oi_interval": "1h", "lookback_hours": 720}
+  },
+
+  "volume_profile_enabled": true,
+  "vp_bin_pct": 0.0015,
+  "vp_retention_hours": 192,
+  "vp_seed_hours": 168,
+  "vp_value_area": 0.70,
+  "vp_top_levels": 8,
+
+  "calibration_enabled": true,
+  "calibration_interval_hours": 24,
+  "calib_window_hours": 72,
+  "calib_tf": "5m",
+  "calib_min_events": 200,
+  "calib_prior_strength": 300,
+  "calib_forget": 1.0,
+
+  "alerts_enabled": true,
+  "alert_interval_seconds": 15,
+  "cascade_window_seconds": 60,
+  "cascade_min_usd": 1000000,
+  "cascade_cooldown_seconds": 300,
+  "proximity_pct": 0.005,
+  "proximity_cooldown_seconds": 1800,
+  "watchdog_enabled": true,
+  "watchdog_stale_seconds": 120,
+
+  "api_host": "0.0.0.0",
+  "api_port": 8110,
+  "top_magnets": 40
+}

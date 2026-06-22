@@ -3,9 +3,11 @@ screenshots/
 *.bsp
 bot/logs/
 bot/logs_dca/
+bot/heatmap_data/
 bot/.env
 bot/.env.funded
 bot/.env.dca
+bot/.env.heatmap
 bot/models/*.pkl
 scripts/current.pine
 scripts/.cache/

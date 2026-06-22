@@ -1,0 +1,126 @@
+{
+  "config": {
+    "symbol": "BTCUSDT",
+    "timeframe": "1d",
+    "window_bars": 3,
+    "pivot_threshold_atr": 3.0,
+    "n_pivots": 111,
+    "baseline_hit": 0.352376137512639,
+    "holdout_start": "2025-01-01 00:00:00+00:00"
+  },
+  "data": {
+    "bars": 1978
+  },
+  "books": {
+    "fib_ratio": {
+      "n_events": 466,
+      "hit_rate": 0.3798283261802575,
+      "baseline_hit": 0.352376137512639,
+      "lift": 1.0779059242246045,
+      "coverage": 0.8008088978766431,
+      "binomial_p": 0.11698676104757742,
+      "random_p": 0.0979020979020979,
+      "null_mean": 0.35318025751072957,
+      "holdout_n_events": 125,
+      "holdout_hit_rate": 0.4,
+      "holdout_baseline": 0.3539651837524178,
+      "holdout_lift": 1.1300546448087432,
+      "hits": 177
+    },
+    "fib_ratio_ex1": {
+      "n_events": 379,
+      "hit_rate": 0.39313984168865435,
+      "baseline_hit": 0.352376137512639,
+      "lift": 1.1156823627835843,
+      "coverage": 0.7249747219413549,
+      "binomial_p": 0.054815949766652515,
+      "random_p": 0.03796203796203796,
+      "null_mean": 0.35187071240105544,
+      "holdout_n_events": 102,
+      "holdout_hit_rate": 0.4019607843137255,
+      "holdout_baseline": 0.3539651837524178,
+      "holdout_lift": 1.1355941283617272,
+      "hits": 149
+    },
+    "repeat_1x": {
+      "n_events": 108,
+      "hit_rate": 0.39814814814814814,
+      "baseline_hit": 0.352376137512639,
+      "lift": 1.1298953185610288,
+      "coverage": 0.32204246713852375,
+      "binomial_p": 0.18486725956996766,
+      "random_p": 0.1888111888111888,
+      "null_mean": 0.35101851851851845,
+      "holdout_n_events": 27,
+      "holdout_hit_rate": 0.4444444444444444,
+      "holdout_baseline": 0.3539651837524178,
+      "holdout_lift": 1.2556162720097146,
+      "hits": 43
+    },
+    "nonfib_ratio": {
+      "n_events": 816,
+      "hit_rate": 0.4007352941176471,
+      "baseline_hit": 0.352376137512639,
+      "lift": 1.13723731960503,
+      "coverage": 0.9140546006066734,
+      "binomial_p": 0.0023131442535661343,
+      "random_p": 0.000999000999000999,
+      "null_mean": 0.3519436274509804,
+      "holdout_n_events": 220,
+      "holdout_hit_rate": 0.39545454545454545,
+      "holdout_baseline": 0.3539651837524178,
+      "holdout_lift": 1.1172131147540982,
+      "hits": 327
+    },
+    "fib_zone": {
+      "n_events": 1029,
+      "hit_rate": 0.467444120505345,
+      "baseline_hit": 0.352376137512639,
+      "lift": 1.326548737962084,
+      "coverage": 0.9858442871587462,
+      "binomial_p": 2.1769625950756717e-14,
+      "random_p": 0.000999000999000999,
+      "null_mean": 0.352754130223518,
+      "holdout_n_events": 269,
+      "holdout_hit_rate": 0.45353159851301117,
+      "holdout_baseline": 0.3539651837524178,
+      "holdout_lift": 1.2812887236679058,
+      "hits": 481
+    },
+    "nonfib_zone": {
+      "n_events": 1072,
+      "hit_rate": 0.30970149253731344,
+      "baseline_hit": 0.352376137512639,
+      "lift": 0.8788946230111995,
+      "coverage": 0.9646107178968655,
+      "binomial_p": 0.9985760687302866,
+      "random_p": 1.0,
+      "null_mean": 0.35295522388059697,
+      "holdout_n_events": 283,
+      "holdout_hit_rate": 0.33568904593639576,
+      "holdout_baseline": 0.3539651837524178,
+      "holdout_lift": 0.9483674139295989,
+      "hits": 332
+    },
+    "random": {
+      "n_events": 466,
+      "hit_rate": 0.34549356223175964,
+      "baseline_hit": 0.352376137512639,
+      "lift": 0.9804681005658832,
+      "coverage": 0.8412537917087968,
+      "binomial_p": 0.6388089033617512,
+      "random_p": 0.6613386613386614,
+      "null_mean": 0.35318025751072957,
+      "holdout_n_events": 106,
+      "holdout_hit_rate": 0.29245283018867924,
+      "holdout_baseline": 0.3539651837524178,
+      "holdout_lift": 0.826219197855449,
+      "hits": 161
+    }
+  },
+  "fib_vs_placebo_pvalues": {
+    "fib_ex1_vs_nonfib_ratio": 0.8029012402194287,
+    "fib_ex1_vs_repeat_1x": 0.9251439856866446,
+    "fib_ex1_vs_random": 0.15292863503040088
+  }
+}
