@@ -224,6 +224,8 @@ CASCADE_MIN_USD = _cfg("cascade_min_usd", "HEATMAP_CASCADE_MIN_USD", 1_000_000.0
 CASCADE_COOLDOWN_S = _cfg("cascade_cooldown_seconds", "HEATMAP_CASCADE_COOLDOWN_SECONDS", 300, int)
 PROX_PCT = _cfg("proximity_pct", "HEATMAP_PROXIMITY_PCT", 0.005, float)
 PROX_COOLDOWN_S = _cfg("proximity_cooldown_seconds", "HEATMAP_PROXIMITY_COOLDOWN_SECONDS", 1800, int)
+PROX_MIN_LAYERS = _cfg("proximity_min_layers", "HEATMAP_PROXIMITY_MIN_LAYERS", 2, int)  # require confluence
+PROX_EXIT_FACTOR = _cfg("proximity_exit_factor", "HEATMAP_PROXIMITY_EXIT_FACTOR", 1.8, float)  # hysteresis
 WATCHDOG_ENABLED = _cfg("watchdog_enabled", "HEATMAP_WATCHDOG_ENABLED", True, _as_bool)
 WATCHDOG_STALE_S = _cfg("watchdog_stale_seconds", "HEATMAP_WATCHDOG_STALE_SECONDS", 120, int)
 WATCHDOG_COOLDOWN_S = _cfg("watchdog_cooldown_seconds", "HEATMAP_WATCHDOG_COOLDOWN_SECONDS", 600, int)
@@ -551,7 +553,8 @@ class HeatmapService:
     # ── websockets (L1 + L2) ──────────────────────────────────────────────────--
     def start_ws(self) -> None:
         if self.ws is None:
-            self.ws = WebSocket(testnet=TESTNET, channel_type=CATEGORY)
+            # ping_timeout=None stops the "ping/pong timed out" reconnect flapping
+            self.ws = WebSocket(testnet=TESTNET, channel_type=CATEGORY, ping_timeout=None)
 
     def subscribe_ws(self) -> None:
         self.start_ws()
@@ -1715,6 +1718,7 @@ class HeatmapService:
         conn = self._connect(read_only=True)
         last_cascade: dict[str, int] = {}
         last_prox: dict[tuple[int, str], int] = {}
+        prox_zone: dict[tuple[int, str], float] = {}  # level price we're currently parked near (edge-trigger state)
         while not self.stop.is_set():
             self.stop.wait(ALERT_INTERVAL_S)
             if self.stop.is_set():
@@ -1747,19 +1751,32 @@ class HeatmapService:
                 watches = []
             for w in watches:
                 key = (w["uid"], w["symbol"])
-                if now - last_prox.get(key, 0) < PROX_COOLDOWN_S * 1000:
-                    continue
                 try:
-                    lv = self.levels(w["symbol"], "1h", "24h", n=8)
+                    lv = self.levels(w["symbol"], "1h", "24h", n=10)
                     price = lv.get("last_price")
                     if not price:
                         continue
-                    for L in lv["levels"]:
-                        if abs(L["price"] / price - 1) <= PROX_PCT:
-                            tg_send(f"🎯 {w['symbol']} {price:g} → approaching {L['price']:g} "
-                                    f"({(L['price']/price-1)*100:+.2f}%) [{','.join(L['types'])}]", [w["uid"]])
-                            last_prox[key] = now
-                            break
+                    # only confluence levels (>= PROX_MIN_LAYERS) within the band qualify
+                    near = [L for L in lv["levels"]
+                            if L.get("layers", 1) >= PROX_MIN_LAYERS and abs(L["price"] / price - 1) <= PROX_PCT]
+                    cur = min(near, key=lambda L: abs(L["price"] / price - 1)) if near else None
+                    parked = prox_zone.get(key)
+                    if cur is None:
+                        # re-arm once price has clearly left the parked zone (hysteresis)
+                        if parked is not None and abs(price / parked - 1) > PROX_PCT * PROX_EXIT_FACTOR:
+                            prox_zone.pop(key, None)
+                        continue
+                    same_zone = parked is not None and abs(cur["price"] / parked - 1) <= PROX_PCT * 0.5
+                    if same_zone:
+                        continue  # already alerted for this zone; wait until price leaves & returns
+                    prox_zone[key] = cur["price"]
+                    if now - last_prox.get(key, 0) < PROX_COOLDOWN_S * 1000:
+                        continue  # cooldown floor against rapid zone-hopping
+                    d = (cur["price"] / price - 1) * 100
+                    verb = "at" if abs(d) < 0.05 else "approaching"
+                    tg_send(f"🎯 {w['symbol']} {price:g} {verb} {_fmt_price(cur['price'])} "
+                            f"({d:+.2f}%) [{','.join(cur['types'])}] x{cur['layers']}", [w["uid"]])
+                    last_prox[key] = now
                 except Exception:  # noqa: BLE001
                     log.exception("proximity alert failed %s", w["symbol"])
 

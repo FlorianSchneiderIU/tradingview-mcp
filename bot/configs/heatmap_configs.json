@@ -63,6 +63,8 @@
   "cascade_cooldown_seconds": 300,
   "proximity_pct": 0.005,
   "proximity_cooldown_seconds": 1800,
+  "proximity_min_layers": 2,
+  "proximity_exit_factor": 1.8,
   "watchdog_enabled": true,
   "watchdog_stale_seconds": 120,
 
