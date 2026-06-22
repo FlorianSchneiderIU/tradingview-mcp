@@ -1275,6 +1275,7 @@ class HeatmapService:
             conn.close()
         history = [{"ts": r["ts"], "tf": r["tf"], "n_events": r["n_events"],
                     "n_explained": r["n_explained"], "explained_frac": r["explained_frac"],
+                    "hit_rate": round(r["n_explained"] / r["n_events"], 4) if r["n_events"] else 0.0,
                     "applied": bool(r["applied"]), "weights": json.loads(r["weights_json"])}
                    for r in rows]
         return {"success": True, "enabled": CALIB_ENABLED, "interval_hours": CALIB_INTERVAL_HOURS,
@@ -1564,6 +1565,129 @@ class HeatmapService:
         return {"success": True, "symbol": symbol, "tf": tf, "window": window,
                 "last_price": last_price, "levels": levels[:n]}
 
+    # ── CVD, market-structure snapshot, cross-symbol screener ─────────────────────
+    def _ticker(self, symbol: str) -> dict[str, Any]:
+        try:
+            t = self.http.get_tickers(category=CATEGORY, symbol=symbol)
+            lst = (t.get("result", {}) or {}).get("list", []) or []
+            return lst[0] if lst else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def cvd(self, symbol: str, window: str):
+        """Cumulative volume delta series (taker buy-sell), hourly, with close price."""
+        if window not in VP_WINDOWS:
+            window = "24h"
+        conn = self._connect(read_only=True)
+        try:
+            ws = vp_window_start(window, now_ms())
+            rows = conn.execute(
+                "SELECT hour_bucket AS h, SUM(delta) AS d, SUM(total) AS t FROM vp_buckets "
+                "WHERE symbol=? AND hour_bucket>=? GROUP BY hour_bucket ORDER BY hour_bucket",
+                (symbol, ws)).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return None
+        try:
+            ohlc = self.fetch_ohlc(symbol, "60", ws)
+        except Exception:  # noqa: BLE001
+            ohlc = []
+        close_by = {o[0]: o[4] for o in ohlc}
+        cum = 0.0
+        series = []
+        for r in rows:
+            cum += r["d"] or 0.0
+            series.append({"ts": r["h"], "net_delta": r["d"] or 0.0, "cvd": cum, "close": close_by.get(r["h"])})
+        return {"success": True, "symbol": symbol, "window": window, "series": series, "ohlc": ohlc}
+
+    def structure(self, symbol: str):
+        """One decision-ready market-structure snapshot combining all layers."""
+        lv = self.levels(symbol, "1h", "24h", n=20)
+        price = lv.get("last_price")
+        levels = lv.get("levels", [])
+        below = [L for L in levels if price and L["price"] < price]
+        above = [L for L in levels if price and L["price"] > price]
+        support = max(below, key=lambda L: L["price"]) if below else None
+        resistance = min(above, key=lambda L: L["price"]) if above else None
+        strongest = max(levels, key=lambda L: L["score"]) if levels else None
+
+        em = self.estimated_magnets(symbol, "1h") or {}
+        mags = em.get("magnets", [])
+        lmag = sum(m["magnitude"] for m in mags if m["side"] == "long")
+        smag = sum(m["magnitude"] for m in mags if m["side"] == "short")
+        skew = (lmag - smag) / (lmag + smag) if (lmag + smag) > 0 else 0.0
+
+        cv = self.cvd(symbol, "24h")
+        series = cv["series"] if cv else []
+        cvd_now = series[-1]["cvd"] if series else 0.0
+        cvd_half = series[len(series) // 2]["cvd"] if len(series) > 3 else 0.0
+
+        conn = self._connect(read_only=True)
+        try:
+            vr = conn.execute("SELECT SUM(delta) d, SUM(total) t FROM vp_buckets WHERE symbol=? AND hour_bucket>=?",
+                              (symbol, vp_window_start("24h", now_ms()))).fetchone()
+        finally:
+            conn.close()
+        vt = (vr["t"] or 0.0) if vr else 0.0
+        vd = (vr["d"] or 0.0) if vr else 0.0
+        vol_imb = vd / vt if vt else 0.0
+
+        tk = self._ticker(symbol)
+        funding = float(tk.get("fundingRate") or 0.0) if tk else 0.0
+        oi_usd = float(tk.get("openInterestValue") or 0.0) if tk else 0.0
+        bias = ("bullish" if vol_imb > 0.05 and (cvd_now - cvd_half) > 0
+                else "bearish" if vol_imb < -0.05 and (cvd_now - cvd_half) < 0 else "neutral")
+
+        def sl(L):
+            return None if not L else {"price": L["price"], "distance_pct": L["distance_pct"],
+                                       "types": L["types"], "score": L["score"]}
+
+        return {
+            "success": True, "symbol": symbol, "last_price": price, "bias": bias,
+            "cvd_24h": round(cvd_now, 2), "cvd_recent_12h": round(cvd_now - cvd_half, 2),
+            "volume_imbalance": round(vol_imb, 4),
+            "nearest_support": sl(support), "nearest_resistance": sl(resistance),
+            "strongest_level": sl(strongest),
+            "liquidation_skew": {
+                "long_notional": round(lmag, 2), "short_notional": round(smag, 2), "skew": round(skew, 3),
+                "lean": ("longs vulnerable (downside liq)" if skew > 0.1
+                         else "shorts vulnerable (upside liq)" if skew < -0.1 else "balanced")},
+            "funding_rate": funding, "open_interest_usd": oi_usd,
+            "levels": levels[:6],
+        }
+
+    def screener(self, metric: str, n: int):
+        """Rank the universe by a market-structure metric."""
+        metric = (metric or "liq").lower()
+        conn = self._connect(read_only=True)
+        try:
+            with self.state_lock:
+                symbols = list(self.universe)
+            ws24 = vp_window_start("24h", now_ms())
+            h1 = now_ms() - 3_600_000
+            out = []
+            for sym in symbols:
+                vr = conn.execute("SELECT SUM(delta) d, SUM(total) t FROM vp_buckets WHERE symbol=? AND hour_bucket>=?",
+                                  (sym, ws24)).fetchone()
+                d = (vr["d"] or 0.0) if vr else 0.0
+                t = (vr["t"] or 0.0) if vr else 0.0
+                lr = conn.execute(
+                    "SELECT SUM(notional) n, SUM(CASE WHEN pos_side='long' THEN notional ELSE -notional END) s "
+                    "FROM liq_events WHERE symbol=? AND ts>=?", (sym, h1)).fetchone()
+                liq = (lr["n"] or 0.0) if lr else 0.0
+                liqskew = (lr["s"] or 0.0) if lr else 0.0
+                out.append({"symbol": sym, "cvd_24h": round(d, 2), "vol_24h": round(t, 2),
+                            "vol_imbalance": round(d / t, 4) if t else 0.0,
+                            "liq_1h": round(liq, 2), "liq_skew_1h": round(liqskew, 2)})
+        finally:
+            conn.close()
+        keyf = {"liq": lambda x: x["liq_1h"], "cvd": lambda x: x["cvd_24h"],
+                "imbalance": lambda x: abs(x["vol_imbalance"]), "volume": lambda x: x["vol_24h"]}.get(
+            metric, lambda x: x["liq_1h"])
+        out.sort(key=keyf, reverse=True)
+        return {"success": True, "metric": metric, "count": len(out), "results": out[:n]}
+
     # ── watch subscriptions (for proximity alerts) ────────────────────────────────
     def set_watch(self, uid: int, symbol: str, add: bool) -> dict[str, Any]:
         conn = self._connect()
@@ -1731,6 +1855,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except (ValueError, IndexError):
                     uid = 0
                 return self._send_json(HTTPStatus.OK, svc.get_watches(uid))
+            # Market-structure snapshot, CVD series, cross-symbol screener
+            if len(parts) == 3 and parts[0] == "v1" and parts[1] == "structure":
+                return self._send_json(HTTPStatus.OK, svc.structure(parts[2].upper()))
+            if len(parts) == 3 and parts[0] == "v1" and parts[1] == "cvd":
+                window = (qs.get("window", ["24h"])[0] or "24h").strip()
+                payload = svc.cvd(parts[2].upper(), window)
+                return self._send_json(HTTPStatus.OK if payload else HTTPStatus.NOT_FOUND,
+                                       payload or {"success": False, "error": "no cvd data"})
+            if parts == ["v1", "screener"]:
+                try:
+                    n = int(qs.get("n", ["20"])[0])
+                except (ValueError, IndexError):
+                    n = 20
+                return self._send_json(HTTPStatus.OK, svc.screener(qs.get("metric", ["liq"])[0], n))
             # Reusable OHLC for price overlays: /v1/ohlc/{symbol}?interval=&start=&hours=
             if len(parts) == 3 and parts[0] == "v1" and parts[1] == "ohlc":
                 interval = (qs.get("interval", ["60"])[0] or "60").strip()

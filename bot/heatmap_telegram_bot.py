@@ -209,6 +209,10 @@ def _dt(ms_list) -> list[datetime]:
     return [datetime.fromtimestamp(t / 1000.0, tz=timezone.utc) for t in ms_list]
 
 
+def _fmt_ts(ms) -> str:
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).strftime("%m-%d %H:%M")
+
+
 def _draw_candles(ax, ohlc, pspan):
     """Overlay OHLC candlesticks (cyan up / grey down) on a date×price axis.
     Returns (xmin, xmax) in date-num coords, or (None, None) if nothing drawn."""
@@ -454,6 +458,63 @@ def render_volume(symbol: str, window: str, prof: dict[str, Any], heat: dict[str
     return buf.read()
 
 
+def render_cvd(symbol: str, window: str, data: dict[str, Any]) -> Optional[bytes]:
+    """Price (candles) above, cumulative volume delta (filled green/red) below, with a
+    simple price/CVD divergence flag in the title."""
+    series = data.get("series") or []
+    if len(series) < 3:
+        return None
+    ts = [s["ts"] for s in series]
+    cvd = np.array([s["cvd"] for s in series], dtype=float)
+    tnum = mdates.date2num(_dt(ts))
+    ohlc = data.get("ohlc") or []
+
+    fig = plt.figure(figsize=(11, 6), dpi=110)
+    fig.patch.set_facecolor("#0e1117")
+    gs = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.06)
+    axp = fig.add_subplot(gs[0])
+    axc = fig.add_subplot(gs[1], sharex=axp)
+    for ax in (axp, axc):
+        ax.set_facecolor("#0e1117")
+        ax.tick_params(colors="#bbb", labelsize=8)
+        for sp in ax.spines.values():
+            sp.set_color("#444")
+
+    if ohlc:
+        pmin = min(o[3] for o in ohlc); pmax = max(o[2] for o in ohlc)
+        _draw_candles(axp, ohlc, pmax - pmin)
+        axp.set_ylim(pmin, pmax)
+    else:
+        axp.plot(tnum, [s["close"] for s in series], color="#58e0ff", lw=1.0)
+
+    axc.plot(tnum, cvd, color="#e6edf3", lw=1.0)
+    axc.fill_between(tnum, cvd, 0, where=cvd >= 0, color="#26a269", alpha=0.4, interpolate=True)
+    axc.fill_between(tnum, cvd, 0, where=cvd < 0, color="#c01c28", alpha=0.4, interpolate=True)
+    axc.axhline(0, color="#666", lw=0.6)
+
+    valid = [(i, s["close"]) for i, s in enumerate(series) if s["close"]]
+    div = ""
+    if len(valid) >= 4:
+        mid, last = valid[len(valid) // 2], valid[-1]
+        if last[1] > mid[1] and cvd[last[0]] < cvd[mid[0]]:
+            div = "  ⚠ bearish divergence (price↑ CVD↓)"
+        elif last[1] < mid[1] and cvd[last[0]] > cvd[mid[0]]:
+            div = "  ⚠ bullish divergence (price↓ CVD↑)"
+
+    axp.set_title(f"{symbol}  price + CVD ({window}){div}  (UTC)", color="#eee", fontsize=11)
+    axp.set_ylabel("Price", color="#ddd")
+    axc.set_ylabel("CVD", color="#ddd")
+    plt.setp(axp.get_xticklabels(), visible=False)
+    axc.xaxis_date()
+    axc.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=timezone.utc))
+    fig.autofmt_xdate(rotation=30)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
 # ── command handling ─────────────────────────────────────────────────────────────
 HELP = (
     "Bybit market-structure bot — for our universe coins.\n"
@@ -463,6 +524,10 @@ HELP = (
     "  /liquidity SYM                  order-book resting liquidity\n"
     "  /volume SYM [4h|24h|7d|daily|weekly]   volume footprint + profile (default 24h)\n"
     "  /levels SYM [tf]                key levels across all layers (text, ⭐ = confluence)\n"
+    "  /structure SYM                  market-structure snapshot (bias, S/R, skew, funding, OI)\n"
+    "  /cvd SYM [window]               price + cumulative volume delta (divergence flag)\n"
+    "  /screener [liq|cvd|imbalance|volume]   rank the universe\n"
+    "  /score                          predictive calibration / hit-rate history\n"
     "  /watch SYM · /unwatch SYM · /watches   proximity alerts for a coin\n"
     "  /coins                          list tracked universe\n"
     "\n"
@@ -594,6 +659,83 @@ def handle_text(chat_id: int, uid: int, text: str, message_id: int) -> None:
         return tg_send_message(chat_id, f"Watching: {', '.join(w) or '(none)'}\n"
                                "Cascade alerts fire for all coins; proximity alerts only for watched ones.",
                                reply_to=message_id)
+
+    if cmd == "structure":
+        sym_raw = parts[1] if len(parts) > 1 else None
+        if not sym_raw:
+            return tg_send_message(chat_id, "usage: /structure SYM", reply_to=message_id)
+        symbol = resolve_symbol(sym_raw)
+        if symbol is None:
+            return tg_send_message(chat_id, f"'{sym_raw}' is not tracked.", reply_to=message_id)
+        try:
+            d = requests.get(f"{API_URL}/v1/structure/{symbol}", timeout=HTTP_TIMEOUT).json()
+        except Exception as exc:  # noqa: BLE001
+            return tg_send_message(chat_id, f"structure error: {exc}", reply_to=message_id)
+        if not d.get("success"):
+            return tg_send_message(chat_id, f"no structure for {symbol} yet", reply_to=message_id)
+        price = d.get("last_price")
+        sk = d.get("liquidation_skew") or {}
+
+        def fl(L):
+            return f"{L['price']:g} ({L['distance_pct']:+.2f}%, {','.join(L['types'])})" if L else "—"
+
+        oi = (d.get("open_interest_usd") or 0) / 1e6
+        lines = [f"{symbol} structure" + (f"  (price {price:g})" if price else ""),
+                 f"  bias: {d.get('bias')}",
+                 f"  resistance: {fl(d.get('nearest_resistance'))}",
+                 f"  support:    {fl(d.get('nearest_support'))}",
+                 f"  liq skew: {sk.get('skew')} — {sk.get('lean')}",
+                 f"  vol imbalance 24h: {d.get('volume_imbalance')}  · CVD24h: {d.get('cvd_24h')}",
+                 f"  funding: {d.get('funding_rate')}  · OI: ${oi:.0f}M"]
+        return tg_send_message(chat_id, "\n".join(lines), reply_to=message_id)
+
+    if cmd == "screener":
+        metric = parts[1].lower() if len(parts) > 1 else "liq"
+        try:
+            d = requests.get(f"{API_URL}/v1/screener", params={"metric": metric, "n": 12}, timeout=HTTP_TIMEOUT).json()
+        except Exception as exc:  # noqa: BLE001
+            return tg_send_message(chat_id, f"screener error: {exc}", reply_to=message_id)
+        res = d.get("results", [])
+        lines = [f"Screener — top by {d.get('metric')} (liq=1h liquidations, imb/cvd=24h):"]
+        for r in res[:12]:
+            lines.append(f"  {r['symbol']:<11} liq ${r['liq_1h']/1e6:>5.1f}M  imb {r['vol_imbalance']:+.2f}  "
+                         f"cvd ${r['cvd_24h']/1e6:+.1f}M")
+        return tg_send_message(chat_id, "\n".join(lines) if res else "no screener data yet", reply_to=message_id)
+
+    if cmd == "score":
+        try:
+            d = requests.get(f"{API_URL}/v1/calibration", timeout=HTTP_TIMEOUT).json()
+        except Exception as exc:  # noqa: BLE001
+            return tg_send_message(chat_id, f"score error: {exc}", reply_to=message_id)
+        hist = d.get("history", [])
+        lines = [f"Predictive calibration ({d.get('method')}, concentration {d.get('concentration')}):"]
+        if not hist:
+            lines.append("  no runs yet — accrues daily as liquidation prints build up")
+        for h in hist[:8]:
+            lines.append(f"  {_fmt_ts(h['ts'])}  hit_rate {h.get('hit_rate')}  capture {h.get('explained_frac')}  "
+                         f"n={h.get('n_events')}  applied={h.get('applied')}")
+        lev = d.get("leverages", []); cw = d.get("current_weights", [])
+        lines.append("  weights: " + ", ".join(f"{int(l)}x:{w}" for l, w in zip(lev, cw)))
+        return tg_send_message(chat_id, "\n".join(lines), reply_to=message_id)
+
+    if cmd == "cvd":
+        sym_raw, _l, _tf, window = parse_args(parts[1:])
+        if not sym_raw:
+            return tg_send_message(chat_id, "usage: /cvd SYM [window]", reply_to=message_id)
+        symbol = resolve_symbol(sym_raw)
+        if symbol is None:
+            return tg_send_message(chat_id, f"'{sym_raw}' is not tracked.", reply_to=message_id)
+        tg_send_action(chat_id)
+        try:
+            d = requests.get(f"{API_URL}/v1/cvd/{symbol}", params={"window": window}, timeout=HTTP_TIMEOUT).json()
+        except Exception as exc:  # noqa: BLE001
+            return tg_send_message(chat_id, f"cvd error: {exc}", reply_to=message_id)
+        png = render_cvd(symbol, window, d) if d.get("success") else None
+        if png is None:
+            return tg_send_message(chat_id, f"not enough CVD data for {symbol} yet", reply_to=message_id)
+        tg_send_photo(chat_id, png, f"{symbol} — CVD ({window})", reply_to=message_id)
+        log.info("served %s/cvd window=%s to uid=%s", symbol, window, uid)
+        return
 
     if cmd in CMD_TO_LAYER:                       # dedicated per-layer command
         sym_raw, _lyr, tf, window = parse_args(parts[1:])
