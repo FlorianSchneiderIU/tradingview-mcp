@@ -73,6 +73,7 @@ POLL_SECONDS  = int(os.environ.get("WOLFE_DCA_POLL_SECONDS", "10"))
 WS_STALE_SECONDS = int(os.environ.get("WOLFE_DCA_WS_STALE_SECONDS", "900"))
 WS_CHUNK      = int(os.environ.get("WOLFE_DCA_WS_CHUNK", "20"))   # symbols per WS shard
 HEARTBEAT_SECONDS = int(os.environ.get("WOLFE_DCA_HEARTBEAT_SECONDS", "3600"))
+DIAG_SECONDS  = int(os.environ.get("WOLFE_DCA_DIAG_SECONDS", "300"))   # feed-health diagnostic cadence
 
 LOG_DIR    = Path(os.environ.get("WOLFE_DCA_LOG_DIR", os.environ.get("LOG_DIR", "/app/logs")))
 LEDGER_PATH = Path(os.environ.get("WOLFE_DCA_LEDGER_PATH", str(LOG_DIR / "wolfe_dca_ledger.jsonl")))
@@ -473,7 +474,11 @@ class WolfeDcaBot:
         self.ws_connections: list[WebSocket] = []
         self.last_ws_ts = time.time()
         self.last_heartbeat = 0.0
+        self.last_diag = 0.0
         self.processed: set[str] = set()
+        self._bars_seen = 0          # confirmed bars pushed -> evaluated
+        self._candidates = 0         # detect_signal returned a (non-None) candidate
+        self._rejected = 0           # candidates the gate rejected
 
     def start(self) -> None:
         log.info("Wolfe DCA bot: %d symbols, config=%s, exec=%s, max_concurrent=%d, risk=%.2f%%",
@@ -488,6 +493,10 @@ class WolfeDcaBot:
             if HEARTBEAT_SECONDS > 0 and now - self.last_heartbeat >= HEARTBEAT_SECONDS:
                 log.info("Heartbeat: open=%d/%d exec=%s", self.executor.open_count(), MAX_CONCURRENT, TRADING_ENABLED)
                 self.last_heartbeat = now
+            if DIAG_SECONDS > 0 and now - self.last_diag >= DIAG_SECONDS:
+                log.info("Feed diag: bars_evaluated=%d candidates=%d rejected=%d (cumulative; last_ws %.0fs ago)",
+                         self._bars_seen, self._candidates, self._rejected, now - self.last_ws_ts)
+                self.last_diag = now
             if WS_STALE_SECONDS > 0 and now - self.last_ws_ts > WS_STALE_SECONDS:
                 raise SystemExit(f"No Bybit public WS message for {WS_STALE_SECONDS}s")
             time.sleep(1)
@@ -539,6 +548,7 @@ class WolfeDcaBot:
             self.processed.add(key)
             if len(self.processed) > 4000:
                 self.processed = set(sorted(self.processed)[-2000:])
+            self._bars_seen += 1
             threading.Thread(target=self._evaluate, args=(sym,), daemon=True).start()
         except Exception:
             log.exception("kline callback error")
@@ -549,7 +559,16 @@ class WolfeDcaBot:
                 return
             state = self.states[symbol]
             sig = self.engine.detect_signal(state)
-            if sig is None or sig.get("rejected"):
+            if sig is None:
+                return
+            self._candidates += 1
+            if sig.get("rejected"):
+                self._rejected += 1
+                log.info("REJECTED %s %s score=%.1f -- %s", symbol, sig.get("signal"),
+                         float(sig.get("score", 0.0)), sig.get("reject_reason", "?"))
+                self.telegram.send([f"<b>[WOLFE DCA] {symbol} {str(sig.get('signal')).upper()} rejected</b> "
+                                    f"score <code>{fmt(sig.get('score'), 1)}</code> — "
+                                    f"<code>{sig.get('reject_reason', '?')}</code>"])
                 return
             cfg = self.configs[symbol]
             k = float(getattr(cfg, "dca_stop_frac_k", DEFAULT_K) or DEFAULT_K)
