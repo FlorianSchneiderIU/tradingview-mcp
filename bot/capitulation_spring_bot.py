@@ -83,7 +83,15 @@ RISK_PCT = float(os.environ.get("CAPITULATION_RISK_PCT", "0.005"))            # 
 RISK_USDT = float(os.environ.get("CAPITULATION_RISK_USDT", "50"))
 MAX_CONCURRENT = int(os.environ.get("CAPITULATION_MAX_CONCURRENT", "4"))
 TAKER_FEE_RATE = float(os.environ.get("CAPITULATION_TAKER_FEE_RATE", os.environ.get("TAKER_FEE_RATE", "0.00055")))
-MIN_STOP_DISTANCE_PCT = float(os.environ.get("CAPITULATION_MIN_STOP_DISTANCE_PCT", "0.0005"))
+MIN_STOP_DISTANCE_PCT = float(os.environ.get("CAPITULATION_MIN_STOP_DISTANCE_PCT", "0.002"))   # hard floor on stop distance (% of entry)
+# Reject when taker fees (entry + stop exit) would exceed this fraction of per-unit risk.
+# Tight "spring" stops make fees dominate R; at 0.18% stop fees are ~60% of risk, and the
+# median historical signal sits at ~0.51. 0.40 (~0.27% min stop) is the binding lever here.
+MAX_FEE_TO_RISK = float(os.environ.get("CAPITULATION_MAX_FEE_TO_RISK", "0.40"))
+# Hard ceiling on a single position's notional (USDT); 0 -> no cap. Caps qty after risk sizing
+# so a tight stop can't open an oversized position. Legs are also split to the exchange's
+# per-order market max, so the position can still exceed one order's max_qty.
+MAX_NOTIONAL_USDT = float(os.environ.get("CAPITULATION_MAX_NOTIONAL_USDT", "0"))
 
 # Funding cache + housekeeping.
 FUNDING_TTL_SECONDS = int(os.environ.get("CAPITULATION_FUNDING_TTL_SECONDS", "1800"))
@@ -349,6 +357,7 @@ class ScaledExecutor:
             self.info_cache[symbol] = {
                 "status": str(item.get("status", "")),
                 "qty_step": float(lot.get("qtyStep", "0.001")), "min_qty": float(lot.get("minOrderQty", "0.001")),
+                "max_mkt_qty": float(lot.get("maxMktOrderQty", lot.get("maxOrderQty", "0")) or "0"),
                 "tick_size": float(price.get("tickSize", "0.01")), "max_leverage": float(lev.get("maxLeverage", "1") or "1"),
             }
         return self.info_cache[symbol]
@@ -382,15 +391,24 @@ class ScaledExecutor:
         entry, stop = float(setup["entry"]), float(setup["stop"])
         unit_risk = entry - stop
         if unit_risk <= 0 or unit_risk / entry < MIN_STOP_DISTANCE_PCT:
-            return {"ok": False, "message": "stop distance too small"}
+            return {"ok": False, "message": f"stop distance {unit_risk / entry * 100:.3f}% < min {MIN_STOP_DISTANCE_PCT * 100:.3f}%"}
+        fee_per_unit = TAKER_FEE_RATE * (entry + stop)
+        if MAX_FEE_TO_RISK > 0 and fee_per_unit / unit_risk > MAX_FEE_TO_RISK:
+            return {"ok": False, "message": f"fees {fee_per_unit / unit_risk * 100:.0f}% of risk > max {MAX_FEE_TO_RISK * 100:.0f}%"}
         q_step, min_qty, tick = info["qty_step"], info["min_qty"], info["tick_size"]
+        max_mkt_qty = info.get("max_mkt_qty", 0.0)
         max_lev = max(info["max_leverage"], 1.0)
         equity = self._equity()
         if equity <= 0:
             return {"ok": False, "message": "invalid equity"}
         risk_usdt = equity * RISK_PCT if RISK_PCT > 0 else RISK_USDT
-        fee_per_unit = TAKER_FEE_RATE * (entry + stop)
         qty = floor_to_step(risk_usdt / (unit_risk + fee_per_unit), q_step)
+        if MAX_NOTIONAL_USDT > 0:
+            qty_cap = floor_to_step(MAX_NOTIONAL_USDT / entry, q_step)
+            if qty > qty_cap:
+                log.info("[%s] qty %s capped to %s by max notional %.0f USDT",
+                         symbol, qty_to_str(qty, q_step), qty_to_str(qty_cap, q_step), MAX_NOTIONAL_USDT)
+                qty = qty_cap
         if qty < min_qty:
             return {"ok": False, "message": f"risk too small for min qty ({qty} < {min_qty})"}
 
@@ -416,24 +434,44 @@ class ScaledExecutor:
                 if leg_qty <= 0:
                     break
             tp_price = round_to_step(price, tick)
-            try:
-                resp = self.http.place_order(
-                    category=CATEGORY, symbol=symbol, side="Buy", orderType="Market",
-                    qty=qty_to_str(leg_qty, q_step), takeProfit=str(tp_price), stopLoss=str(sl_price),
-                    tpslMode="Partial", tpOrderType="Market", slOrderType="Market",
-                    tpTriggerBy="LastPrice", slTriggerBy="LastPrice",
-                    positionIdx=self.long_idx, orderLinkId=f"{link}-L{i+1}")
-            except Exception as exc:
-                log.warning("[%s] bracket leg %d exception: %s", symbol, i + 1, exc)
+            # A single leg can exceed the symbol's per-order market max (Bybit ErrCode 10001).
+            # Split it into sub-orders each <= max_mkt_qty, all carrying the same SL/TP bracket;
+            # hedge mode aggregates them into the one positionIdx=1 long.
+            leg_placed = 0.0
+            leg_order_id = ""
+            leg_remaining = leg_qty
+            sub = 0
+            while leg_remaining >= min_qty:
+                chunk = leg_remaining
+                if max_mkt_qty > 0 and chunk > max_mkt_qty:
+                    chunk = floor_to_step(max_mkt_qty, q_step)
+                if chunk < min_qty:
+                    break
+                link_id = f"{link}-L{i+1}" if sub == 0 else f"{link}-L{i+1}s{sub}"
+                try:
+                    resp = self.http.place_order(
+                        category=CATEGORY, symbol=symbol, side="Buy", orderType="Market",
+                        qty=qty_to_str(chunk, q_step), takeProfit=str(tp_price), stopLoss=str(sl_price),
+                        tpslMode="Partial", tpOrderType="Market", slOrderType="Market",
+                        tpTriggerBy="LastPrice", slTriggerBy="LastPrice",
+                        positionIdx=self.long_idx, orderLinkId=link_id)
+                except Exception as exc:
+                    log.warning("[%s] bracket leg %d sub %d exception: %s", symbol, i + 1, sub, exc)
+                    break
+                if int(resp.get("retCode", -1)) != 0:
+                    log.warning("[%s] bracket leg %d sub %d rejected: %s %s", symbol, i + 1, sub,
+                                resp.get("retCode"), resp.get("retMsg"))
+                    break
+                if not leg_order_id:
+                    leg_order_id = str(resp.get("result", {}).get("orderId") or "")
+                leg_placed += chunk
+                leg_remaining = round(leg_remaining - chunk, 10)
+                sub += 1
+            if leg_placed <= 0:
                 continue
-            if int(resp.get("retCode", -1)) != 0:
-                log.warning("[%s] bracket leg %d rejected: %s %s", symbol, i + 1,
-                            resp.get("retCode"), resp.get("retMsg"))
-                continue
-            placed_qty += leg_qty
-            remaining = round(remaining - leg_qty, 10)
-            legs.append({"r": rs[i], "tp": tp_price, "qty": leg_qty,
-                         "order_id": str(resp.get("result", {}).get("orderId") or "")})
+            placed_qty += leg_placed
+            remaining = round(remaining - leg_placed, 10)
+            legs.append({"r": rs[i], "tp": tp_price, "qty": leg_placed, "order_id": leg_order_id})
 
         if placed_qty <= 0 or not legs:
             return {"ok": False, "message": "no bracket legs placed (all rejected)"}
@@ -604,6 +642,8 @@ class CapitulationSpringBot:
             f"Filter: sweep {SWEEP_LOOKBACK} bars, week&lt;{WEEK_FRAC_MAX}, funding_z&le;{FUNDING_Z_THR}",
             f"Exit: {'/'.join(str(int(r)) for r in TP_R)}R @ {'/'.join(str(int(p)) for p in TP_QTY_PCT)}% , stop-&gt;BE",
             f"Risk: <code>{RISK_PCT*100:.2f}% equity</code>  Max concurrent: <code>{MAX_CONCURRENT}</code>",
+            f"Guards: min stop <code>{MIN_STOP_DISTANCE_PCT*100:.2f}%</code>  max fee/risk <code>{MAX_FEE_TO_RISK*100:.0f}%</code>"
+            f"  max notional <code>{('%.0f USDT' % MAX_NOTIONAL_USDT) if MAX_NOTIONAL_USDT > 0 else 'none'}</code>",
         ])
 
     # ---- data
@@ -709,6 +749,7 @@ class CapitulationSpringBot:
             "default_risk_pct": RISK_PCT,
             "risk_config": {"risk_pct": RISK_PCT, "risk_usdt": RISK_USDT, "max_concurrent": MAX_CONCURRENT,
                             "taker_fee_rate": TAKER_FEE_RATE, "min_stop_distance_pct": MIN_STOP_DISTANCE_PCT,
+                            "max_fee_to_risk": MAX_FEE_TO_RISK, "max_notional_usdt": MAX_NOTIONAL_USDT,
                             "funding_z_thr": FUNDING_Z_THR, "sweep_lookback": SWEEP_LOOKBACK},
             "raw_signal": sd,
             "extra": {"direct_execution": execution, "spring_low": sd.get("spring_low"),

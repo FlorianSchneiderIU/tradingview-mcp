@@ -74,6 +74,7 @@ WS_STALE_SECONDS = int(os.environ.get("WOLFE_DCA_WS_STALE_SECONDS", "900"))
 WS_CHUNK      = int(os.environ.get("WOLFE_DCA_WS_CHUNK", "20"))   # symbols per WS shard
 HEARTBEAT_SECONDS = int(os.environ.get("WOLFE_DCA_HEARTBEAT_SECONDS", "3600"))
 DIAG_SECONDS  = int(os.environ.get("WOLFE_DCA_DIAG_SECONDS", "300"))   # feed-health diagnostic cadence
+RECONCILE_SECONDS = int(os.environ.get("WOLFE_DCA_RECONCILE_SECONDS", "120"))  # REST safety-net cadence
 
 LOG_DIR    = Path(os.environ.get("WOLFE_DCA_LOG_DIR", os.environ.get("LOG_DIR", "/app/logs")))
 LEDGER_PATH = Path(os.environ.get("WOLFE_DCA_LEDGER_PATH", str(LOG_DIR / "wolfe_dca_ledger.jsonl")))
@@ -479,6 +480,7 @@ class WolfeDcaBot:
         self._bars_seen = 0          # confirmed bars pushed -> evaluated
         self._candidates = 0         # detect_signal returned a (non-None) candidate
         self._rejected = 0           # candidates the gate rejected
+        self._reconciled = 0         # bars recovered by the REST safety-net (WS missed them)
 
     def start(self) -> None:
         log.info("Wolfe DCA bot: %d symbols, config=%s, exec=%s, max_concurrent=%d, risk=%.2f%%",
@@ -488,14 +490,15 @@ class WolfeDcaBot:
                             f"symbols=<code>{len(self.symbols)}</code>  exec=<code>{TRADING_ENABLED}</code> "
                             f"demo=<code>{TRADING_DEMO}</code>  max_open=<code>{MAX_CONCURRENT}</code>"])
         self._open_ws()
+        threading.Thread(target=self._rest_reconcile, name="wolfe-dca-reconcile", daemon=True).start()
         while not self.stop_event.is_set():
             now = time.time()
             if HEARTBEAT_SECONDS > 0 and now - self.last_heartbeat >= HEARTBEAT_SECONDS:
                 log.info("Heartbeat: open=%d/%d exec=%s", self.executor.open_count(), MAX_CONCURRENT, TRADING_ENABLED)
                 self.last_heartbeat = now
             if DIAG_SECONDS > 0 and now - self.last_diag >= DIAG_SECONDS:
-                log.info("Feed diag: bars_evaluated=%d candidates=%d rejected=%d (cumulative; last_ws %.0fs ago)",
-                         self._bars_seen, self._candidates, self._rejected, now - self.last_ws_ts)
+                log.info("Feed diag: bars_evaluated=%d (reconciled=%d) candidates=%d rejected=%d (cumulative; last_ws %.0fs ago)",
+                         self._bars_seen, self._reconciled, self._candidates, self._rejected, now - self.last_ws_ts)
                 self.last_diag = now
             if WS_STALE_SECONDS > 0 and now - self.last_ws_ts > WS_STALE_SECONDS:
                 raise SystemExit(f"No Bybit public WS message for {WS_STALE_SECONDS}s")
@@ -552,6 +555,43 @@ class WolfeDcaBot:
             threading.Thread(target=self._evaluate, args=(sym,), daemon=True).start()
         except Exception:
             log.exception("kline callback error")
+
+    def _rest_reconcile(self) -> None:
+        """Safety net for WS gaps / partial shard death: every RECONCILE_SECONDS pull the
+        latest closed 5m bars per symbol via REST and evaluate any the WS missed. The
+        global WS stale-watchdog can't catch a single dead shard (other shards keep
+        last_ws fresh), so without this most symbols can go dark silently. WS stays the
+        low-latency path; REST guarantees every symbol is evaluated on every closed bar."""
+        interval_ms = 5 * 60 * 1000
+        while not self.stop_event.is_set():
+            self.stop_event.wait(RECONCILE_SECONDS)
+            if self.stop_event.is_set():
+                break
+            now_ms = time.time() * 1000.0
+            for sym in self.symbols:
+                try:
+                    rows = self.public_http.get_kline(category=CATEGORY, symbol=sym,
+                                                      interval=INTERVAL_MIN, limit=3).get("result", {}).get("list", [])
+                except Exception:
+                    continue
+                for r in rows:
+                    try:
+                        ts = int(r[0])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    if now_ms < ts + interval_ms:          # skip the still-open candle
+                        continue
+                    key = f"{sym}:{ts}"
+                    if key in self.processed:
+                        continue
+                    bar = {"ts": ts, "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
+                           "close": float(r[4]), "volume": float(r[5])}
+                    self.states[sym].push_bar(bar)
+                    self.processed.add(key)
+                    self._bars_seen += 1
+                    self._reconciled += 1
+                    self._evaluate(sym)                    # serial within this bg thread
+                time.sleep(0.02)                            # be gentle on the REST endpoint
 
     def _evaluate(self, symbol: str) -> None:
         try:

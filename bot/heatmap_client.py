@@ -47,6 +47,12 @@ class HeatmapClient:
         """CMP, bias, nearest support/resistance, liquidation skew, vol imbalance, funding, OI."""
         return self._get(f"/v1/structure/{symbol.upper()}")
 
+    def setup(self, symbol: str) -> Optional[dict]:
+        """Actionable trade setup {side, entry, sl, tp1, tp2, rr1, confidence, ...} gated on
+        confluence + structure bias, or None if no valid setup right now."""
+        d = self._get(f"/v1/setup/{symbol.upper()}")
+        return d.get("setup") if d else None
+
     def levels(self, symbol: str, tf: str = "1h", window: str = "24h", n: int = 12) -> list[dict]:
         d = self._get(f"/v1/levels/{symbol.upper()}", {"tf": tf, "window": window, "n": n})
         return d.get("levels", []) if d else []

@@ -336,7 +336,7 @@ services:
       HEATMAP_API_PORT: "8110"
       HEATMAP_DB_PATH: /app/data/heatmap.db
       HEATMAP_CONFIG_PATH: /app/configs/heatmap_configs.json
-      HEATMAP_DEPTH: "200"
+      HEATMAP_DEPTH: "50"
       HEATMAP_SNAPSHOT_INTERVAL_SECONDS: "10"
       HEATMAP_RETENTION_HOURS: "168"
       LOG_DIR: /app/logs
@@ -423,6 +423,34 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  # ── Heatmap forward-test executor (STANDALONE — separate Bybit Demo account) ──
+  # Polls heatmap-bot /v1/setup for the universe and paper-trades valid setups (risk-sized
+  # market entry + native SL/TP bracket) on its OWN demo account (bot/.env.heatmap_demo).
+  # Records every trade to logs/heatmap_forward_ledger.jsonl for out-of-sample stats.
+  # Start with:  docker compose up -d --build heatmap-forward-bot
+  heatmap-forward-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    command: python heatmap_forward_bot.py
+    container_name: heatmap-forward-bot
+    restart: unless-stopped
+    profiles: ["forward"]          # opt-in; not started by a plain `up`
+    env_file:
+      - ./bot/.env.heatmap_demo    # SEPARATE demo account keys + risk settings
+    environment:
+      HEATMAP_API_URL: http://heatmap-bot:8110
+      LOG_DIR: /app/logs
+    depends_on:
+      - heatmap-bot
+    volumes:
+      - ./bot/logs:/app/logs       # shared: ledger readable by heatmap-telegram-bot (/forward)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 # Named volumes — persist across container rebuilds/restarts; survive `down`,
 # removed only by `docker compose down -v`.

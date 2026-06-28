@@ -8,6 +8,7 @@ bot/.env
 bot/.env.funded
 bot/.env.dca
 bot/.env.heatmap
+bot/.env.heatmap_demo
 bot/models/*.pkl
 scripts/current.pine
 scripts/.cache/

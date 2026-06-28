@@ -20,6 +20,7 @@ Access control: only HEATMAP_TG_ALLOWED_UIDS are served. Talks only to Telegram 
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import time
@@ -525,9 +526,11 @@ HELP = (
     "  /volume SYM [4h|24h|7d|daily|weekly]   volume footprint + profile (default 24h)\n"
     "  /levels SYM [tf]                key levels across all layers (text, ⭐ = confluence)\n"
     "  /structure SYM                  market-structure snapshot (bias, S/R, skew, funding, OI)\n"
+    "  /setup SYM                      actionable trade setup (entry/SL/TP, if confluence+bias align)\n"
     "  /cvd SYM [window]               price + cumulative volume delta (divergence flag)\n"
     "  /screener [liq|cvd|imbalance|volume]   rank the universe\n"
     "  /score                          predictive calibration / hit-rate history\n"
+    "  /forward                        forward-test results (demo account, if running)\n"
     "  /watch SYM · /unwatch SYM · /watches   proximity alerts for a coin\n"
     "  /coins                          list tracked universe\n"
     "\n"
@@ -688,6 +691,57 @@ def handle_text(chat_id: int, uid: int, text: str, message_id: int) -> None:
                  f"  vol imbalance 24h: {d.get('volume_imbalance')}  · CVD24h: {d.get('cvd_24h')}",
                  f"  funding: {d.get('funding_rate')}  · OI: ${oi:.0f}M"]
         return tg_send_message(chat_id, "\n".join(lines), reply_to=message_id)
+
+    if cmd == "setup":
+        sym_raw = parts[1] if len(parts) > 1 else None
+        if not sym_raw:
+            return tg_send_message(chat_id, "usage: /setup SYM", reply_to=message_id)
+        symbol = resolve_symbol(sym_raw)
+        if symbol is None:
+            return tg_send_message(chat_id, f"'{sym_raw}' is not tracked.", reply_to=message_id)
+        try:
+            d = requests.get(f"{API_URL}/v1/setup/{symbol}", timeout=HTTP_TIMEOUT).json()
+        except Exception as exc:  # noqa: BLE001
+            return tg_send_message(chat_id, f"setup error: {exc}", reply_to=message_id)
+        s = d.get("setup")
+        if not s:
+            px = d.get("last_price")
+            return tg_send_message(chat_id, f"{symbol}{(' '+format(px,'g')) if px else ''}: no setup — "
+                                   f"{d.get('reason', 'n/a')}", reply_to=message_id)
+        e, sl = s["entry"], s["sl"]
+        tps = f"TP1 {s['tp1']:g} ({(s['tp1']/e-1)*100:+.2f}%, {s['rr1']:.1f}R)"
+        if s.get("tp2"):
+            tps += f" · TP2 {s['tp2']:g} ({abs(s['tp2']-e)/s['R']:.1f}R)"
+        msg = (f"🎯 {symbol} {s['side']} setup @ {e:g}\n"
+               f"   SL {sl:g} ({(sl/e-1)*100:+.2f}%) · {tps}\n"
+               f"   conf {s['confidence']}/3 · [{s['types']}] x{s['layers']} · bias {s['bias']} · "
+               f"CVD {s['cvd_recent']:+g} · skew {s['skew']:+g}")
+        return tg_send_message(chat_id, msg, reply_to=message_id)
+
+    if cmd == "forward":
+        path = os.environ.get("HEATMAP_FWD_LEDGER_PATH", "/app/logs/heatmap_forward_ledger.jsonl")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                rows = [json.loads(l) for l in fh if l.strip()]
+        except FileNotFoundError:
+            return tg_send_message(chat_id, "No forward-test trades yet (ledger empty / bot not started).",
+                                   reply_to=message_id)
+        except Exception as exc:  # noqa: BLE001
+            return tg_send_message(chat_id, f"forward error: {exc}", reply_to=message_id)
+        closes = [r for r in rows if r.get("event") == "close"]
+        opens = [r for r in rows if r.get("event") == "open"]
+        wins = [r for r in closes if (r.get("r_multiple") or 0) > 0]
+        total_r = sum(r.get("r_multiple") or 0 for r in closes)
+        total_pnl = sum(r.get("pnl") or 0 for r in closes)
+        out = [f"Forward test — {len(closes)} closed, {len(opens) - len(closes)} open"]
+        if closes:
+            out.append(f"  win {len(wins)}/{len(closes)} = {100*len(wins)/len(closes):.0f}% · "
+                       f"total {total_r:+.1f}R (${total_pnl:+.2f}) · avg {total_r/len(closes):+.2f}R/trade")
+            out.append("  recent:")
+            for r in closes[-8:]:
+                out.append(f"    {r['symbol']} {r.get('side','')} {r.get('outcome','')} "
+                           f"{(r.get('r_multiple') or 0):+.2f}R (${(r.get('pnl') or 0):+.2f})")
+        return tg_send_message(chat_id, "\n".join(out), reply_to=message_id)
 
     if cmd == "screener":
         metric = parts[1].lower() if len(parts) > 1 else "liq"

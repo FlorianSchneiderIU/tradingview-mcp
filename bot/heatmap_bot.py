@@ -114,7 +114,7 @@ TESTNET = _cfg("testnet", "HEATMAP_TESTNET", False, _as_bool)
 
 # Layer 1 — order book
 OB_ENABLED = _cfg("orderbook_enabled", "HEATMAP_ORDERBOOK_ENABLED", True, _as_bool)
-OB_DEPTH = _cfg("depth", "HEATMAP_DEPTH", 200, int)
+OB_DEPTH = _cfg("depth", "HEATMAP_DEPTH", 50, int)  # 50 is plenty for the liquidity heatmap and far lighter than 200
 OB_WS_CHUNK = _cfg("ws_chunk", "HEATMAP_WS_CHUNK", 10, int)
 OB_SNAPSHOT_INTERVAL = _cfg("ob_snapshot_interval_seconds", "HEATMAP_OB_SNAPSHOT_INTERVAL_SECONDS", 10, int)
 OB_BIN_BPS = _cfg("ob_bin_bps", "HEATMAP_OB_BIN_BPS", 5.0, float)
@@ -230,6 +230,25 @@ WATCHDOG_ENABLED = _cfg("watchdog_enabled", "HEATMAP_WATCHDOG_ENABLED", True, _a
 WATCHDOG_STALE_S = _cfg("watchdog_stale_seconds", "HEATMAP_WATCHDOG_STALE_SECONDS", 120, int)
 WATCHDOG_COOLDOWN_S = _cfg("watchdog_cooldown_seconds", "HEATMAP_WATCHDOG_COOLDOWN_SECONDS", 600, int)
 
+# Actionable trade setups — entry/SL/TP are pinned to REAL structure (volume nodes,
+# value-area edges, order-book walls, liquidation clusters), never arbitrary % or ATR.
+# Trade size emerges from how the *significant* structure is spaced: enter at a significant
+# level, stop just beyond it, target the NEXT significant level. Swing vs scalp is set by
+# SETUP_WINDOW (level lookback) + SETUP_LEVEL_GAP_PCT (how coarse "significant" is).
+SETUP_ENABLED = _cfg("setup_enabled", "HEATMAP_SETUP_ENABLED", True, _as_bool)
+SETUP_MIN_LAYERS = _cfg("setup_min_layers", "HEATMAP_SETUP_MIN_LAYERS", 2, int)  # confluence for a "significant" level
+SETUP_TF = _cfg("setup_tf", "HEATMAP_SETUP_TF", "1h", str)              # tf for predictive magnets
+SETUP_WINDOW = _cfg("setup_window", "HEATMAP_SETUP_WINDOW", "7d", str)  # volume-profile window for S/R levels
+SETUP_PROX = _cfg("setup_prox_pct", "HEATMAP_SETUP_PROX_PCT", 0.008, float)  # how near a level to trigger entry
+SETUP_LEVEL_GAP_PCT = _cfg("setup_level_gap_pct", "HEATMAP_SETUP_LEVEL_GAP_PCT", 0.006, float)  # min spacing of significant levels
+SETUP_SL_BUF = _cfg("setup_sl_buffer", "HEATMAP_SETUP_SL_BUFFER", 0.003, float)  # buffer beyond the structural level
+SETUP_MIN_TP_PCT = _cfg("setup_min_tp_pct", "HEATMAP_SETUP_MIN_TP_PCT", 0.008, float)  # skip if next structure too close (scalp)
+SETUP_MIN_RR = _cfg("setup_min_rr", "HEATMAP_SETUP_MIN_RR", 1.0, float)
+SETUP_MAX_TP_R = _cfg("setup_max_tp_r", "HEATMAP_SETUP_MAX_TP_R", 6.0, float)  # cap a far target's R
+SETUP_MAX_STOP_PCT = _cfg("setup_max_stop_pct", "HEATMAP_SETUP_MAX_STOP_PCT", 0.05, float)  # reject absurd-risk setups
+# When true, proximity alerts fire ONLY when a valid setup exists (actionable-only, low noise).
+SETUP_ALERTS_ONLY = _cfg("setup_alerts_only", "HEATMAP_SETUP_ALERTS_ONLY", True, _as_bool)
+
 _STARTED_AT_MS = 0
 
 
@@ -241,6 +260,21 @@ def _fmt_price(p: Optional[float]) -> str:
     if p >= 1:
         return f"{p:,.4f}"
     return f"{p:.6f}"
+
+
+def format_setup(s: dict[str, Any]) -> str:
+    """Human-readable trade setup message."""
+    e, sl = s["entry"], s["sl"]
+    tps = f"TP1 {_fmt_price(s['tp1'])} ({(s['tp1']/e-1)*100:+.2f}%, {s['rr1']:.1f}R)"
+    if s.get("tp2"):
+        tps += f" · TP2 {_fmt_price(s['tp2'])} ({abs(s['tp2']-e)/s['R']:.1f}R)"
+    cvd_tag = "CVD+" if (s.get("cvd_recent") or 0) >= 0 else "CVD-"
+    skew = s.get("skew") or 0
+    skew_tag = "shorts-vuln" if skew < -0.05 else "longs-vuln" if skew > 0.05 else "balanced"
+    return (f"🎯 {s['symbol']} {s['side']} setup @ {_fmt_price(e)}\n"
+            f"   SL {_fmt_price(sl)} ({(sl/e-1)*100:+.2f}%) · {tps}\n"
+            f"   conf {s['confidence']}/3 · [{s['types']}] x{s['layers']} · "
+            f"bias {s['bias']} · {cvd_tag} · skew {skew_tag}")
 
 
 def tg_send(text: str, chat_ids: list[int]) -> None:
@@ -314,17 +348,22 @@ class MapState:
 
     def apply_candle(self, ts: int, high: float, low: float, close: float,
                      oi: Optional[float], turnover: float) -> None:
-        # 1) consume levels mark price traded through (relative to prior mark close)
+        # 1) consume levels mark price traded through — scan only the price bins the candle
+        #    crossed (O(crossed bins)), not every alive level (O(alive)), so backfill/updates
+        #    stay cheap and don't starve the WS threads of the GIL.
         if self.prev_close is not None:
-            dn_lo, dn_hi = low, self.prev_close      # longs liquidate as price falls
-            up_lo, up_hi = self.prev_close, high      # shorts liquidate as price rises
-            for key, lvl in list(self.alive.items()):
-                p = bin_low(lvl.bin_idx)
-                if (lvl.side == "long" and dn_lo <= p <= dn_hi) or \
-                   (lvl.side == "short" and up_lo <= p <= up_hi):
-                    lvl.consumed_ts = ts
-                    self.closed.append(lvl)
-                    del self.alive[key]
+            if low < self.prev_close:  # longs liquidate as price falls through [low, prev_close]
+                for idx in range(bin_index(low), bin_index(self.prev_close) + 1):
+                    lvl = self.alive.pop(("long", idx), None)
+                    if lvl is not None:
+                        lvl.consumed_ts = ts
+                        self.closed.append(lvl)
+            if high > self.prev_close:  # shorts liquidate as price rises through [prev_close, high]
+                for idx in range(bin_index(self.prev_close), bin_index(high) + 1):
+                    lvl = self.alive.pop(("short", idx), None)
+                    if lvl is not None:
+                        lvl.consumed_ts = ts
+                        self.closed.append(lvl)
 
         # 2) size newly opened / closed positions from ΔOI (preferred) or turnover
         new_notional = 0.0
@@ -385,9 +424,8 @@ class HeatmapService:
         self.state_lock = threading.Lock()
         self.stop = threading.Event()
 
-        # Layer 1
-        self.books: dict[str, Book] = {}
-        self.ob_subscribed: set[str] = set()
+        # Layer 1 (order book via REST polling)
+        self.last_ob_write_ms = 0  # for the watchdog
         # Layer 2
         self.liq_buffer: deque[tuple] = deque(maxlen=100_000)
         self.liq_subscribed: set[str] = set()
@@ -406,7 +444,9 @@ class HeatmapService:
         self.alpha: list[float] = _prior_alpha()   # Dirichlet pseudo-counts
         self.last_event_ts: int = 0
 
-        self.ws: Optional[WebSocket] = None
+        # Separate WS connections per stream type (orderbook is REST-polled, not WS)
+        self.ws_trade: Optional[WebSocket] = None
+        self.ws_liq: Optional[WebSocket] = None
         self._ob_db: Optional[sqlite3.Connection] = None
         self._pred_db: Optional[sqlite3.Connection] = None
         self._liq_db: Optional[sqlite3.Connection] = None
@@ -534,8 +574,6 @@ class HeatmapService:
         with self.state_lock:
             self.universe = symbols
             self.universe_meta = meta
-            for s in symbols:
-                self.books.setdefault(s, Book())
 
         conn = self._connect()
         try:
@@ -551,82 +589,75 @@ class HeatmapService:
         return symbols
 
     # ── websockets (L1 + L2) ──────────────────────────────────────────────────--
-    def start_ws(self) -> None:
-        if self.ws is None:
-            # ping_timeout=None stops the "ping/pong timed out" reconnect flapping
-            self.ws = WebSocket(testnet=TESTNET, channel_type=CATEGORY, ping_timeout=None)
+    @staticmethod
+    def _new_ws() -> WebSocket:
+        # Real ping_timeout so pybit DETECTS a dead/half-open socket and auto-reconnects +
+        # resubscribes (it stores subscriptions). A generous 15s tolerates brief CPU bursts
+        # without false flapping, now that each stream is on its own light connection.
+        return WebSocket(testnet=TESTNET, channel_type=CATEGORY, ping_interval=20, ping_timeout=15)
+
+    @staticmethod
+    def _close_ws(ws: Optional[WebSocket]) -> None:
+        if ws is None:
+            return
+        try:
+            ex = getattr(ws, "exit", None)
+            if ex:
+                ex()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _sub_trades(self, symbols: list[str]) -> None:
+        if self.ws_trade is None:
+            self.ws_trade = self._new_ws()
+        tstream = getattr(self.ws_trade, "trade_stream", None)
+        if tstream is None:
+            log.warning("pybit has no trade_stream — Layer 4 (volume profile) disabled")
+            return
+        pending = [s for s in symbols if s not in self.vp_subscribed]
+        for sym in pending:
+            try:
+                tstream(symbol=sym, callback=self._on_trade)
+                self.vp_subscribed.add(sym)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("trade subscribe failed %s: %s", sym, exc)
+        if pending:
+            log.info("L4 subscribed publicTrade for %d symbols", len(pending))
+
+    def _sub_liq(self, symbols: list[str]) -> None:
+        if self.ws_liq is None:
+            self.ws_liq = self._new_ws()
+        stream = getattr(self.ws_liq, "all_liquidation_stream", None) or getattr(self.ws_liq, "liquidation_stream", None)
+        if stream is None:
+            log.warning("pybit has no (all_)liquidation_stream — Layer 2 disabled")
+            return
+        pending = [s for s in symbols if s not in self.liq_subscribed]
+        for sym in pending:
+            try:
+                stream(symbol=sym, callback=self._on_liquidation)
+                self.liq_subscribed.add(sym)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("liquidation subscribe failed %s: %s", sym, exc)
+        if pending:
+            log.info("L2 subscribed liquidation for %d symbols", len(pending))
 
     def subscribe_ws(self) -> None:
-        self.start_ws()
+        # Orderbook (Layer 1) is REST-polled in ob_loop; only trades + liquidations use WS.
         with self.state_lock:
             symbols = list(self.universe)
-        if OB_ENABLED:
-            pending = [s for s in symbols if s not in self.ob_subscribed]
-            for i in range(0, len(pending), OB_WS_CHUNK):
-                chunk = pending[i:i + OB_WS_CHUNK]
-                try:
-                    self.ws.orderbook_stream(OB_DEPTH, chunk, self._on_orderbook)
-                    self.ob_subscribed.update(chunk)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("orderbook subscribe failed %s: %s", chunk, exc)
-            if pending:
-                log.info("L1 subscribed orderbook.%d for %d symbols", OB_DEPTH, len(pending))
-        if LIQ_ENABLED:
-            stream = getattr(self.ws, "all_liquidation_stream", None) or getattr(self.ws, "liquidation_stream", None)
-            if stream is None:
-                log.warning("pybit has no (all_)liquidation_stream — Layer 2 disabled")
-                return
-            pending = [s for s in symbols if s not in self.liq_subscribed]
-            for sym in pending:
-                try:
-                    stream(symbol=sym, callback=self._on_liquidation)
-                    self.liq_subscribed.add(sym)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("liquidation subscribe failed %s: %s", sym, exc)
-            if pending:
-                log.info("L2 subscribed %s for %d symbols", getattr(stream, "__name__", "liquidation"), len(pending))
         if VP_ENABLED:
-            tstream = getattr(self.ws, "trade_stream", None)
-            if tstream is None:
-                log.warning("pybit has no trade_stream — Layer 4 (volume profile) disabled")
-            else:
-                pending = [s for s in symbols if s not in self.vp_subscribed]
-                for sym in pending:
-                    try:
-                        tstream(symbol=sym, callback=self._on_trade)
-                        self.vp_subscribed.add(sym)
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("trade subscribe failed %s: %s", sym, exc)
-                if pending:
-                    log.info("L4 subscribed publicTrade for %d symbols", len(pending))
+            self._sub_trades(symbols)
+        if LIQ_ENABLED:
+            self._sub_liq(symbols)
 
-    def _on_orderbook(self, msg: dict[str, Any]) -> None:
-        data = msg.get("data") or {}
-        symbol = data.get("s")
-        book = self.books.get(symbol) if symbol else None
-        if book is None:
-            return
-        ts = int(msg.get("ts") or now_ms())
-        with book.lock:
-            if msg.get("type") == "snapshot":
-                book.bids = {float(p): (float(s), ts) for p, s in data.get("b", []) if float(s) > 0}
-                book.asks = {float(p): (float(s), ts) for p, s in data.get("a", []) if float(s) > 0}
-            else:
-                for p, s in data.get("b", []):
-                    price, size = float(p), float(s)
-                    if size <= 0:
-                        book.bids.pop(price, None)
-                    else:
-                        prev = book.bids.get(price)
-                        book.bids[price] = (size, prev[1] if prev else ts)
-                for p, s in data.get("a", []):
-                    price, size = float(p), float(s)
-                    if size <= 0:
-                        book.asks.pop(price, None)
-                    else:
-                        prev = book.asks.get(price)
-                        book.asks[price] = (size, prev[1] if prev else ts)
-            book.last_update_ms = ts
+    def reconnect(self, kind: str) -> None:
+        """Tear down and re-establish a single stream's WS connection (close old first)."""
+        with self.state_lock:
+            symbols = list(self.universe)
+        if kind == "trades":
+            self._close_ws(self.ws_trade); self.ws_trade = None; self.vp_subscribed.clear(); self._sub_trades(symbols)
+        elif kind == "liq":
+            self._close_ws(self.ws_liq); self.ws_liq = None; self.liq_subscribed.clear(); self._sub_liq(symbols)
 
     def _on_liquidation(self, msg: dict[str, Any]) -> None:
         rows = msg.get("data") or []
@@ -824,9 +855,15 @@ class HeatmapService:
                 "bid_total": bid_tot, "ask_total": ask_tot, "bins": rows}
 
     def ob_loop(self) -> None:
+        """Layer 1 via REST polling (not WS): for a heatmap we only snapshot every few
+        seconds, so polling get_orderbook is far lighter than maintaining 19 live delta
+        books and can't overwhelm a reader thread. The spoof/lifetime filter becomes
+        'level present across consecutive polls' (>= OB_MIN_LIFETIME_S)."""
         self._ob_db = self._connect()
-        cycle = 0
+        http = HTTP(testnet=TESTNET)  # dedicated client so polling can't contend with other threads' HTTP
+        seen: dict[str, dict[tuple, int]] = {}  # symbol -> {(side, price): first_seen_ms}
         min_life_ms = OB_MIN_LIFETIME_S * 1000.0
+        cycle = 0
         while not self.stop.is_set():
             start = time.time()
             with self.state_lock:
@@ -834,16 +871,31 @@ class HeatmapService:
             ts = now_ms()
             written = 0
             for symbol in symbols:
-                book = self.books.get(symbol)
-                if book is None:
-                    continue
-                with book.lock:
-                    if not book.bids or not book.asks:
-                        continue
-                    # lifetime/persistence filter: drop levels younger than the threshold (spoofs)
-                    bids = [(p, sz) for p, (sz, seen) in book.bids.items() if ts - seen >= min_life_ms]
-                    asks = [(p, sz) for p, (sz, seen) in book.asks.items() if ts - seen >= min_life_ms]
                 try:
+                    resp = http.get_orderbook(category=CATEGORY, symbol=symbol, limit=OB_DEPTH)
+                    res = resp.get("result", {}) or {}
+                    raw_b = res.get("b", []) or []
+                    raw_a = res.get("a", []) or []
+                    if not raw_b or not raw_a:
+                        continue
+                    sm = seen.setdefault(symbol, {})
+                    present: set[tuple] = set()
+                    bids, asks = [], []
+                    for side, raw, out in (("b", raw_b, bids), ("a", raw_a, asks)):
+                        for p, s in raw:
+                            p = float(p); s = float(s)
+                            if s <= 0:
+                                continue
+                            k = (side, p)
+                            present.add(k)
+                            fs = sm.get(k)
+                            if fs is None:
+                                sm[k] = fs = ts
+                            if ts - fs >= min_life_ms:  # rested across >=1 prior poll
+                                out.append((p, s))
+                    for k in list(sm):  # forget levels no longer in the book
+                        if k not in present:
+                            del sm[k]
                     agg = self._ob_aggregate(symbol, bids, asks)
                     if agg is None:
                         continue
@@ -862,7 +914,8 @@ class HeatmapService:
                         )
                     written += 1
                 except Exception:  # noqa: BLE001
-                    log.exception("ob snapshot failed for %s", symbol)
+                    log.exception("ob poll failed for %s", symbol)
+                self.stop.wait(0.03)  # pace REST calls
             try:
                 if cycle % 30 == 0:
                     cutoff = now_ms() - OB_RETENTION_HOURS * 3600_000
@@ -873,6 +926,8 @@ class HeatmapService:
                     self._ob_db.execute("PRAGMA wal_checkpoint(PASSIVE)")
             except Exception:  # noqa: BLE001
                 log.exception("ob commit failed")
+            if written:
+                self.last_ob_write_ms = now_ms()
             cycle += 1
             self.stop.wait(max(0.5, OB_SNAPSHOT_INTERVAL - (time.time() - start)))
 
@@ -1691,6 +1746,91 @@ class HeatmapService:
         out.sort(key=keyf, reverse=True)
         return {"success": True, "metric": metric, "count": len(out), "results": out[:n]}
 
+    @staticmethod
+    def _significant_levels(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse the raw confluence levels into SPACED, significant structure: keep the
+        strongest level in each ~SETUP_LEVEL_GAP_PCT neighbourhood, confluence >= MIN_LAYERS
+        (i.e. agreed by volume/OB/liq). These are the real S/R shelves trades anchor to."""
+        cands = sorted([L for L in levels if L.get("price") and L.get("layers", 1) >= SETUP_MIN_LAYERS],
+                       key=lambda L: -L.get("score", 0))
+        chosen: list[dict[str, Any]] = []
+        for L in cands:
+            if all(abs(L["price"] / c["price"] - 1) > SETUP_LEVEL_GAP_PCT for c in chosen):
+                chosen.append(L)
+        return sorted(chosen, key=lambda L: L["price"])
+
+    # ── actionable trade setup — entry/SL/TP pinned to volume/OB/liq structure ────
+    def setup(self, symbol: str) -> dict[str, Any]:
+        if not SETUP_ENABLED:
+            return {"success": True, "symbol": symbol, "setup": None, "reason": "disabled"}
+        st = self.structure(symbol)
+        price = st.get("last_price")
+        if not price:
+            return {"success": True, "symbol": symbol, "setup": None, "reason": "no price"}
+        tf = SETUP_TF if SETUP_TF in TIMEFRAMES else "1h"
+        lv = self.levels(symbol, tf, SETUP_WINDOW, n=40)
+        sig = self._significant_levels(lv.get("levels", []))
+        if len(sig) < 2:
+            return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                    "reason": "not enough significant structure"}
+        # entry: the significant level we're reacting at (nearest within the trigger band)
+        near = [L for L in sig if abs(L["price"] / price - 1) <= SETUP_PROX]
+        if not near:
+            return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                    "reason": f"no significant level within {SETUP_PROX*100:.1f}%"}
+        L = min(near, key=lambda x: abs(x["price"] / price - 1))
+        Lp = L["price"]
+        side = "LONG" if Lp <= price else "SHORT"
+        bias = st.get("bias")
+        cvd_recent = st.get("cvd_recent_12h", 0.0)
+        skew = (st.get("liquidation_skew") or {}).get("skew", 0.0)
+        if side == "LONG" and bias == "bearish":
+            return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                    "reason": "counter-trend (bearish bias)"}
+        if side == "SHORT" and bias == "bullish":
+            return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                    "reason": "counter-trend (bullish bias)"}
+
+        prices = [s["price"] for s in sig]
+        if side == "LONG":
+            # SL just below the structural level we're bouncing from; TPs = next significant levels above
+            sl = Lp * (1 - SETUP_SL_BUF); R = price - sl
+            ups = [p for p in prices if p > price * 1.0005]
+            if not ups:
+                return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                        "reason": "no significant level above to target"}
+            tp1, tp2 = ups[0], (ups[1] if len(ups) > 1 else None)
+            tp1 = min(tp1, price + SETUP_MAX_TP_R * R)
+        else:
+            sl = Lp * (1 + SETUP_SL_BUF); R = sl - price
+            dns = [p for p in prices if p < price * 0.9995]
+            if not dns:
+                return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                        "reason": "no significant level below to target"}
+            tp1, tp2 = dns[-1], (dns[-2] if len(dns) > 1 else None)
+            tp1 = max(tp1, price - SETUP_MAX_TP_R * R)
+
+        if R <= 0 or R / price > SETUP_MAX_STOP_PCT:
+            return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                    "reason": "stop invalid / too wide"}
+        if abs(tp1 - price) / price < SETUP_MIN_TP_PCT:
+            return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                    "reason": f"next structure only {abs(tp1-price)/price*100:.2f}% away (too scalpy)"}
+        rr1 = abs(tp1 - price) / R
+        if rr1 < SETUP_MIN_RR:
+            return {"success": True, "symbol": symbol, "last_price": price, "setup": None,
+                    "reason": f"reward/risk {rr1:.1f} < {SETUP_MIN_RR}"}
+        conf = 1  # base: significant confluence + bias-aligned
+        if (side == "LONG" and cvd_recent >= 0) or (side == "SHORT" and cvd_recent <= 0):
+            conf += 1
+        if (side == "LONG" and skew <= 0) or (side == "SHORT" and skew >= 0):
+            conf += 1
+        setup = {"symbol": symbol, "side": side, "entry": round(price, 8), "sl": round(sl, 8),
+                 "tp1": round(tp1, 8), "tp2": round(tp2, 8) if tp2 else None, "R": R, "rr1": round(rr1, 2),
+                 "level": round(Lp, 8), "types": ",".join(L["types"]), "layers": L["layers"],
+                 "bias": bias, "cvd_recent": round(cvd_recent, 2), "skew": round(skew, 3), "confidence": conf}
+        return {"success": True, "symbol": symbol, "last_price": price, "setup": setup}
+
     # ── watch subscriptions (for proximity alerts) ────────────────────────────────
     def set_watch(self, uid: int, symbol: str, add: bool) -> dict[str, Any]:
         conn = self._connect()
@@ -1768,43 +1908,54 @@ class HeatmapService:
                         continue
                     same_zone = parked is not None and abs(cur["price"] / parked - 1) <= PROX_PCT * 0.5
                     if same_zone:
-                        continue  # already alerted for this zone; wait until price leaves & returns
-                    prox_zone[key] = cur["price"]
+                        continue  # already handled this zone; wait until price leaves & returns
+                    prox_zone[key] = cur["price"]  # park so we don't re-evaluate every cycle while camped
                     if now - last_prox.get(key, 0) < PROX_COOLDOWN_S * 1000:
                         continue  # cooldown floor against rapid zone-hopping
-                    d = (cur["price"] / price - 1) * 100
-                    verb = "at" if abs(d) < 0.05 else "approaching"
-                    tg_send(f"🎯 {w['symbol']} {price:g} {verb} {_fmt_price(cur['price'])} "
-                            f"({d:+.2f}%) [{','.join(cur['types'])}] x{cur['layers']}", [w["uid"]])
-                    last_prox[key] = now
+                    # Prefer an actionable setup (≥N-layer confluence + bias-aligned + decent RR).
+                    s = self.setup(w["symbol"])
+                    setup = s.get("setup") if s else None
+                    if setup:
+                        tg_send(format_setup(setup), [w["uid"]])
+                        last_prox[key] = now
+                    elif not SETUP_ALERTS_ONLY:
+                        d = (cur["price"] / price - 1) * 100
+                        verb = "at" if abs(d) < 0.05 else "approaching"
+                        tg_send(f"🎯 {w['symbol']} {price:g} {verb} {_fmt_price(cur['price'])} "
+                                f"({d:+.2f}%) [{','.join(cur['types'])}] x{cur['layers']} — no clean setup", [w["uid"]])
+                        last_prox[key] = now
+                    # else: in actionable-only mode, stay silent (no valid setup at this zone)
                 except Exception:  # noqa: BLE001
                     log.exception("proximity alert failed %s", w["symbol"])
 
     def watchdog_loop(self) -> None:
-        last_alert = 0
+        last_alert: dict[str, int] = {}  # per-stream alert cooldown
         while not self.stop.is_set():
             self.stop.wait(max(15, WATCHDOG_STALE_S // 2))
             if self.stop.is_set():
                 return
             now = now_ms()
-            stale = []
-            if OB_ENABLED:
-                fresh = max((b.last_update_ms for b in self.books.values() if b.last_update_ms), default=0)
-                if fresh and now - fresh > WATCHDOG_STALE_S * 1000:
-                    stale.append(f"orderbook {int((now-fresh)/1000)}s")
-            if VP_ENABLED and self.last_trade_ms and now - self.last_trade_ms > WATCHDOG_STALE_S * 1000:
-                stale.append(f"trades {int((now-self.last_trade_ms)/1000)}s")
-            if stale and now - last_alert > WATCHDOG_COOLDOWN_S * 1000:
-                msg = "⚠️ heatmap-bot stream stale: " + ", ".join(stale) + " — reconnecting WS"
-                log.warning(msg)
-                tg_send(msg, ADMIN_UIDS)
-                last_alert = now
-                try:  # force a fresh WS connection + resubscribe
-                    self.ws = None
-                    self.ob_subscribed.clear(); self.liq_subscribed.clear(); self.vp_subscribed.clear()
-                    self.subscribe_ws()
-                except Exception:  # noqa: BLE001
-                    log.exception("watchdog resubscribe failed")
+            checks = []  # (kind, desc, reconnectable) — baseline on startup so never-delivered is caught
+            if VP_ENABLED:  # trades = WebSocket -> reconnect on stall
+                base = self.last_trade_ms or _STARTED_AT_MS
+                if now - base > WATCHDOG_STALE_S * 1000:
+                    checks.append(("trades", f"trades {int((now-base)/1000)}s", True))
+            if OB_ENABLED:  # orderbook = REST poll loop -> alert only (it self-heals/logs)
+                base = self.last_ob_write_ms or _STARTED_AT_MS
+                if now - base > WATCHDOG_STALE_S * 1000:
+                    checks.append(("ob", f"orderbook-poll {int((now-base)/1000)}s", False))
+            for kind, desc, reconnectable in checks:
+                if now - last_alert.get(kind, 0) <= WATCHDOG_COOLDOWN_S * 1000:
+                    continue
+                last_alert[kind] = now
+                log.warning("stream stale: %s%s", desc, " — reconnecting" if reconnectable else "")
+                tg_send(f"⚠️ heatmap-bot stream stale: {desc}"
+                        + (" — reconnecting" if reconnectable else ""), ADMIN_UIDS)
+                if reconnectable:
+                    try:
+                        self.reconnect(kind)
+                    except Exception:  # noqa: BLE001
+                        log.exception("watchdog reconnect failed for %s", kind)
 
 
 # ── REST server ─────────────────────────────────────────────────────────────--
@@ -1875,6 +2026,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             # Market-structure snapshot, CVD series, cross-symbol screener
             if len(parts) == 3 and parts[0] == "v1" and parts[1] == "structure":
                 return self._send_json(HTTPStatus.OK, svc.structure(parts[2].upper()))
+            if len(parts) == 3 and parts[0] == "v1" and parts[1] == "setup":
+                return self._send_json(HTTPStatus.OK, svc.setup(parts[2].upper()))
             if len(parts) == 3 and parts[0] == "v1" and parts[1] == "cvd":
                 window = (qs.get("window", ["24h"])[0] or "24h").strip()
                 payload = svc.cvd(parts[2].upper(), window)
@@ -1964,7 +2117,7 @@ def main() -> None:
     service.load_weights()  # apply persisted Dirichlet weights from a previous calibration, if any
     try:
         service.resolve_universe()
-        if OB_ENABLED or LIQ_ENABLED:
+        if OB_ENABLED or LIQ_ENABLED or VP_ENABLED:
             service.subscribe_ws()
     except Exception:  # noqa: BLE001
         log.exception("initial setup failed; background loops will retry")

@@ -18,7 +18,7 @@
   "universe_size": 50,
 
   "orderbook_enabled": true,
-  "depth": 200,
+  "depth": 50,
   "ob_snapshot_interval_seconds": 10,
   "ob_bin_bps": 5.0,
   "ob_range_pct": 0.02,
@@ -67,6 +67,19 @@
   "proximity_exit_factor": 1.8,
   "watchdog_enabled": true,
   "watchdog_stale_seconds": 120,
+
+  "setup_enabled": true,
+  "setup_min_layers": 2,
+  "setup_tf": "1h",
+  "setup_window": "7d",
+  "setup_prox_pct": 0.008,
+  "setup_level_gap_pct": 0.006,
+  "setup_sl_buffer": 0.003,
+  "setup_min_tp_pct": 0.008,
+  "setup_min_rr": 1.0,
+  "setup_max_tp_r": 6.0,
+  "setup_max_stop_pct": 0.05,
+  "setup_alerts_only": true,
 
   "api_host": "0.0.0.0",
   "api_port": 8110,
