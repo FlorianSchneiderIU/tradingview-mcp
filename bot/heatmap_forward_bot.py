@@ -55,7 +55,12 @@ COOLDOWN_S = int(os.environ.get("HEATMAP_FWD_COOLDOWN_SECONDS", "1800"))
 MIN_STOP_PCT = float(os.environ.get("HEATMAP_FWD_MIN_STOP_PCT", "0.0015"))
 # Move the runner's stop to breakeven once TP1 fills (makes the TP2 leg risk-free).
 BREAKEVEN = os.environ.get("HEATMAP_FWD_BREAKEVEN", "true").lower() in {"1", "true", "yes"}
-BE_OFFSET_PCT = float(os.environ.get("HEATMAP_FWD_BE_OFFSET_PCT", "0.0008"))  # nudge past entry to cover fees
+# Taker fee per side (Bybit linear default = 0.055%). Entry + BE-stop exit are both market = taker,
+# so a true breakeven stop must clear the FULL round-trip (2x) or it books a guaranteed fee loss.
+TAKER_FEE_PCT = float(os.environ.get("HEATMAP_FWD_TAKER_FEE_PCT", "0.00055"))
+# Extra cushion past the fee-covered breakeven (for funding accrual + market-stop slippage).
+BE_OFFSET_PCT = float(os.environ.get("HEATMAP_FWD_BE_OFFSET_PCT", "0.0004"))  # cushion ON TOP of round-trip fees
+BE_COVER_PCT = 2 * TAKER_FEE_PCT + BE_OFFSET_PCT  # total distance past entry: round-trip taker + cushion
 # Pyramiding: add a tranche on a later same-direction signal (each its own partial bracket).
 # Same-direction adds aggregate into one Bybit position, so we track an "episode" (symbol+side).
 MAX_TRANCHES = int(os.environ.get("HEATMAP_FWD_MAX_TRANCHES", "3"))
@@ -363,55 +368,119 @@ class ForwardBot:
         tg(f"{'✅' if pnl > 0 else '❌'} FWD CLOSE {symbol} {ep['side']} {outcome} — "
            f"pnl ${pnl:.2f} ({r_mult:+.2f}R, {len(ep.get('tranches', []))} tranches)")
 
-    def _move_to_breakeven(self, key: str, ep: dict[str, Any], cur_size: float, avg_price: float) -> None:
-        """Once any TP fills (aggregate size drops), move the whole remaining position's stop to
-        breakeven on the position's AVERAGE entry price (+fee offset), staying in PARTIAL mode.
-        Cancel only the SL legs; the partial TP conditionals keep running."""
+    def _sl_orders(self, symbol: str, idx: int) -> list[dict[str, Any]]:
+        try:
+            oo = self.http.get_open_orders(category=CATEGORY, symbol=symbol).get("result", {}).get("list", [])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] get_open_orders failed: %s", symbol, exc)
+            return []
+        return [o for o in oo if "stoploss" in str(o.get("stopOrderType", "")).lower()
+                and int(o.get("positionIdx", 0)) == idx]
+
+    def _move_to_breakeven(self, key: str, ep: dict[str, Any], cur_size: float, avg_price: float,
+                           mark: float) -> None:
+        """Once any TP fills (aggregate size drops while IN PROFIT), move the remaining position's
+        stop to breakeven on the AVG entry (+fee offset), staying PARTIAL. Set the new stop FIRST,
+        and only cancel the old SL legs once it's confirmed — never leave the position naked. Skip
+        entirely if the position is underwater (BE on the wrong side of mark = a tranche SL fill,
+        not a TP fill)."""
         symbol = ep["symbol"]
         info = self._info(symbol)
         tick, q_step = info["tick"], info["qty_step"]
         side, idx = ep["side"], ep["idx"]
         base = avg_price if avg_price > 0 else ep["tranches"][0]["entry"]
-        be = base * (1 + BE_OFFSET_PCT) if side == "LONG" else base * (1 - BE_OFFSET_PCT)
-        try:
-            oo = self.http.get_open_orders(category=CATEGORY, symbol=symbol).get("result", {}).get("list", [])
-            for o in oo:
-                if "stoploss" in str(o.get("stopOrderType", "")).lower() and int(o.get("positionIdx", 0)) == idx:
-                    try:
-                        self.http.cancel_order(category=CATEGORY, symbol=symbol, orderId=o.get("orderId"))
-                    except Exception:  # noqa: BLE001
-                        pass
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[%s] BE: list/cancel SL orders failed: %s", symbol, exc)
+        be = base * (1 + BE_COVER_PCT) if side == "LONG" else base * (1 - BE_COVER_PCT)
+        if mark and ((side == "LONG" and be >= mark) or (side == "SHORT" and be <= mark)):
+            return  # underwater: not a real TP fill — keep the structural stops untouched
+        # 1) set the new BE stop FIRST (position stays protected by the old SLs until this confirms)
         try:
             self.http.set_trading_stop(category=CATEGORY, symbol=symbol, tpslMode="Partial",
                                        stopLoss=str(round_to_step(be, tick)), slSize=qty_str(cur_size, q_step),
                                        slTriggerBy="MarkPrice", positionIdx=idx)
-            ep["be_done"] = True
-            self._save_state()
-            append_ledger({"event": "breakeven", "symbol": symbol, "side": side, "be": round(be, 8),
-                           "avg_price": round(base, 8), "remaining": cur_size, "ts": now_ms()})
-            log.info("BE %s %s -> partial stop %.6g @ avg %.6g (remaining %s)", symbol, side, be, base, cur_size)
-            tg(f"🟦 FWD BE {symbol} {side} — stop -> breakeven {be:g} (avg entry) after first TP")
         except Exception as exc:  # noqa: BLE001
-            log.warning("[%s] BE set_trading_stop failed (will retry): %s", symbol, exc)
+            log.warning("[%s] BE set_trading_stop failed (old stops kept, will retry): %s", symbol, exc)
+            return
+        # 2) only now cancel the OLD SL legs (those not at the BE price)
+        be_rounded = round_to_step(be, tick)
+        for o in self._sl_orders(symbol, idx):
+            try:
+                if abs(float(o.get("triggerPrice", 0) or 0) - be_rounded) > tick * 0.5:
+                    self.http.cancel_order(category=CATEGORY, symbol=symbol, orderId=o.get("orderId"))
+            except Exception:  # noqa: BLE001
+                pass
+        ep["be_done"] = True
+        self._save_state()
+        append_ledger({"event": "breakeven", "symbol": symbol, "side": side, "be": round(be, 8),
+                       "avg_price": round(base, 8), "remaining": cur_size, "ts": now_ms()})
+        log.info("BE %s %s -> partial stop %.6g @ avg %.6g (remaining %s)", symbol, side, be, base, cur_size)
+        tg(f"🟦 FWD BE {symbol} {side} — stop -> breakeven {be:g} (avg entry) after first TP")
+
+    def _reprotect_naked(self, ep: dict[str, Any], cur_size: float, mark: float) -> None:
+        """Safety net: a tracked live position has NO stop. Re-apply a protective stop at the
+        episode's structural level; if that level is already breached, close the position (it
+        overstayed its stop). Prevents naked positions from any failure path."""
+        symbol, side, idx = ep["symbol"], ep["side"], ep["idx"]
+        tick = self._info(symbol)["tick"]
+        sls = [t["sl"] for t in ep.get("tranches", []) if t.get("sl")]
+        prot = (min(sls) if side == "LONG" else max(sls)) if sls else None
+        if prot and ((side == "LONG" and prot < mark) or (side == "SHORT" and prot > mark)):
+            try:
+                self.http.set_trading_stop(category=CATEGORY, symbol=symbol, tpslMode="Full",
+                                           stopLoss=str(round_to_step(prot, tick)), slTriggerBy="MarkPrice",
+                                           positionIdx=idx)
+                log.warning("RE-PROTECT %s %s naked -> stop %.6g", symbol, side, prot)
+                tg(f"🛡 FWD re-protected naked {symbol} {side} — stop {prot:g}")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[%s] re-protect failed: %s", symbol, exc)
+        else:  # stop already breached -> close (it should have stopped out)
+            close = "Sell" if side == "LONG" else "Buy"
+            try:
+                self.http.place_order(category=CATEGORY, symbol=symbol, side=close, orderType="Market",
+                                      qty=qty_str(cur_size, self._info(symbol)["qty_step"]),
+                                      reduceOnly=True, positionIdx=idx)
+                log.warning("CLOSE-NAKED %s %s (stop breached, no protection) size %s", symbol, side, cur_size)
+                tg(f"⚠️ FWD closed naked {symbol} {side} (stop breached) — size {cur_size}")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[%s] close-naked failed: %s", symbol, exc)
+
+    def _all_open_orders(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        cursor, guard = None, 0
+        while guard < 15:
+            guard += 1
+            kw: dict[str, Any] = {"category": CATEGORY, "settleCoin": "USDT", "limit": 50}
+            if cursor:
+                kw["cursor"] = cursor
+            res = self.http.get_open_orders(**kw).get("result", {}) or {}
+            out += res.get("list", []) or []
+            cursor = res.get("nextPageCursor")
+            if not cursor:
+                break
+        return out
 
     def sync(self) -> None:
         try:
             rows = self.http.get_positions(category=CATEGORY, settleCoin="USDT").get("result", {}).get("list", [])
+            oo = self._all_open_orders()
         except Exception as exc:  # noqa: BLE001
-            log.warning("get_positions failed: %s", exc)
+            log.warning("get_positions/orders failed: %s", exc)
             return
         live = {(r.get("symbol"), int(r.get("positionIdx", 0))): r
                 for r in rows if float(r.get("size", 0) or 0) > 0}
+        have_sl = {(o.get("symbol"), int(o.get("positionIdx", 0)))
+                   for o in oo if "stoploss" in str(o.get("stopOrderType", "")).lower()}
         for key in list(self.open):
             ep = self.open[key]
             row = live.get((ep["symbol"], ep["idx"]))
-            size = float(row.get("size", 0) or 0) if row else 0.0
-            if size <= 0:
+            if not row or float(row.get("size", 0) or 0) <= 0:
                 self._record_close(key)
+                continue
+            size = float(row["size"])
+            mark = float(row.get("markPrice", 0) or row.get("avgPrice", 0) or 0)
+            if (ep["symbol"], ep["idx"]) not in have_sl:        # naked -> protect or close
+                self._reprotect_naked(ep, size, mark)
             elif BREAKEVEN and not ep.get("be_done") and ep.get("total_qty") and size < ep["total_qty"] * 0.99:
-                self._move_to_breakeven(key, ep, size, float(row.get("avgPrice", 0) or 0))
+                self._move_to_breakeven(key, ep, size, float(row.get("avgPrice", 0) or 0), mark)
 
     # ── main loop ────────────────────────────────────────────────────────────────
     def run(self) -> None:
